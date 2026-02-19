@@ -293,54 +293,93 @@ def upload_file():
 
 @app.route('/api/process', methods=['POST'])
 def process_podcast():
+    @app.route('/api/process', methods=['POST'])
+def process_podcast():
     """Process podcast episode with AI agents"""
     try:
+        print("=" * 80)
+        print("PROCESSING REQUEST RECEIVED")
+        print("=" * 80)
+        
         data = request.json
+        print(f"Request data: {data}")
+        
         filename = data.get('filename')
         requirements = data.get('requirements', {})
         custom_instructions = data.get('customInstructions', '')
         
+        print(f"Filename: {filename}")
+        print(f"Requirements: {requirements}")
+        
         if not filename:
+            print("ERROR: No filename provided")
             return jsonify({"error": "No filename provided"}), 400
         
         filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+        print(f"Looking for file at: {filepath}")
         
         if not os.path.exists(filepath):
-            return jsonify({"error": "File not found"}), 404
+            print(f"ERROR: File not found at {filepath}")
+            return jsonify({"error": f"File not found: {filename}"}), 404
         
         # Check API keys
         if not ASSEMBLYAI_API_KEY or not CLAUDE_API_KEY:
+            print("ERROR: API keys not configured")
             return jsonify({"error": "API keys not configured"}), 500
+        
+        print("API keys verified")
         
         # Create job ID
         job_id = datetime.now().strftime('%Y%m%d_%H%M%S')
         job_output_dir = os.path.join(OUTPUT_FOLDER, job_id)
         os.makedirs(job_output_dir, exist_ok=True)
+        print(f"Created output directory: {job_output_dir}")
         
         # Step 1: Upload to AssemblyAI
-        audio_url = upload_to_assemblyai(filepath)
+        print("Step 1: Uploading to AssemblyAI...")
+        try:
+            audio_url = upload_to_assemblyai(filepath)
+            print(f"Upload successful: {audio_url}")
+        except Exception as e:
+            print(f"ERROR during upload: {str(e)}")
+            return jsonify({"error": f"Upload failed: {str(e)}"}), 500
         
         # Step 2: Transcribe
-        transcript_data = transcribe_audio(audio_url)
+        print("Step 2: Transcribing audio...")
+        try:
+            transcript_data = transcribe_audio(audio_url)
+            print(f"Transcription complete. Duration: {transcript_data.get('audio_duration')}ms")
+        except Exception as e:
+            print(f"ERROR during transcription: {str(e)}")
+            return jsonify({"error": f"Transcription failed: {str(e)}"}), 500
         
         # Save transcript
         transcript_path = os.path.join(job_output_dir, "transcript.json")
         with open(transcript_path, "w") as f:
             json.dump(transcript_data, f, indent=2)
+        print(f"Saved transcript to: {transcript_path}")
         
         # Step 3: Analyze with Claude
-        edit_analysis = analyze_transcript_with_claude(
-            transcript_data,
-            requirements,
-            custom_instructions
-        )
+        print("Step 3: Analyzing with Claude...")
+        try:
+            edit_analysis = analyze_transcript_with_claude(
+                transcript_data,
+                requirements,
+                custom_instructions
+            )
+            print(f"Analysis complete. Generated {len(edit_analysis['edit_decisions'])} edit decisions")
+        except Exception as e:
+            print(f"ERROR during Claude analysis: {str(e)}")
+            return jsonify({"error": f"Analysis failed: {str(e)}"}), 500
         
         # Save edit decisions
         edit_decisions_path = os.path.join(job_output_dir, "edit_decisions.json")
         with open(edit_decisions_path, "w") as f:
             json.dump(edit_analysis, f, indent=2)
+        print(f"Saved edit decisions to: {edit_decisions_path}")
         
         # Step 4: Generate report
+        print("Step 4: Generating report...")
         report = generate_edit_report(
             filename,
             transcript_data,
@@ -351,9 +390,15 @@ def process_podcast():
         report_path = os.path.join(job_output_dir, "edit_report.txt")
         with open(report_path, "w") as f:
             f.write(report)
+        print(f"Saved report to: {report_path}")
         
         # Clean up uploaded file
+        print(f"Cleaning up uploaded file: {filepath}")
         os.remove(filepath)
+        
+        print("=" * 80)
+        print("PROCESSING COMPLETE!")
+        print("=" * 80)
         
         return jsonify({
             "success": True,
@@ -368,8 +413,12 @@ def process_podcast():
         })
         
     except Exception as e:
+        print("=" * 80)
+        print(f"FATAL ERROR: {str(e)}")
+        print("=" * 80)
+        import traceback
+        traceback.print_exc()
         return jsonify({"error": str(e)}), 500
-
 
 @app.route('/api/download/<job_id>/<file_type>', methods=['GET'])
 def download_file(job_id, file_type):

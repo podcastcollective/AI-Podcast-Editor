@@ -43,6 +43,7 @@ def allowed_file(filename):
 
 def upload_to_assemblyai(audio_file_path):
     """Upload audio file to AssemblyAI and return upload URL"""
+    print(f"📤 Uploading to AssemblyAI: {audio_file_path}")
     headers = {"authorization": ASSEMBLYAI_API_KEY}
     
     with open(audio_file_path, "rb") as f:
@@ -53,13 +54,16 @@ def upload_to_assemblyai(audio_file_path):
         )
     
     if response.status_code == 200:
-        return response.json()["upload_url"]
+        upload_url = response.json()["upload_url"]
+        print(f"✅ Upload successful: {upload_url}")
+        return upload_url
     else:
         raise Exception(f"Upload failed: {response.status_code} - {response.text}")
 
 
 def transcribe_audio(audio_url):
     """Transcribe audio using AssemblyAI with speaker detection"""
+    print("🎙️  Starting transcription...")
     headers = {
         "authorization": ASSEMBLYAI_API_KEY,
         "content-type": "application/json"
@@ -79,6 +83,8 @@ def transcribe_audio(audio_url):
     )
     
     transcript_id = response.json()["id"]
+    print(f"📝 Transcription job created: {transcript_id}")
+    
     polling_url = f"https://api.assemblyai.com/v2/transcript/{transcript_id}"
     
     # Poll for completion
@@ -87,15 +93,18 @@ def transcribe_audio(audio_url):
         status = response.json()["status"]
         
         if status == "completed":
+            print("✅ Transcription complete!")
             return response.json()
         elif status == "error":
             raise Exception(f"Transcription failed: {response.json()['error']}")
         
+        print(f"⏳ Status: {status}... waiting 5 seconds")
         time.sleep(5)
 
 
 def analyze_transcript_with_claude(transcript_data, requirements, custom_instructions=""):
     """Use Claude to analyze transcript and generate intelligent edit decisions"""
+    print("🤖 Analyzing transcript with Claude...")
     client = anthropic.Anthropic(api_key=CLAUDE_API_KEY)
     
     # Extract utterances
@@ -169,6 +178,7 @@ Return ONLY the JSON array, no other text."""
         else:
             raise Exception("Could not parse Claude's response as JSON")
     
+    print(f"✅ Generated {len(edit_decisions)} edit decisions")
     return {
         "edit_decisions": edit_decisions,
         "analysis_timestamp": datetime.now().isoformat()
@@ -266,15 +276,22 @@ def index():
 @app.route('/api/upload', methods=['POST'])
 def upload_file():
     """Handle file upload"""
+    print("=" * 80)
+    print("UPLOAD REQUEST RECEIVED")
+    print("=" * 80)
+    
     if 'file' not in request.files:
+        print("ERROR: No file in request")
         return jsonify({"error": "No file provided"}), 400
     
     file = request.files['file']
     
     if file.filename == '':
+        print("ERROR: Empty filename")
         return jsonify({"error": "No file selected"}), 400
     
     if not allowed_file(file.filename):
+        print(f"ERROR: File type not allowed: {file.filename}")
         return jsonify({"error": "File type not allowed. Use MP3, WAV, M4A, AAC, or OGG"}), 400
     
     # Save file
@@ -284,6 +301,9 @@ def upload_file():
     filepath = os.path.join(app.config['UPLOAD_FOLDER'], unique_filename)
     file.save(filepath)
     
+    print(f"✅ File saved: {filepath}")
+    print(f"File size: {os.path.getsize(filepath)} bytes")
+    
     return jsonify({
         "success": True,
         "filename": unique_filename,
@@ -292,8 +312,6 @@ def upload_file():
 
 
 @app.route('/api/process', methods=['POST'])
-def process_podcast():
-    @app.route('/api/process', methods=['POST'])
 def process_podcast():
     """Process podcast episode with AI agents"""
     try:
@@ -327,59 +345,67 @@ def process_podcast():
             print("ERROR: API keys not configured")
             return jsonify({"error": "API keys not configured"}), 500
         
-        print("API keys verified")
+        print("✅ API keys verified")
         
         # Create job ID
         job_id = datetime.now().strftime('%Y%m%d_%H%M%S')
         job_output_dir = os.path.join(OUTPUT_FOLDER, job_id)
         os.makedirs(job_output_dir, exist_ok=True)
-        print(f"Created output directory: {job_output_dir}")
+        print(f"✅ Created output directory: {job_output_dir}")
         
         # Step 1: Upload to AssemblyAI
-        print("Step 1: Uploading to AssemblyAI...")
+        print("\n" + "=" * 80)
+        print("STEP 1: UPLOADING TO ASSEMBLYAI")
+        print("=" * 80)
         try:
             audio_url = upload_to_assemblyai(filepath)
-            print(f"Upload successful: {audio_url}")
+            print(f"✅ Upload successful: {audio_url}")
         except Exception as e:
-            print(f"ERROR during upload: {str(e)}")
+            print(f"❌ ERROR during upload: {str(e)}")
             return jsonify({"error": f"Upload failed: {str(e)}"}), 500
         
         # Step 2: Transcribe
-        print("Step 2: Transcribing audio...")
+        print("\n" + "=" * 80)
+        print("STEP 2: TRANSCRIBING AUDIO")
+        print("=" * 80)
         try:
             transcript_data = transcribe_audio(audio_url)
-            print(f"Transcription complete. Duration: {transcript_data.get('audio_duration')}ms")
+            print(f"✅ Transcription complete. Duration: {transcript_data.get('audio_duration')}ms")
         except Exception as e:
-            print(f"ERROR during transcription: {str(e)}")
+            print(f"❌ ERROR during transcription: {str(e)}")
             return jsonify({"error": f"Transcription failed: {str(e)}"}), 500
         
         # Save transcript
         transcript_path = os.path.join(job_output_dir, "transcript.json")
         with open(transcript_path, "w") as f:
             json.dump(transcript_data, f, indent=2)
-        print(f"Saved transcript to: {transcript_path}")
+        print(f"✅ Saved transcript to: {transcript_path}")
         
         # Step 3: Analyze with Claude
-        print("Step 3: Analyzing with Claude...")
+        print("\n" + "=" * 80)
+        print("STEP 3: ANALYZING WITH CLAUDE")
+        print("=" * 80)
         try:
             edit_analysis = analyze_transcript_with_claude(
                 transcript_data,
                 requirements,
                 custom_instructions
             )
-            print(f"Analysis complete. Generated {len(edit_analysis['edit_decisions'])} edit decisions")
+            print(f"✅ Analysis complete. Generated {len(edit_analysis['edit_decisions'])} edit decisions")
         except Exception as e:
-            print(f"ERROR during Claude analysis: {str(e)}")
+            print(f"❌ ERROR during Claude analysis: {str(e)}")
             return jsonify({"error": f"Analysis failed: {str(e)}"}), 500
         
         # Save edit decisions
         edit_decisions_path = os.path.join(job_output_dir, "edit_decisions.json")
         with open(edit_decisions_path, "w") as f:
             json.dump(edit_analysis, f, indent=2)
-        print(f"Saved edit decisions to: {edit_decisions_path}")
+        print(f"✅ Saved edit decisions to: {edit_decisions_path}")
         
         # Step 4: Generate report
-        print("Step 4: Generating report...")
+        print("\n" + "=" * 80)
+        print("STEP 4: GENERATING REPORT")
+        print("=" * 80)
         report = generate_edit_report(
             filename,
             transcript_data,
@@ -390,15 +416,15 @@ def process_podcast():
         report_path = os.path.join(job_output_dir, "edit_report.txt")
         with open(report_path, "w") as f:
             f.write(report)
-        print(f"Saved report to: {report_path}")
+        print(f"✅ Saved report to: {report_path}")
         
         # Clean up uploaded file
-        print(f"Cleaning up uploaded file: {filepath}")
+        print(f"\n🗑️  Cleaning up uploaded file: {filepath}")
         os.remove(filepath)
         
-        print("=" * 80)
-        print("PROCESSING COMPLETE!")
-        print("=" * 80)
+        print("\n" + "=" * 80)
+        print("✅ PROCESSING COMPLETE!")
+        print("=" * 80 + "\n")
         
         return jsonify({
             "success": True,
@@ -413,12 +439,13 @@ def process_podcast():
         })
         
     except Exception as e:
-        print("=" * 80)
-        print(f"FATAL ERROR: {str(e)}")
+        print("\n" + "=" * 80)
+        print(f"❌ FATAL ERROR: {str(e)}")
         print("=" * 80)
         import traceback
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
+
 
 @app.route('/api/download/<job_id>/<file_type>', methods=['GET'])
 def download_file(job_id, file_type):
@@ -453,5 +480,9 @@ def status():
 
 
 if __name__ == '__main__':
+    # Enable detailed logging
+    import logging
+    logging.basicConfig(level=logging.DEBUG)
+    
     # For development
     app.run(host='0.0.0.0', port=5000, debug=True)

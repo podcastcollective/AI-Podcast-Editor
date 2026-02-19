@@ -244,26 +244,107 @@
                 }
             };
 
-            const startProcessing = () => {
-                setIsProcessing(true);
-                setCompletedAgents([]);
-                setCurrentAgent(null);
-                setActiveTab('processing');
+        const API_URL = 'https://ai-podcast-editor-production.up.railway.app';
 
-                agents.forEach((agent, index) => {
-                    setTimeout(() => {
-                        setCurrentAgent(agent.id);
-                        setTimeout(() => {
-                            setCompletedAgents(prev => [...prev, agent.id]);
-                            if (index === agents.length - 1) {
-                                setCurrentAgent(null);
-                                setIsProcessing(false);
-                                setProcessingComplete(true);
-                            }
-                        }, 3000);
-                    }, index * 3500);
-                });
-            };
+const startProcessing = async () => {
+    if (!file) {
+        alert('Please upload a file first');
+        return;
+    }
+    
+    setIsProcessing(true);
+    setCompletedAgents([]);
+    setCurrentAgent(null);
+    setActiveTab('processing');
+
+    try {
+        // Agent 1: Upload and Transcribe
+        setCurrentAgent('audio-analysis');
+        
+        const formData = new FormData();
+        formData.append('file', file);
+        
+        console.log('Uploading file...');
+        const uploadRes = await fetch(`${API_URL}/api/upload`, {
+            method: 'POST',
+            body: formData
+        });
+        
+        if (!uploadRes.ok) {
+            throw new Error('Upload failed');
+        }
+        
+        const uploadData = await uploadRes.json();
+        console.log('Upload successful:', uploadData);
+        
+        if (!uploadData.success) {
+            throw new Error('Upload failed: ' + (uploadData.error || 'Unknown error'));
+        }
+        
+        // Mark audio analysis complete
+        setCompletedAgents(['audio-analysis']);
+        await new Promise(resolve => setTimeout(resolve, 500));
+        
+        // Agent 2: Content Editor (processing happens on backend)
+        setCurrentAgent('content-editor');
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        setCompletedAgents(['audio-analysis', 'content-editor']);
+        
+        // Agent 3: Audio Engineer (processing happens on backend)
+        setCurrentAgent('audio-engineer');
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        setCompletedAgents(['audio-analysis', 'content-editor', 'audio-engineer']);
+        
+        // Agent 4: QA + Process
+        setCurrentAgent('qa-agent');
+        console.log('Processing podcast...');
+        
+        const processRes = await fetch(`${API_URL}/api/process`, {
+            method: 'POST',
+            headers: { 
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                filename: uploadData.filename,
+                requirements: {
+                    removeFillerWords: requirements.removeFillerWords,
+                    removeLongPauses: requirements.removeLongPauses,
+                    normalizeAudio: requirements.normalizeAudio,
+                    removeBackgroundNoise: requirements.removeBackgroundNoise,
+                    targetLength: requirements.targetLength
+                },
+                customInstructions: requirements.customInstructions
+            })
+        });
+        
+        if (!processRes.ok) {
+            const errorData = await processRes.json();
+            throw new Error(errorData.error || 'Processing failed');
+        }
+        
+        const processData = await processRes.json();
+        console.log('Processing complete:', processData);
+        
+        if (!processData.success) {
+            throw new Error('Processing failed: ' + (processData.error || 'Unknown error'));
+        }
+        
+        // All done!
+        setCompletedAgents(['audio-analysis', 'content-editor', 'audio-engineer', 'qa-agent']);
+        setCurrentAgent(null);
+        setIsProcessing(false);
+        setProcessingComplete(true);
+        
+        alert('Processing complete! Check the Review tab.');
+        
+    } catch (error) {
+        console.error('Error:', error);
+        alert('Processing failed: ' + error.message + '\n\nCheck the browser console for details.');
+        setIsProcessing(false);
+        setCurrentAgent(null);
+        setCompletedAgents([]);
+    }
+};
 
             const getAgentStatus = (agentId) => {
                 if (completedAgents.includes(agentId)) return 'completed';

@@ -76,13 +76,25 @@ def transcribe_audio(audio_url):
         "format_text": True,
     }
     
+    print(f"Sending transcription request with config: {transcription_config}")
     response = requests.post(
         "https://api.assemblyai.com/v2/transcript",
         json=transcription_config,
         headers=headers
     )
     
-    transcript_id = response.json()["id"]
+    print(f"Transcription API response status: {response.status_code}")
+    print(f"Transcription API response: {response.text}")
+    
+    if response.status_code != 200:
+        raise Exception(f"Transcription request failed: {response.status_code} - {response.text}")
+    
+    response_data = response.json()
+    
+    if 'id' not in response_data:
+        raise Exception(f"No 'id' in response. Full response: {response_data}")
+    
+    transcript_id = response_data["id"]
     print(f"📝 Transcription job created: {transcript_id}")
     
     polling_url = f"https://api.assemblyai.com/v2/transcript/{transcript_id}"
@@ -96,11 +108,10 @@ def transcribe_audio(audio_url):
             print("✅ Transcription complete!")
             return response.json()
         elif status == "error":
-            raise Exception(f"Transcription failed: {response.json()['error']}")
+            raise Exception(f"Transcription failed: {response.json().get('error', 'Unknown error')}")
         
         print(f"⏳ Status: {status}... waiting 5 seconds")
         time.sleep(5)
-
 
 def analyze_transcript_with_claude(transcript_data, requirements, custom_instructions=""):
     """Use Claude to analyze transcript and generate intelligent edit decisions"""

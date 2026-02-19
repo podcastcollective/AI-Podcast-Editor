@@ -1,0 +1,734 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Podcast Editor - Production Ready</title>
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState } = React;
+
+        // Icons
+        const Upload = () => (
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                <polyline points="17 8 12 3 7 8"></polyline>
+                <line x1="12" y1="3" x2="12" y2="15"></line>
+            </svg>
+        );
+
+        const PlayCircle = () => (
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="12" cy="12" r="10"></circle>
+                <polygon points="10 8 16 12 10 16 10 8"></polygon>
+            </svg>
+        );
+
+        const CheckCircle = () => (
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path>
+                <polyline points="22 4 12 14.01 9 11.01"></polyline>
+            </svg>
+        );
+
+        const AlertCircle = () => (
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="12" cy="12" r="10"></circle>
+                <line x1="12" y1="8" x2="12" y2="12"></line>
+                <line x1="12" y1="16" x2="12.01" y2="16"></line>
+            </svg>
+        );
+
+        const Clock = () => (
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="12" cy="12" r="10"></circle>
+                <polyline points="12 6 12 12 16 14"></polyline>
+            </svg>
+        );
+
+        const FileAudio = () => (
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M17.5 22h.5a2 2 0 0 0 2-2V7l-5-5H6a2 2 0 0 0-2 2v3"></path>
+                <polyline points="14 2 14 8 20 8"></polyline>
+                <path d="M10 20v-1a2 2 0 1 1 4 0v1a2 2 0 1 1-4 0Z"></path>
+                <path d="M6 20v-1a2 2 0 1 0-4 0v1a2 2 0 1 0 4 0Z"></path>
+                <path d="M2 19v-3a6 6 0 0 1 12 0v3"></path>
+            </svg>
+        );
+
+        const Sparkles = () => (
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z"></path>
+                <path d="M5 3v4"></path>
+                <path d="M19 17v4"></path>
+                <path d="M3 5h4"></path>
+                <path d="M17 19h4"></path>
+            </svg>
+        );
+
+        const Volume2 = () => (
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon>
+                <path d="M15.54 8.46a5 5 0 0 1 0 7.07"></path>
+                <path d="M19.07 4.93a10 10 0 0 1 0 14.14"></path>
+            </svg>
+        );
+
+        const Scissors = () => (
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="6" cy="6" r="3"></circle>
+                <circle cx="6" cy="18" r="3"></circle>
+                <line x1="20" y1="4" x2="8.12" y2="15.88"></line>
+                <line x1="14.47" y1="14.48" x2="20" y2="20"></line>
+                <line x1="8.12" y1="8.12" x2="12" y2="12"></line>
+            </svg>
+        );
+
+        const Zap = () => (
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon>
+            </svg>
+        );
+
+        const User = () => (
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"></path>
+                <circle cx="12" cy="7" r="4"></circle>
+            </svg>
+        );
+
+        const Download = () => (
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                <polyline points="7 10 12 15 17 10"></polyline>
+                <line x1="12" y1="15" x2="12" y2="3"></line>
+            </svg>
+        );
+
+        const Eye = () => (
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path>
+                <circle cx="12" cy="12" r="3"></circle>
+            </svg>
+        );
+
+        const DollarSign = () => (
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <line x1="12" y1="1" x2="12" y2="23"></line>
+                <path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"></path>
+            </svg>
+        );
+
+        const FileText = () => (
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                <polyline points="14 2 14 8 20 8"></polyline>
+                <line x1="16" y1="13" x2="8" y2="13"></line>
+                <line x1="16" y1="17" x2="8" y2="17"></line>
+                <polyline points="10 9 9 9 8 9"></polyline>
+            </svg>
+        );
+
+        function PodcastEditor() {
+            const [activeTab, setActiveTab] = useState('upload');
+            const [file, setFile] = useState(null);
+            const [requirements, setRequirements] = useState({
+                removeFillerWords: true,
+                removeLongPauses: true,
+                normalizeAudio: true,
+                addIntroOutro: false,
+                removeBackgroundNoise: true,
+                targetLength: '',
+                customInstructions: ''
+            });
+            const [isProcessing, setIsProcessing] = useState(false);
+            const [currentAgent, setCurrentAgent] = useState(null);
+            const [completedAgents, setCompletedAgents] = useState([]);
+            const [processingComplete, setProcessingComplete] = useState(false);
+
+            const agents = [
+                {
+                    id: 'audio-analysis',
+                    name: 'Audio Analysis Agent',
+                    icon: Volume2,
+                    description: 'Transcribes and analyzes audio quality',
+                    integration: 'AssemblyAI + Descript API',
+                    tasks: [
+                        'Transcribe via AssemblyAI (99% accuracy)',
+                        'Speaker diarization (identify hosts/guests)',
+                        'Detect silence periods > 2 seconds',
+                        'Flag filler words with confidence scores',
+                        'Audio quality analysis (noise floor, clipping)',
+                        'Generate timestamped edit decision list'
+                    ],
+                    color: 'bg-blue-500',
+                    cost: '$0.25'
+                },
+                {
+                    id: 'content-editor',
+                    name: 'Content Editor Agent',
+                    icon: Scissors,
+                    description: 'Makes intelligent editing decisions',
+                    integration: 'Claude API + Custom Logic',
+                    tasks: [
+                        'Analyze client requirements checklist',
+                        'Remove excessive filler words (preserve natural speech)',
+                        'Intelligent pause trimming (1-1.5s)',
+                        'Identify off-topic tangents for review',
+                        'Preserve comedic timing and emphasis',
+                        'Generate edit rationale document'
+                    ],
+                    color: 'bg-purple-500',
+                    cost: '$0.15'
+                },
+                {
+                    id: 'audio-engineer',
+                    name: 'Audio Engineering Agent',
+                    icon: Zap,
+                    description: 'Applies professional audio processing',
+                    integration: 'Auphonic + Cleanvoice APIs',
+                    tasks: [
+                        'Loudness normalization (-16 LUFS)',
+                        'AI noise reduction via Cleanvoice',
+                        'Dynamic range compression',
+                        'EQ optimization for voice clarity',
+                        'Crossfade generation at cuts',
+                        'Final mixdown and export'
+                    ],
+                    color: 'bg-green-500',
+                    cost: '$0.30'
+                },
+                {
+                    id: 'qa-agent',
+                    name: 'Quality Assurance Agent',
+                    icon: CheckCircle,
+                    description: 'Validates edits meet standards',
+                    integration: 'Claude API + Audio Analysis',
+                    tasks: [
+                        'Verify all client requirements met',
+                        'Detect jarring cuts or artifacts',
+                        'Validate natural speech flow',
+                        'Check target length compliance',
+                        'Technical QA (levels, format, metadata)',
+                        'Generate human review checklist'
+                    ],
+                    color: 'bg-orange-500',
+                    cost: '$0.10'
+                }
+            ];
+
+            const mockEditDecisions = [
+                { time: '00:02:34', type: 'Remove Filler', content: 'Removed "um, uh" (3 instances)', confidence: 95 },
+                { time: '00:05:12', type: 'Trim Pause', content: 'Reduced 4.2s pause to 1.5s', confidence: 100 },
+                { time: '00:08:45', type: 'Remove Filler', content: 'Removed "you know" filler', confidence: 92 },
+                { time: '00:12:23', type: 'Keep Pause', content: 'Preserved 3s pause (comedic timing)', confidence: 88 },
+                { time: '00:15:56', type: 'Noise Reduction', content: 'Reduced background hum -18dB', confidence: 97 },
+                { time: '00:19:10', type: 'Remove Filler', content: 'Removed "like" (2 instances)', confidence: 94 },
+                { time: '00:23:45', type: 'Trim Pause', content: 'Reduced 5.8s silence to 1.2s', confidence: 100 },
+                { time: '00:28:30', type: 'Level Adjustment', content: 'Normalized guest audio +3dB', confidence: 99 }
+            ];
+
+            const handleFileUpload = (e) => {
+                const uploadedFile = e.target.files[0];
+                if (uploadedFile && uploadedFile.type.includes('audio')) {
+                    setFile(uploadedFile);
+                    setProcessingComplete(false);
+                    setCompletedAgents([]);
+                }
+            };
+
+            const startProcessing = () => {
+                setIsProcessing(true);
+                setCompletedAgents([]);
+                setCurrentAgent(null);
+                setActiveTab('processing');
+
+                agents.forEach((agent, index) => {
+                    setTimeout(() => {
+                        setCurrentAgent(agent.id);
+                        setTimeout(() => {
+                            setCompletedAgents(prev => [...prev, agent.id]);
+                            if (index === agents.length - 1) {
+                                setCurrentAgent(null);
+                                setIsProcessing(false);
+                                setProcessingComplete(true);
+                            }
+                        }, 3000);
+                    }, index * 3500);
+                });
+            };
+
+            const getAgentStatus = (agentId) => {
+                if (completedAgents.includes(agentId)) return 'completed';
+                if (currentAgent === agentId) return 'processing';
+                return 'pending';
+            };
+
+            const totalAICost = agents.reduce((sum, agent) => sum + parseFloat(agent.cost.replace('$', '')), 0);
+            const traditionalCost = 45;
+            const savings = ((1 - totalAICost / traditionalCost) * 100).toFixed(0);
+
+            return (
+                <div className="min-h-screen bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900 p-6">
+                    <div className="max-w-7xl mx-auto">
+                        <div className="text-center mb-8">
+                            <div className="flex items-center justify-center gap-3 mb-3">
+                                <Sparkles />
+                                <h1 className="text-4xl font-bold text-white">AI Podcast Editor Pro</h1>
+                            </div>
+                            <p className="text-purple-200">Multi-Agent Workflow • Human-Verified Quality • Real Tool Integration</p>
+                        </div>
+
+                        <div className="bg-white/10 backdrop-blur-lg rounded-t-2xl border-t border-x border-white/20">
+                            <div className="flex gap-1 p-2">
+                                <button
+                                    onClick={() => setActiveTab('upload')}
+                                    className={`flex-1 py-3 px-6 rounded-lg font-semibold transition-all ${
+                                        activeTab === 'upload' 
+                                            ? 'bg-purple-500 text-white' 
+                                            : 'text-purple-200 hover:bg-white/5'
+                                    }`}
+                                >
+                                    <Upload className="w-4 h-4 inline mr-2" />
+                                    Upload
+                                </button>
+                                <button
+                                    onClick={() => setActiveTab('processing')}
+                                    className={`flex-1 py-3 px-6 rounded-lg font-semibold transition-all ${
+                                        activeTab === 'processing' 
+                                            ? 'bg-purple-500 text-white' 
+                                            : 'text-purple-200 hover:bg-white/5'
+                                    }`}
+                                >
+                                    <Zap className="w-4 h-4 inline mr-2" />
+                                    Processing
+                                </button>
+                                <button
+                                    onClick={() => setActiveTab('review')}
+                                    disabled={!processingComplete}
+                                    className={`flex-1 py-3 px-6 rounded-lg font-semibold transition-all ${
+                                        activeTab === 'review' 
+                                            ? 'bg-purple-500 text-white' 
+                                            : processingComplete ? 'text-purple-200 hover:bg-white/5' : 'text-purple-400/50 cursor-not-allowed'
+                                    }`}
+                                >
+                                    <Eye className="w-4 h-4 inline mr-2" />
+                                    Review
+                                </button>
+                                <button
+                                    onClick={() => setActiveTab('costs')}
+                                    className={`flex-1 py-3 px-6 rounded-lg font-semibold transition-all ${
+                                        activeTab === 'costs' 
+                                            ? 'bg-purple-500 text-white' 
+                                            : 'text-purple-200 hover:bg-white/5'
+                                    }`}
+                                >
+                                    <DollarSign className="w-4 h-4 inline mr-2" />
+                                    Costs
+                                </button>
+                            </div>
+                        </div>
+
+                        <div className="bg-white/10 backdrop-blur-lg rounded-b-2xl border-b border-x border-white/20 p-8 min-h-[600px]">
+                            
+                            {activeTab === 'upload' && (
+                                <div>
+                                    <h2 className="text-2xl font-semibold text-white mb-6">Upload Episode</h2>
+                                    
+                                    <div className="border-2 border-dashed border-purple-400/50 rounded-xl p-8 text-center mb-6 bg-white/5 hover:bg-white/10 transition-all cursor-pointer">
+                                        <input
+                                            type="file"
+                                            accept="audio/*"
+                                            onChange={handleFileUpload}
+                                            className="hidden"
+                                            id="file-upload"
+                                        />
+                                        <label htmlFor="file-upload" className="cursor-pointer">
+                                            <div className="w-16 h-16 mx-auto mb-4 flex items-center justify-center">
+                                                <FileAudio />
+                                            </div>
+                                            {file ? (
+                                                <div className="text-white">
+                                                    <p className="font-semibold text-lg">{file.name}</p>
+                                                    <p className="text-sm text-purple-200">{(file.size / 1024 / 1024).toFixed(2)} MB</p>
+                                                </div>
+                                            ) : (
+                                                <div>
+                                                    <p className="text-white font-semibold mb-2">Drop your podcast file here</p>
+                                                    <p className="text-purple-200 text-sm">or click to browse • MP3, WAV, M4A</p>
+                                                </div>
+                                            )}
+                                        </label>
+                                    </div>
+
+                                    <div className="grid md:grid-cols-2 gap-8">
+                                        <div>
+                                            <h3 className="text-xl font-semibold text-white mb-4">Edit Requirements</h3>
+                                            <div className="space-y-3 mb-4">
+                                                <label className="flex items-center gap-3 text-white cursor-pointer">
+                                                    <input
+                                                        type="checkbox"
+                                                        checked={requirements.removeFillerWords}
+                                                        onChange={(e) => setRequirements({...requirements, removeFillerWords: e.target.checked})}
+                                                        className="w-5 h-5 rounded accent-purple-500"
+                                                    />
+                                                    <span>Remove excessive filler words</span>
+                                                </label>
+                                                <label className="flex items-center gap-3 text-white cursor-pointer">
+                                                    <input
+                                                        type="checkbox"
+                                                        checked={requirements.removeLongPauses}
+                                                        onChange={(e) => setRequirements({...requirements, removeLongPauses: e.target.checked})}
+                                                        className="w-5 h-5 rounded accent-purple-500"
+                                                    />
+                                                    <span>Remove long pauses</span>
+                                                </label>
+                                                <label className="flex items-center gap-3 text-white cursor-pointer">
+                                                    <input
+                                                        type="checkbox"
+                                                        checked={requirements.normalizeAudio}
+                                                        onChange={(e) => setRequirements({...requirements, normalizeAudio: e.target.checked})}
+                                                        className="w-5 h-5 rounded accent-purple-500"
+                                                    />
+                                                    <span>Normalize audio levels</span>
+                                                </label>
+                                                <label className="flex items-center gap-3 text-white cursor-pointer">
+                                                    <input
+                                                        type="checkbox"
+                                                        checked={requirements.removeBackgroundNoise}
+                                                        onChange={(e) => setRequirements({...requirements, removeBackgroundNoise: e.target.checked})}
+                                                        className="w-5 h-5 rounded accent-purple-500"
+                                                    />
+                                                    <span>Remove background noise</span>
+                                                </label>
+                                            </div>
+
+                                            <div className="mb-4">
+                                                <label className="block text-white mb-2">Target Length</label>
+                                                <input
+                                                    type="text"
+                                                    placeholder="e.g., 45 minutes"
+                                                    value={requirements.targetLength}
+                                                    onChange={(e) => setRequirements({...requirements, targetLength: e.target.value})}
+                                                    className="w-full p-3 rounded-lg bg-white/10 border border-white/20 text-white placeholder-purple-300"
+                                                />
+                                            </div>
+                                        </div>
+
+                                        <div>
+                                            <h3 className="text-xl font-semibold text-white mb-4">Custom Instructions</h3>
+                                            <textarea
+                                                placeholder="e.g., Keep the banter between hosts, remove technical difficulties around 15:30, preserve the joke at 22:15..."
+                                                value={requirements.customInstructions}
+                                                onChange={(e) => setRequirements({...requirements, customInstructions: e.target.value})}
+                                                className="w-full p-3 rounded-lg bg-white/10 border border-white/20 text-white placeholder-purple-300 h-48 resize-none"
+                                            />
+                                        </div>
+                                    </div>
+
+                                    <button
+                                        onClick={startProcessing}
+                                        disabled={!file || isProcessing}
+                                        className="w-full mt-6 bg-gradient-to-r from-purple-500 to-pink-500 text-white font-semibold py-4 rounded-xl hover:from-purple-600 hover:to-pink-600 transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+                                    >
+                                        <PlayCircle />
+                                        {isProcessing ? 'Processing...' : 'Start AI Edit'}
+                                    </button>
+                                </div>
+                            )}
+
+                            {activeTab === 'processing' && (
+                                <div>
+                                    <h2 className="text-2xl font-semibold text-white mb-6">Multi-Agent Workflow</h2>
+                                    
+                                    <div className="space-y-6">
+                                        {agents.map((agent, index) => {
+                                            const status = getAgentStatus(agent.id);
+                                            const Icon = agent.icon;
+                                            
+                                            return (
+                                                <div key={agent.id} className="relative">
+                                                    {index < agents.length - 1 && (
+                                                        <div className="absolute left-6 top-20 w-0.5 h-16 bg-white/20" />
+                                                    )}
+                                                    
+                                                    <div className={`bg-white/5 rounded-xl p-6 border-2 transition-all ${
+                                                        status === 'completed' ? 'border-green-500/50 bg-green-500/10' :
+                                                        status === 'processing' ? 'border-purple-500 bg-purple-500/10 animate-pulse' :
+                                                        'border-white/10'
+                                                    }`}>
+                                                        <div className="flex items-start gap-4">
+                                                            <div className={`${agent.color} p-3 rounded-lg shrink-0`}>
+                                                                <Icon />
+                                                            </div>
+                                                            
+                                                            <div className="flex-1">
+                                                                <div className="flex items-center justify-between mb-2">
+                                                                    <div>
+                                                                        <h3 className="text-xl font-semibold text-white">{agent.name}</h3>
+                                                                        <p className="text-sm text-purple-300 mt-1">
+                                                                            🔌 {agent.integration} • {agent.cost}/episode
+                                                                        </p>
+                                                                    </div>
+                                                                    {status === 'completed' && <CheckCircle />}
+                                                                    {status === 'processing' && (
+                                                                        <div className="animate-spin">
+                                                                            <Clock />
+                                                                        </div>
+                                                                    )}
+                                                                    {status === 'pending' && <AlertCircle />}
+                                                                </div>
+                                                                
+                                                                <p className="text-purple-200 mb-3">{agent.description}</p>
+                                                                
+                                                                <div className="bg-white/5 rounded-lg p-4">
+                                                                    <ul className="space-y-1.5">
+                                                                        {agent.tasks.map((task, i) => (
+                                                                            <li key={i} className="text-sm text-purple-100 flex items-start gap-2">
+                                                                                <span className="text-purple-400 mt-0.5">•</span>
+                                                                                <span>{task}</span>
+                                                                            </li>
+                                                                        ))}
+                                                                    </ul>
+                                                                </div>
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+
+                                    {processingComplete && (
+                                        <div className="mt-6 bg-gradient-to-r from-green-500/20 to-emerald-500/20 border-2 border-green-500/50 rounded-xl p-6">
+                                            <div className="flex items-center gap-3 mb-2">
+                                                <CheckCircle className="text-green-400" />
+                                                <h3 className="text-xl font-semibold text-white">Processing Complete!</h3>
+                                            </div>
+                                            <p className="text-green-100 mb-4">
+                                                AI editing complete. Ready for human verification.
+                                            </p>
+                                            <button
+                                                onClick={() => setActiveTab('review')}
+                                                className="bg-green-500 text-white px-6 py-3 rounded-lg font-semibold hover:bg-green-600 transition-all"
+                                            >
+                                                Review Edits →
+                                            </button>
+                                        </div>
+                                    )}
+                                </div>
+                            )}
+
+                            {activeTab === 'review' && (
+                                <div>
+                                    <h2 className="text-2xl font-semibold text-white mb-6">Human Editor Review Dashboard</h2>
+                                    
+                                    <div className="grid md:grid-cols-2 gap-6 mb-6">
+                                        <div className="bg-white/5 rounded-xl p-6 border border-white/20">
+                                            <h3 className="text-lg font-semibold text-white mb-3 flex items-center gap-2">
+                                                <Volume2 className="w-5 h-5" />
+                                                Original Audio
+                                            </h3>
+                                            <div className="bg-slate-800 rounded-lg p-4 mb-2">
+                                                <div className="flex items-center gap-3">
+                                                    <button className="bg-purple-500 p-2 rounded-full hover:bg-purple-600">
+                                                        <PlayCircle className="w-5 h-5" />
+                                                    </button>
+                                                    <div className="flex-1 h-2 bg-white/20 rounded-full overflow-hidden">
+                                                        <div className="h-full bg-purple-500" style={{width: '0%'}}></div>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                            <p className="text-sm text-purple-200">Length: 48:23 • Size: 67.2 MB</p>
+                                        </div>
+
+                                        <div className="bg-white/5 rounded-xl p-6 border border-green-500/30">
+                                            <h3 className="text-lg font-semibold text-white mb-3 flex items-center gap-2">
+                                                <Sparkles className="w-5 h-5" />
+                                                AI Edited Audio
+                                            </h3>
+                                            <div className="bg-slate-800 rounded-lg p-4 mb-2">
+                                                <div className="flex items-center gap-3">
+                                                    <button className="bg-green-500 p-2 rounded-full hover:bg-green-600">
+                                                        <PlayCircle className="w-5 h-5" />
+                                                    </button>
+                                                    <div className="flex-1 h-2 bg-white/20 rounded-full overflow-hidden">
+                                                        <div className="h-full bg-green-500" style={{width: '0%'}}></div>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                            <p className="text-sm text-green-200">Length: 45:12 • Size: 62.8 MB • 3:11 removed</p>
+                                        </div>
+                                    </div>
+
+                                    <div className="bg-white/5 rounded-xl p-6 border border-white/20 mb-6">
+                                        <h3 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+                                            <FileText className="w-5 h-5" />
+                                            Edit Decision Log
+                                        </h3>
+                                        <div className="space-y-2 max-h-64 overflow-y-auto">
+                                            {mockEditDecisions.map((edit, index) => (
+                                                <div key={index} className="bg-white/5 rounded-lg p-3 flex items-start gap-3 hover:bg-white/10 transition-all">
+                                                    <span className="font-mono text-purple-300 text-sm">{edit.time}</span>
+                                                    <div className="flex-1">
+                                                        <span className={`inline-block px-2 py-0.5 rounded text-xs font-semibold mb-1 ${
+                                                            edit.type === 'Remove Filler' ? 'bg-orange-500/20 text-orange-300' :
+                                                            edit.type === 'Trim Pause' ? 'bg-blue-500/20 text-blue-300' :
+                                                            edit.type === 'Keep Pause' ? 'bg-green-500/20 text-green-300' :
+                                                            edit.type === 'Noise Reduction' ? 'bg-purple-500/20 text-purple-300' :
+                                                            'bg-gray-500/20 text-gray-300'
+                                                        }`}>
+                                                            {edit.type}
+                                                        </span>
+                                                        <p className="text-sm text-white">{edit.content}</p>
+                                                    </div>
+                                                    <span className="text-xs text-purple-300">{edit.confidence}%</span>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </div>
+
+                                    <div className="bg-gradient-to-r from-amber-500/20 to-orange-500/20 border-2 border-amber-500/50 rounded-xl p-6 mb-6">
+                                        <h3 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+                                            <User className="w-5 h-5" />
+                                            Human Verification Checklist
+                                        </h3>
+                                        <div className="space-y-2">
+                                            {[
+                                                'Listen to full edited episode',
+                                                'Verify no jarring cuts or artifacts',
+                                                'Check natural speech flow maintained',
+                                                'Confirm all client requirements met',
+                                                'Validate audio levels consistent',
+                                                'Review flagged sections (4 items)'
+                                            ].map((item, i) => (
+                                                <label key={i} className="flex items-center gap-3 text-amber-100 cursor-pointer hover:text-white transition-all">
+                                                    <input type="checkbox" className="w-5 h-5 rounded accent-amber-500" />
+                                                    <span>{item}</span>
+                                                </label>
+                                            ))}
+                                        </div>
+                                    </div>
+
+                                    <div className="flex gap-4">
+                                        <button className="flex-1 bg-red-500 text-white py-4 rounded-xl font-semibold hover:bg-red-600 transition-all">
+                                            Request Re-Edit
+                                        </button>
+                                        <button className="flex-1 bg-gradient-to-r from-green-500 to-emerald-500 text-white py-4 rounded-xl font-semibold hover:from-green-600 hover:to-emerald-600 transition-all flex items-center justify-center gap-2">
+                                            <CheckCircle />
+                                            Approve & Deliver
+                                        </button>
+                                    </div>
+                                </div>
+                            )}
+
+                            {activeTab === 'costs' && (
+                                <div>
+                                    <h2 className="text-2xl font-semibold text-white mb-6">Cost Analysis</h2>
+                                    
+                                    <div className="grid md:grid-cols-3 gap-6 mb-8">
+                                        <div className="bg-gradient-to-br from-purple-500/20 to-pink-500/20 border-2 border-purple-500/50 rounded-xl p-6">
+                                            <div className="text-4xl font-bold text-purple-400 mb-2">${totalAICost.toFixed(2)}</div>
+                                            <p className="text-white font-semibold mb-1">AI Processing Cost</p>
+                                            <p className="text-sm text-purple-200">Per episode</p>
+                                        </div>
+                                        <div className="bg-gradient-to-br from-blue-500/20 to-cyan-500/20 border-2 border-blue-500/50 rounded-xl p-6">
+                                            <div className="text-4xl font-bold text-blue-400 mb-2">${traditionalCost}</div>
+                                            <p className="text-white font-semibold mb-1">Traditional Manual Cost</p>
+                                            <p className="text-sm text-blue-200">3 hours @ $15/hr</p>
+                                        </div>
+                                        <div className="bg-gradient-to-br from-green-500/20 to-emerald-500/20 border-2 border-green-500/50 rounded-xl p-6">
+                                            <div className="text-4xl font-bold text-green-400 mb-2">{savings}%</div>
+                                            <p className="text-white font-semibold mb-1">Cost Savings</p>
+                                            <p className="text-sm text-green-200">Per episode reduction</p>
+                                        </div>
+                                    </div>
+
+                                    <div className="bg-white/5 rounded-xl p-6 border border-white/20 mb-6">
+                                        <h3 className="text-xl font-semibold text-white mb-4">Cost Breakdown by Agent</h3>
+                                        <div className="space-y-3">
+                                            {agents.map((agent) => (
+                                                <div key={agent.id} className="flex items-center justify-between bg-white/5 rounded-lg p-4">
+                                                    <div className="flex items-center gap-3">
+                                                        <div className={`${agent.color} p-2 rounded-lg`}>
+                                                            {React.createElement(agent.icon)}
+                                                        </div>
+                                                        <div>
+                                                            <p className="text-white font-semibold">{agent.name}</p>
+                                                            <p className="text-sm text-purple-300">{agent.integration}</p>
+                                                        </div>
+                                                    </div>
+                                                    <span className="text-xl font-bold text-purple-300">{agent.cost}</span>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </div>
+
+                                    <div className="bg-white/5 rounded-xl p-6 border border-white/20">
+                                        <h3 className="text-xl font-semibold text-white mb-4">Competitive Pricing Strategy</h3>
+                                        <div className="grid md:grid-cols-2 gap-6">
+                                            <div>
+                                                <h4 className="text-white font-semibold mb-3">Your Old Pricing</h4>
+                                                <div className="space-y-2 text-purple-200">
+                                                    <p>• Manual editing: 3-4 hours/episode</p>
+                                                    <p>• Labor cost: $45-60</p>
+                                                    <p>• Client price: $150-200/episode</p>
+                                                    <p className="text-red-300 font-semibold mt-3">❌ Too expensive for many clients</p>
+                                                </div>
+                                            </div>
+                                            <div>
+                                                <h4 className="text-white font-semibold mb-3">AI-Assisted Pricing</h4>
+                                                <div className="space-y-2 text-purple-200">
+                                                    <p>• AI processing: ${totalAICost.toFixed(2)}</p>
+                                                    <p>• Human review: 30-45 min ($7-11)</p>
+                                                    <p>• Total cost: $8-12/episode</p>
+                                                    <p className="text-green-300 font-semibold mt-3">✓ Client price: $49-79/episode</p>
+                                                </div>
+                                            </div>
+                                        </div>
+                                        <div className="mt-6 bg-green-500/20 border border-green-500/50 rounded-lg p-4">
+                                            <p className="text-green-100 font-semibold">💰 Win more deals at $49-79 while maintaining 85%+ margins</p>
+                                        </div>
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+
+                        <div className="mt-6 grid md:grid-cols-4 gap-4">
+                            <div className="bg-white/5 backdrop-blur-lg rounded-xl p-6 border border-white/10">
+                                <div className="text-3xl font-bold text-purple-400 mb-2">70%</div>
+                                <p className="text-white font-semibold mb-1">Faster Turnaround</p>
+                                <p className="text-sm text-purple-200">AI handles tedious work</p>
+                            </div>
+                            <div className="bg-white/5 backdrop-blur-lg rounded-xl p-6 border border-white/10">
+                                <div className="text-3xl font-bold text-green-400 mb-2">100%</div>
+                                <p className="text-white font-semibold mb-1">Human-Verified</p>
+                                <p className="text-sm text-purple-200">Every episode reviewed</p>
+                            </div>
+                            <div className="bg-white/5 backdrop-blur-lg rounded-xl p-6 border border-white/10">
+                                <div className="text-3xl font-bold text-pink-400 mb-2">{savings}%</div>
+                                <p className="text-white font-semibold mb-1">Cost Reduction</p>
+                                <p className="text-sm text-purple-200">More competitive pricing</p>
+                            </div>
+                            <div className="bg-white/5 backdrop-blur-lg rounded-xl p-6 border border-white/10">
+                                <div className="text-3xl font-bold text-blue-400 mb-2">85%+</div>
+                                <p className="text-white font-semibold mb-1">Profit Margin</p>
+                                <p className="text-sm text-purple-200">Even at lower prices</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        ReactDOM.render(<PodcastEditor />, document.getElementById('root'));
+    </script>
+</body>
+</html>

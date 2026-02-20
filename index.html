@@ -152,6 +152,8 @@
             const [currentAgent, setCurrentAgent] = useState(null);
             const [completedAgents, setCompletedAgents] = useState([]);
             const [processingComplete, setProcessingComplete] = useState(false);
+            const [pendingTranscript, setPendingTranscript] = useState(null); // {transcript_id, filename} for retries
+            const [claudeOverloaded, setClaudeOverloaded] = useState(false);
 
             const agents = [
                 {
@@ -246,15 +248,75 @@
 
         const API_URL = 'https://ai-podcast-editor-production.up.railway.app';
 
+// Calls /api/process and handles the result. Can be called standalone for retries.
+const runClaudeAnalysis = async (transcript_id, filename) => {
+    setClaudeOverloaded(false);
+    setIsProcessing(true);
+    setCurrentAgent('qa-agent');
+
+    try {
+        console.log('Running Claude analysis...');
+        const processRes = await fetch(`${API_URL}/api/process`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                transcript_id,
+                filename,
+                requirements: {
+                    removeFillerWords: requirements.removeFillerWords,
+                    removeLongPauses: requirements.removeLongPauses,
+                    normalizeAudio: requirements.normalizeAudio,
+                    removeBackgroundNoise: requirements.removeBackgroundNoise,
+                    targetLength: requirements.targetLength
+                },
+                customInstructions: requirements.customInstructions
+            })
+        });
+
+        const responseData = await processRes.json();
+
+        if (processRes.status === 503 && responseData.retryable) {
+            setClaudeOverloaded(true);
+            setIsProcessing(false);
+            setCurrentAgent(null);
+            return;
+        }
+
+        if (!processRes.ok) {
+            throw new Error(responseData.error || 'Processing failed');
+        }
+
+        if (!responseData.success) {
+            throw new Error('Processing failed: ' + (responseData.error || 'Unknown error'));
+        }
+
+        // All done!
+        setCompletedAgents(['audio-analysis', 'content-editor', 'audio-engineer', 'qa-agent']);
+        setCurrentAgent(null);
+        setIsProcessing(false);
+        setProcessingComplete(true);
+        setPendingTranscript(null);
+        alert('Processing complete! Check the Review tab.');
+
+    } catch (error) {
+        console.error('Error:', error);
+        alert('Processing failed: ' + error.message + '\n\nCheck the browser console for details.');
+        setIsProcessing(false);
+        setCurrentAgent(null);
+    }
+};
+
 const startProcessing = async () => {
     if (!file) {
         alert('Please upload a file first');
         return;
     }
-    
+
     setIsProcessing(true);
     setCompletedAgents([]);
     setCurrentAgent(null);
+    setClaudeOverloaded(false);
+    setPendingTranscript(null);
     setActiveTab('processing');
 
     try {
@@ -294,54 +356,17 @@ const startProcessing = async () => {
             } else if (statusData.status === 'error') {
                 throw new Error('Transcription failed: ' + (statusData.error || 'Unknown error'));
             }
-            // else still processing — loop again
         }
 
         setCompletedAgents(['audio-analysis', 'content-editor']);
         setCurrentAgent('audio-engineer');
         await new Promise(resolve => setTimeout(resolve, 800));
         setCompletedAgents(['audio-analysis', 'content-editor', 'audio-engineer']);
-        setCurrentAgent('qa-agent');
 
-        // Step 3: Run Claude analysis (transcript already done, this is fast)
-        console.log('Processing transcript...');
-        const processRes = await fetch(`${API_URL}/api/process`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                transcript_id: uploadData.transcript_id,
-                filename: uploadData.filename,
-                requirements: {
-                    removeFillerWords: requirements.removeFillerWords,
-                    removeLongPauses: requirements.removeLongPauses,
-                    normalizeAudio: requirements.normalizeAudio,
-                    removeBackgroundNoise: requirements.removeBackgroundNoise,
-                    targetLength: requirements.targetLength
-                },
-                customInstructions: requirements.customInstructions
-            })
-        });
+        // Step 3: Run Claude analysis
+        setPendingTranscript({ transcript_id: uploadData.transcript_id, filename: uploadData.filename });
+        await runClaudeAnalysis(uploadData.transcript_id, uploadData.filename);
 
-        if (!processRes.ok) {
-            const errorData = await processRes.json();
-            throw new Error(errorData.error || 'Processing failed');
-        }
-
-        const processData = await processRes.json();
-        console.log('Processing complete:', processData);
-
-        if (!processData.success) {
-            throw new Error('Processing failed: ' + (processData.error || 'Unknown error'));
-        }
-        
-        // All done!
-        setCompletedAgents(['audio-analysis', 'content-editor', 'audio-engineer', 'qa-agent']);
-        setCurrentAgent(null);
-        setIsProcessing(false);
-        setProcessingComplete(true);
-        
-        alert('Processing complete! Check the Review tab.');
-        
     } catch (error) {
         console.error('Error:', error);
         alert('Processing failed: ' + error.message + '\n\nCheck the browser console for details.');
@@ -591,6 +616,24 @@ const startProcessing = async () => {
                                             );
                                         })}
                                     </div>
+
+                                    {claudeOverloaded && pendingTranscript && (
+                                        <div className="mt-6 bg-gradient-to-r from-yellow-500/20 to-orange-500/20 border-2 border-yellow-500/50 rounded-xl p-6">
+                                            <div className="flex items-center gap-3 mb-2">
+                                                <span className="text-yellow-400 text-xl">⚠</span>
+                                                <h3 className="text-xl font-semibold text-white">Claude API Temporarily Overloaded</h3>
+                                            </div>
+                                            <p className="text-yellow-100 mb-4">
+                                                Transcription is complete. The Claude API is busy — wait a moment and try again. Your audio will not be re-uploaded.
+                                            </p>
+                                            <button
+                                                onClick={() => runClaudeAnalysis(pendingTranscript.transcript_id, pendingTranscript.filename)}
+                                                className="bg-yellow-500 text-white px-6 py-3 rounded-lg font-semibold hover:bg-yellow-600 transition-all"
+                                            >
+                                                Try Again
+                                            </button>
+                                        </div>
+                                    )}
 
                                     {processingComplete && (
                                         <div className="mt-6 bg-gradient-to-r from-green-500/20 to-emerald-500/20 border-2 border-green-500/50 rounded-xl p-6">

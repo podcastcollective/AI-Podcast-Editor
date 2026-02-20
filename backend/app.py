@@ -150,21 +150,11 @@ Return ONLY a JSON array with this structure:
 
 Return ONLY the JSON array, no other text."""
 
-    for attempt in range(4):
-        try:
-            message = client.messages.create(
-                model="claude-sonnet-4-6",
-                max_tokens=4000,
-                messages=[{"role": "user", "content": prompt}]
-            )
-            break
-        except anthropic.APIStatusError as e:
-            if e.status_code == 529 and attempt < 3:
-                wait = 2 ** (attempt + 1)
-                print(f"Claude overloaded (529), retrying in {wait}s... (attempt {attempt + 1}/4)")
-                time.sleep(wait)
-            else:
-                raise
+    message = client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=4000,
+        messages=[{"role": "user", "content": prompt}]
+    )
 
     response_text = message.content[0].text
 
@@ -399,6 +389,12 @@ def process_podcast():
             }
         })
 
+    except anthropic.APIStatusError as e:
+        if e.status_code == 529:
+            print(f"\nClaude overloaded (529): {e}")
+            return jsonify({"error": "Claude API is temporarily overloaded. Please try again in a moment.", "retryable": True}), 503
+        print(f"\nClaude API error: {e}")
+        return jsonify({"error": str(e)}), 500
     except Exception as e:
         print(f"\nFATAL ERROR: {str(e)}")
         import traceback

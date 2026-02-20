@@ -252,46 +252,55 @@ INSTRUCTIONS:
 4. Add "Note" decisions (no start_ms/end_ms) for observations that don't require a cut.
 5. Use ONLY ms values from the data above — never invent values.
 
-Return ONLY a JSON array, no other text. Do not wrap in code fences. Start your response with [ and end with ].
-Example format:
-[
-  {{"type": "Remove Filler", "description": "Remove 'um'", "start_ms": 12680, "end_ms": 12900, "confidence": 95, "rationale": "Filler word"}},
-  {{"type": "Trim Pause", "description": "Trim 2500ms pause to 800ms", "start_ms": 15800, "end_ms": 17500, "confidence": 90, "rationale": "Excessive pause"}},
-  {{"type": "Note", "description": "Strong section, no edit needed", "confidence": 100, "rationale": "Preserve energy"}}
-]"""
+Call the submit_edit_decisions tool with your decisions."""
+
+    # Use tool_use to force structured JSON output — no text parsing needed.
+    tools = [{
+        "name": "submit_edit_decisions",
+        "description": "Submit the final list of edit decisions for the podcast episode.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "decisions": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "type": {"type": "string", "description": "One of: Remove Filler, Trim Pause, Content Cut, Note"},
+                            "description": {"type": "string"},
+                            "start_ms": {"type": "integer"},
+                            "end_ms": {"type": "integer"},
+                            "confidence": {"type": "integer", "minimum": 0, "maximum": 100},
+                            "rationale": {"type": "string"}
+                        },
+                        "required": ["type", "description", "confidence", "rationale"]
+                    }
+                }
+            },
+            "required": ["decisions"]
+        }
+    }]
 
     message = client.messages.create(
         model="claude-sonnet-4-6",
         max_tokens=4000,
-        system="You are a JSON API. You MUST respond with ONLY a raw JSON array. No prose, no markdown, no code fences, no explanation. Your entire response must be valid JSON starting with [ and ending with ].",
+        tools=tools,
+        tool_choice={"type": "tool", "name": "submit_edit_decisions"},
         messages=[
             {"role": "user", "content": prompt},
         ]
     )
 
-    response_text = message.content[0].text.strip()
-    print(f"Claude raw response (first 500 chars): {response_text[:500]}")
-
-    # Strip code fences if present (```json ... ``` or ``` ... ```)
-    response_text = re.sub(r'^```\w*\s*', '', response_text)
-    response_text = re.sub(r'\s*```\s*$', '', response_text).strip()
-
-    # Try direct parse first
+    # Extract structured data from the tool call — guaranteed valid JSON.
     edit_decisions = None
-    try:
-        edit_decisions = json.loads(response_text)
-    except json.JSONDecodeError:
-        # Balanced-bracket scan as a fallback
-        array_text = _extract_json_array(response_text)
-        if array_text:
-            try:
-                edit_decisions = json.loads(array_text)
-            except json.JSONDecodeError:
-                pass
+    for block in message.content:
+        if block.type == "tool_use" and block.name == "submit_edit_decisions":
+            edit_decisions = block.input.get("decisions", [])
+            break
 
     if edit_decisions is None:
-        print(f"Full Claude response for debugging:\n{response_text}")
-        raise Exception("Could not parse Claude's response as JSON")
+        print(f"Unexpected response blocks: {[b.type for b in message.content]}")
+        raise Exception("Claude did not return tool call — unexpected response format")
 
     print(f"Generated {len(edit_decisions)} edit decisions")
     return {

@@ -246,13 +246,17 @@ CUSTOM INSTRUCTIONS:
 {custom_instructions if custom_instructions else "None"}
 
 INSTRUCTIONS:
-1. Confirm filler removals: include each filler as a "Remove Filler" decision using the EXACT start_ms and end_ms provided above.
-2. Trim long pauses: for each pause, set start_ms = pause_start_ms + 800, end_ms = pause_end_ms (keeps 800ms of natural pause).
+1. For EVERY filler word listed above, include a "Remove Filler" decision using the EXACT start_ms and end_ms provided.
+2. For EVERY pause listed above, include a "Trim Pause" decision: set start_ms = pause_start_ms + 800, end_ms = pause_end_ms (keeps 800ms of natural pause).
 3. Add "Content Cut" decisions for any sections in the transcript that should be removed for editorial reasons (use ms values matching utterance start/end times).
-4. Add "Note" decisions (no start_ms/end_ms) for observations that don't require a cut.
+4. Add at least one "Note" decision (no start_ms/end_ms) summarizing the overall edit.
 5. Use ONLY ms values from the data above — never invent values.
+6. You MUST include at least one decision. If there are fillers or pauses listed above, each one MUST appear as a decision.
 
-Call the submit_edit_decisions tool with your decisions."""
+Call the submit_edit_decisions tool with your decisions.
+
+Example tool input for reference:
+{{"decisions": [{{"type": "Remove Filler", "description": "Remove 'um'", "start_ms": 12680, "end_ms": 12900, "confidence": 95, "rationale": "Filler word"}}, {{"type": "Trim Pause", "description": "Trim 2500ms pause to 800ms", "start_ms": 15800, "end_ms": 17500, "confidence": 90, "rationale": "Excessive pause"}}, {{"type": "Note", "description": "Clean episode overall", "confidence": 100, "rationale": "Summary"}}]}}"""
 
     # Use tool_use to force structured JSON output — no text parsing needed.
     tools = [{
@@ -660,6 +664,15 @@ def edit_audio():
             if 'start_ms' in c and 'end_ms' in c
         ]
         print(f"Applying {len(cuts_ms)} cuts to {audio_path}")
+
+        if not cuts_ms:
+            # No cuts to make — return the original file
+            return send_file(
+                audio_path,
+                as_attachment=True,
+                download_name='edited_podcast.mp3',
+                mimetype='audio/mpeg'
+            )
 
         output_path = apply_audio_edits(audio_path, cuts_ms)
 

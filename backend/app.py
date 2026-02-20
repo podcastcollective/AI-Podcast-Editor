@@ -8,6 +8,8 @@ from flask_cors import CORS
 import os
 import json
 import time
+import threading
+import uuid
 from datetime import datetime
 from werkzeug.utils import secure_filename
 import anthropic
@@ -26,6 +28,11 @@ CLAUDE_API_KEY = os.environ.get('CLAUDE_API_KEY')
 
 if not ASSEMBLYAI_API_KEY or not CLAUDE_API_KEY:
     print("WARNING: API keys not set. Please set ASSEMBLYAI_API_KEY and CLAUDE_API_KEY environment variables")
+
+# In-memory job store for async Claude analysis.
+# Gunicorn must use threads (not multiple processes) so this dict is shared.
+_jobs: dict = {}
+_jobs_lock = threading.Lock()
 
 
 def allowed_file(filename):
@@ -446,11 +453,50 @@ def transcription_status(transcript_id):
         return jsonify({"error": str(e)}), 500
 
 
+def _run_analysis_job(job_id, transcript_data, filename, requirements, custom_instructions):
+    """Background thread: run Claude analysis and store result in _jobs."""
+    try:
+        with _jobs_lock:
+            _jobs[job_id]['status'] = 'analyzing'
+
+        edit_analysis = analyze_transcript_with_claude(transcript_data, requirements, custom_instructions)
+        report = generate_edit_report(filename, transcript_data, edit_analysis, requirements)
+        cuts_count = sum(1 for d in edit_analysis['edit_decisions'] if 'start_ms' in d and 'end_ms' in d)
+
+        result = {
+            "success": True,
+            "edit_decisions": edit_analysis['edit_decisions'],
+            "cuts_count": cuts_count,
+            "report": report,
+            "transcript": {
+                "duration": transcript_data.get('audio_duration', 0),
+                "words": len(transcript_data.get('words', [])),
+                "speakers": len(set(u.get('speaker') for u in transcript_data.get('utterances', []) if u.get('speaker'))),
+                "confidence": transcript_data.get('confidence', 0) or 0
+            }
+        }
+        with _jobs_lock:
+            _jobs[job_id] = {'status': 'completed', 'result': result}
+        print(f"Job {job_id} complete: {cuts_count} cuts")
+
+    except anthropic.APIStatusError as e:
+        err = "Claude API is temporarily overloaded. Please try again." if e.status_code == 529 else str(e)
+        retryable = e.status_code == 529
+        with _jobs_lock:
+            _jobs[job_id] = {'status': 'error', 'error': err, 'retryable': retryable}
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        with _jobs_lock:
+            _jobs[job_id] = {'status': 'error', 'error': str(e)}
+
+
 @app.route('/api/process', methods=['POST', 'OPTIONS'])
 def process_podcast():
     """
-    Step 2: Fetch completed transcript from AssemblyAI, run Claude analysis.
-    Accepts JSON: { transcript_id, filename, requirements, customInstructions }
+    Step 2: Fetch transcript from AssemblyAI, kick off Claude analysis in a
+    background thread, and return a job_id immediately.
+    Poll /api/process-status/<job_id> for the result.
     """
     if request.method == 'OPTIONS':
         return '', 204
@@ -474,57 +520,49 @@ def process_podcast():
 
         print(f"transcript_id: {transcript_id}")
 
-        # Fetch transcript (client already polled until complete)
-        print("\nSTEP 1: FETCHING TRANSCRIPT")
+        # Fetch transcript synchronously (fast, ~1s)
         transcript_data = get_transcription(transcript_id)
         status = transcript_data.get("status")
         if status == "error":
             raise Exception(f"Transcription failed: {transcript_data.get('error', 'Unknown error')}")
         if status != "completed":
-            return jsonify({"error": f"Transcription not ready (status: {status}). Poll /api/transcription-status first."}), 400
-        print(f"Transcription complete. Duration: {transcript_data.get('audio_duration')}ms")
+            return jsonify({"error": f"Transcription not ready (status: {status})."}), 400
+        print(f"Transcript fetched. Duration: {transcript_data.get('audio_duration')}ms")
 
-        # Analyze with Claude
-        print("\nSTEP 2: ANALYZING WITH CLAUDE")
-        edit_analysis = analyze_transcript_with_claude(
-            transcript_data,
-            requirements,
-            custom_instructions
+        # Kick off Claude analysis in background thread
+        job_id = str(uuid.uuid4())
+        with _jobs_lock:
+            _jobs[job_id] = {'status': 'pending'}
+
+        thread = threading.Thread(
+            target=_run_analysis_job,
+            args=(job_id, transcript_data, filename, requirements, custom_instructions),
+            daemon=True
         )
-        print(f"Analysis complete. Generated {len(edit_analysis['edit_decisions'])} edit decisions")
+        thread.start()
+        print(f"Analysis job {job_id} started in background")
 
-        # Generate report
-        print("\nSTEP 3: GENERATING REPORT")
-        report = generate_edit_report(filename, transcript_data, edit_analysis, requirements)
+        return jsonify({"success": True, "job_id": job_id})
 
-        print("\nPROCESSING COMPLETE!")
-        print("=" * 60)
-
-        cuts_count = sum(1 for d in edit_analysis['edit_decisions'] if 'start_ms' in d and 'end_ms' in d)
-        return jsonify({
-            "success": True,
-            "edit_decisions": edit_analysis['edit_decisions'],
-            "cuts_count": cuts_count,
-            "report": report,
-            "transcript": {
-                "duration": transcript_data.get('audio_duration', 0),
-                "words": len(transcript_data.get('words', [])),
-                "speakers": len(set(u.get('speaker') for u in transcript_data.get('utterances', []) if u.get('speaker'))),
-                "confidence": transcript_data.get('confidence', 0) or 0
-            }
-        })
-
-    except anthropic.APIStatusError as e:
-        if e.status_code == 529:
-            print(f"\nClaude overloaded (529): {e}")
-            return jsonify({"error": "Claude API is temporarily overloaded. Please try again in a moment.", "retryable": True}), 503
-        print(f"\nClaude API error: {e}")
-        return jsonify({"error": str(e)}), 500
     except Exception as e:
         print(f"\nFATAL ERROR: {str(e)}")
         import traceback
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/process-status/<job_id>', methods=['GET'])
+def process_status(job_id):
+    """Poll this endpoint after /api/process to get Claude analysis results."""
+    with _jobs_lock:
+        job = _jobs.get(job_id)
+    if not job:
+        return jsonify({"error": "Job not found"}), 404
+    if job['status'] == 'completed':
+        return jsonify(job['result'])
+    if job['status'] == 'error':
+        return jsonify({"error": job['error'], "retryable": job.get('retryable', False)}), 500
+    return jsonify({"status": job['status']})
 
 
 @app.route('/api/edit-audio', methods=['POST', 'OPTIONS'])

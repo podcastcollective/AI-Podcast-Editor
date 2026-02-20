@@ -250,14 +250,14 @@
 
         const API_URL = 'https://ai-podcast-editor-production.up.railway.app';
 
-// Calls /api/process and handles the result. Can be called standalone for retries.
+// Calls /api/process (returns job_id immediately), then polls /api/process-status.
 const runClaudeAnalysis = async (transcript_id, filename) => {
     setClaudeOverloaded(false);
     setIsProcessing(true);
     setCurrentAgent('qa-agent');
 
     try {
-        console.log('Running Claude analysis...');
+        console.log('Starting Claude analysis job...');
         const processRes = await fetch(`${API_URL}/api/process`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -275,22 +275,39 @@ const runClaudeAnalysis = async (transcript_id, filename) => {
             })
         });
 
-        const responseData = await processRes.json();
-        console.log('process response:', processRes.status, responseData);
-
-        if (responseData.retryable) {
-            setClaudeOverloaded(true);
-            setIsProcessing(false);
-            setCurrentAgent(null);
-            return;
-        }
+        const startData = await processRes.json();
+        console.log('process response:', processRes.status, startData);
 
         if (!processRes.ok) {
-            throw new Error(responseData.error || 'Processing failed');
+            throw new Error(startData.error || 'Processing failed to start');
         }
 
-        if (!responseData.success) {
-            throw new Error('Processing failed: ' + (responseData.error || 'Unknown error'));
+        const job_id = startData.job_id;
+        if (!job_id) throw new Error('No job_id returned from server');
+
+        // Poll /api/process-status until done
+        console.log(`Polling job ${job_id}...`);
+        let responseData = null;
+        while (true) {
+            await new Promise(r => setTimeout(r, 3000));
+            const statusRes = await fetch(`${API_URL}/api/process-status/${job_id}`);
+            const statusData = await statusRes.json();
+            console.log('poll:', statusData.status || 'done', statusData);
+
+            if (statusData.retryable) {
+                setClaudeOverloaded(true);
+                setIsProcessing(false);
+                setCurrentAgent(null);
+                return;
+            }
+            if (!statusRes.ok) {
+                throw new Error(statusData.error || 'Analysis failed');
+            }
+            if (statusData.success) {
+                responseData = statusData;
+                break;
+            }
+            // Still pending/analyzing — keep polling
         }
 
         // All done!

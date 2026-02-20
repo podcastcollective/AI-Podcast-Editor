@@ -258,23 +258,26 @@ const startProcessing = async () => {
     setActiveTab('processing');
 
     try {
-        // Agent 1: Uploading
+        // Step 1: Upload file → AssemblyAI, get transcript_id back immediately
         setCurrentAgent('audio-analysis');
-        console.log('Sending file for processing...');
+        console.log('Uploading file...');
 
         const formData = new FormData();
         formData.append('file', file);
-        formData.append('requirements', JSON.stringify({
-            removeFillerWords: requirements.removeFillerWords,
-            removeLongPauses: requirements.removeLongPauses,
-            normalizeAudio: requirements.normalizeAudio,
-            removeBackgroundNoise: requirements.removeBackgroundNoise,
-            targetLength: requirements.targetLength
-        }));
-        formData.append('customInstructions', requirements.customInstructions);
 
-        // Advance UI through agents while backend works
-        await new Promise(resolve => setTimeout(resolve, 500));
+        const uploadRes = await fetch(`${API_URL}/api/upload`, {
+            method: 'POST',
+            body: formData
+        });
+
+        if (!uploadRes.ok) {
+            const err = await uploadRes.json();
+            throw new Error(err.error || 'Upload failed');
+        }
+
+        const uploadData = await uploadRes.json();
+        console.log('Upload complete, transcript_id:', uploadData.transcript_id);
+
         setCompletedAgents(['audio-analysis']);
         setCurrentAgent('content-editor');
         await new Promise(resolve => setTimeout(resolve, 800));
@@ -284,19 +287,33 @@ const startProcessing = async () => {
         setCompletedAgents(['audio-analysis', 'content-editor', 'audio-engineer']);
         setCurrentAgent('qa-agent');
 
+        // Step 2: Poll transcription + run Claude (small JSON request)
+        console.log('Processing transcript...');
         const processRes = await fetch(`${API_URL}/api/process`, {
             method: 'POST',
-            body: formData
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                transcript_id: uploadData.transcript_id,
+                filename: uploadData.filename,
+                requirements: {
+                    removeFillerWords: requirements.removeFillerWords,
+                    removeLongPauses: requirements.removeLongPauses,
+                    normalizeAudio: requirements.normalizeAudio,
+                    removeBackgroundNoise: requirements.removeBackgroundNoise,
+                    targetLength: requirements.targetLength
+                },
+                customInstructions: requirements.customInstructions
+            })
         });
-        
+
         if (!processRes.ok) {
             const errorData = await processRes.json();
             throw new Error(errorData.error || 'Processing failed');
         }
-        
+
         const processData = await processRes.json();
         console.log('Processing complete:', processData);
-        
+
         if (!processData.success) {
             throw new Error('Processing failed: ' + (processData.error || 'Unknown error'));
         }

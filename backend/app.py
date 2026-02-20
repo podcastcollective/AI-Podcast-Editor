@@ -32,14 +32,17 @@ def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
 
-def stream_to_assemblyai(file_obj):
-    """Stream file object directly to AssemblyAI, return upload URL."""
+def stream_to_assemblyai(file_storage):
+    """Stream Werkzeug FileStorage to AssemblyAI, return upload URL."""
     print("Streaming file to AssemblyAI...")
     headers = {"authorization": ASSEMBLYAI_API_KEY}
+    # Use .read() so requests gets a plain bytes object (avoids FileStorage issues)
+    data = file_storage.read()
+    print(f"File bytes read: {len(data)}")
     response = requests.post(
         "https://api.assemblyai.com/v2/upload",
         headers=headers,
-        data=file_obj
+        data=data
     )
     if response.status_code != 200:
         raise Exception(f"AssemblyAI upload failed: {response.status_code} - {response.text}")
@@ -291,18 +294,24 @@ def upload_file():
 
     print(f"Received file: {file.filename}")
 
-    # Stream directly to AssemblyAI — no local disk write
-    upload_url = stream_to_assemblyai(file)
+    try:
+        # Read file into memory and send to AssemblyAI — no local disk write
+        upload_url = stream_to_assemblyai(file)
 
-    # Submit transcription job (returns immediately with ID)
-    transcript_id = start_transcription(upload_url)
+        # Submit transcription job (returns immediately with ID)
+        transcript_id = start_transcription(upload_url)
 
-    return jsonify({
-        "success": True,
-        "transcript_id": transcript_id,
-        "filename": secure_filename(file.filename),
-        "message": "File uploaded and transcription started"
-    })
+        return jsonify({
+            "success": True,
+            "transcript_id": transcript_id,
+            "filename": secure_filename(file.filename),
+            "message": "File uploaded and transcription started"
+        })
+    except Exception as e:
+        print(f"\nUPLOAD ERROR: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route('/api/process', methods=['POST', 'OPTIONS'])

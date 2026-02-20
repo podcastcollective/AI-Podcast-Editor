@@ -73,6 +73,7 @@ def transcribe_audio(audio_url):
 
     transcription_config = {
         "audio_url": audio_url,
+        "speech_model": "universal-2",
         "speaker_labels": True,
         "punctuate": True,
         "format_text": True,

@@ -152,6 +152,38 @@ def _find_pauses(words, min_ms=1000):
     return pauses
 
 
+def _extract_json_array(text):
+    """
+    Return the first complete JSON array found in text using balanced-bracket
+    scanning. More robust than a greedy regex when there is trailing prose.
+    """
+    start = text.find('[')
+    if start == -1:
+        return None
+    depth = 0
+    in_string = False
+    escape_next = False
+    for i, ch in enumerate(text[start:], start):
+        if escape_next:
+            escape_next = False
+            continue
+        if ch == '\\' and in_string:
+            escape_next = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == '[':
+            depth += 1
+        elif ch == ']':
+            depth -= 1
+            if depth == 0:
+                return text[start:i + 1]
+    return None
+
+
 def analyze_transcript_with_claude(transcript_data, requirements, custom_instructions=""):
     """
     Pre-detect fillers and pauses in Python, then ask Claude only for
@@ -232,16 +264,27 @@ Return ONLY a JSON array, no other text:
         messages=[{"role": "user", "content": prompt}]
     )
 
-    response_text = message.content[0].text
+    response_text = message.content[0].text.strip()
+    print(f"Claude raw response (first 300 chars): {response_text[:300]}")
+
+    # Strip markdown code fences if present (```json ... ``` or ``` ... ```)
+    if response_text.startswith('```'):
+        lines = response_text.splitlines()
+        # Remove opening fence line and closing ``` line
+        inner = lines[1:]
+        if inner and inner[-1].strip() == '```':
+            inner = inner[:-1]
+        response_text = '\n'.join(inner).strip()
 
     try:
         edit_decisions = json.loads(response_text)
     except json.JSONDecodeError:
-        import re
-        json_match = re.search(r'\[.*\]', response_text, re.DOTALL)
-        if json_match:
-            edit_decisions = json.loads(json_match.group())
+        # Balanced-bracket scan: find the first complete JSON array in the text
+        array_text = _extract_json_array(response_text)
+        if array_text:
+            edit_decisions = json.loads(array_text)
         else:
+            print(f"Full Claude response for debugging:\n{response_text}")
             raise Exception("Could not parse Claude's response as JSON")
 
     print(f"Generated {len(edit_decisions)} edit decisions")

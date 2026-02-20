@@ -361,17 +361,14 @@ def process_podcast():
         print(f"transcript_id: {transcript_id}")
         print(f"Requirements: {requirements}")
 
-        # Step 1: Poll until transcription is complete
-        print("\nSTEP 1: POLLING TRANSCRIPTION")
-        while True:
-            transcript_data = get_transcription(transcript_id)
-            status = transcript_data.get("status")
-            if status == "completed":
-                break
-            elif status == "error":
-                raise Exception(f"Transcription failed: {transcript_data.get('error', 'Unknown error')}")
-            print(f"Transcription status: {status}... waiting 5s")
-            time.sleep(5)
+        # Step 1: Fetch transcript (client already polled until complete)
+        print("\nSTEP 1: FETCHING TRANSCRIPT")
+        transcript_data = get_transcription(transcript_id)
+        status = transcript_data.get("status")
+        if status == "error":
+            raise Exception(f"Transcription failed: {transcript_data.get('error', 'Unknown error')}")
+        if status != "completed":
+            return jsonify({"error": f"Transcription not ready (status: {status}). Poll /api/transcription-status first."}), 400
         print(f"Transcription complete. Duration: {transcript_data.get('audio_duration')}ms")
 
         # Step 2: Analyze with Claude

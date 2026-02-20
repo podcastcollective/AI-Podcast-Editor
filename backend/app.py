@@ -69,13 +69,13 @@ def transcribe_audio(audio_url):
         "content-type": "application/json"
     }
     
-    transcription_config = {
-        "audio_url": audio_url,
-        "speaker_labels": True,
-        "punctuate": True,
-        "format_text": True,
-    }
-    
+transcription_config = {
+    "audio_url": audio_url,
+    "speech_model": "nano",  # Use the basic model (cheapest and fastest)
+    "speaker_labels": True,
+    "punctuate": True,
+    "format_text": True,
+}
     print(f"Sending transcription request with config: {transcription_config}")
     response = requests.post(
         "https://api.assemblyai.com/v2/transcript",

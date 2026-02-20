@@ -274,8 +274,9 @@ const runClaudeAnalysis = async (transcript_id, filename) => {
         });
 
         const responseData = await processRes.json();
+        console.log('process response:', processRes.status, responseData);
 
-        if (processRes.status === 503 && responseData.retryable) {
+        if (responseData.retryable) {
             setClaudeOverloaded(true);
             setIsProcessing(false);
             setCurrentAgent(null);

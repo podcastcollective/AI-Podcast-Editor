@@ -263,28 +263,35 @@ Example format:
     message = client.messages.create(
         model="claude-sonnet-4-6",
         max_tokens=4000,
+        system="You are a JSON API. You MUST respond with ONLY a raw JSON array. No prose, no markdown, no code fences, no explanation. Your entire response must be valid JSON starting with [ and ending with ].",
         messages=[
             {"role": "user", "content": prompt},
         ]
     )
 
     response_text = message.content[0].text.strip()
-    # Strip code fences if present (e.g. ```json ... ```)
-    if response_text.startswith('```'):
-        response_text = re.sub(r'^```\w*\n?', '', response_text)
-        response_text = re.sub(r'\n?```$', '', response_text).strip()
-    print(f"Claude response (first 300 chars): {response_text[:300]}")
+    print(f"Claude raw response (first 500 chars): {response_text[:500]}")
 
+    # Strip code fences if present (```json ... ``` or ``` ... ```)
+    response_text = re.sub(r'^```\w*\s*', '', response_text)
+    response_text = re.sub(r'\s*```\s*$', '', response_text).strip()
+
+    # Try direct parse first
+    edit_decisions = None
     try:
         edit_decisions = json.loads(response_text)
     except json.JSONDecodeError:
-        # Balanced-bracket scan as a last resort
+        # Balanced-bracket scan as a fallback
         array_text = _extract_json_array(response_text)
         if array_text:
-            edit_decisions = json.loads(array_text)
-        else:
-            print(f"Full Claude response for debugging:\n{response_text}")
-            raise Exception("Could not parse Claude's response as JSON")
+            try:
+                edit_decisions = json.loads(array_text)
+            except json.JSONDecodeError:
+                pass
+
+    if edit_decisions is None:
+        print(f"Full Claude response for debugging:\n{response_text}")
+        raise Exception("Could not parse Claude's response as JSON")
 
     print(f"Generated {len(edit_decisions)} edit decisions")
     return {

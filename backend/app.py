@@ -60,7 +60,7 @@ def start_transcription(audio_url):
     }
     config = {
         "audio_url": audio_url,
-        "speech_model": "universal-2",
+        "speech_models": ["universal-2"],
         "speaker_labels": True,
         "punctuate": True,
         "format_text": True,

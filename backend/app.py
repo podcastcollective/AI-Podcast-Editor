@@ -15,7 +15,18 @@ import requests
 from pathlib import Path
 
 app = Flask(__name__)
-CORS(app)  # Enable CORS for frontend to call this API
+# Enable CORS for frontend to call this API
+CORS(app, resources={
+    r"/api/*": {
+        "origins": [
+            "https://podcastcollective.github.io",
+            "http://localhost:3000",  # For local testing
+            "http://127.0.0.1:3000"
+        ],
+        "methods": ["GET", "POST", "OPTIONS"],
+        "allow_headers": ["Content-Type"]
+    }
+})
 
 # Configuration
 UPLOAD_FOLDER = './uploads'

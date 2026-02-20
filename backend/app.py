@@ -345,29 +345,45 @@ def process_podcast():
         print("PROCESSING REQUEST RECEIVED")
         print("=" * 60)
 
-        data = request.json
-        print(f"Request data keys: {list(data.keys()) if data else 'None'}")
-
-        filename = data.get('filename')
-        requirements = data.get('requirements', {})
-        custom_instructions = data.get('customInstructions', '')
-
-        print(f"Filename: {filename}")
-        print(f"Requirements: {requirements}")
-
-        if not filename:
-            return jsonify({"error": "No filename provided"}), 400
-
-        filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-        print(f"Looking for file at: {filepath}")
-
-        if not os.path.exists(filepath):
-            print(f"ERROR: File not found at {filepath}")
-            return jsonify({"error": f"File not found: {filename}"}), 404
-
         if not ASSEMBLYAI_API_KEY or not CLAUDE_API_KEY:
             return jsonify({"error": "API keys not configured on server"}), 500
 
+        # Accept multipart (file + JSON fields) or legacy JSON-only
+        if request.content_type and 'multipart/form-data' in request.content_type:
+            if 'file' not in request.files:
+                return jsonify({"error": "No file provided"}), 400
+            file = request.files['file']
+            if file.filename == '' or not allowed_file(file.filename):
+                return jsonify({"error": "Invalid file"}), 400
+
+            import json as _json
+            requirements = _json.loads(request.form.get('requirements', '{}'))
+            custom_instructions = request.form.get('customInstructions', '')
+
+            filename = secure_filename(file.filename)
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            unique_filename = f"{timestamp}_{filename}"
+            filepath = os.path.join(app.config['UPLOAD_FOLDER'], unique_filename)
+            file.save(filepath)
+            print(f"File saved: {filepath} ({os.path.getsize(filepath)} bytes)")
+        else:
+            data = request.json
+            print(f"Request data keys: {list(data.keys()) if data else 'None'}")
+            filename = data.get('filename')
+            requirements = data.get('requirements', {})
+            custom_instructions = data.get('customInstructions', '')
+
+            if not filename:
+                return jsonify({"error": "No filename provided"}), 400
+
+            filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+            if not os.path.exists(filepath):
+                print(f"ERROR: File not found at {filepath}")
+                return jsonify({"error": f"File not found: {filename}"}), 404
+            unique_filename = filename
+
+        print(f"Processing file: {unique_filename}")
+        print(f"Requirements: {requirements}")
         print("API keys verified")
 
         # Create job ID and output directory

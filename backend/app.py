@@ -150,11 +150,21 @@ Return ONLY a JSON array with this structure:
 
 Return ONLY the JSON array, no other text."""
 
-    message = client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=4000,
-        messages=[{"role": "user", "content": prompt}]
-    )
+    for attempt in range(4):
+        try:
+            message = client.messages.create(
+                model="claude-sonnet-4-6",
+                max_tokens=4000,
+                messages=[{"role": "user", "content": prompt}]
+            )
+            break
+        except anthropic.APIStatusError as e:
+            if e.status_code == 529 and attempt < 3:
+                wait = 2 ** (attempt + 1)
+                print(f"Claude overloaded (529), retrying in {wait}s... (attempt {attempt + 1}/4)")
+                time.sleep(wait)
+            else:
+                raise
 
     response_text = message.content[0].text
 

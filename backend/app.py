@@ -7,6 +7,7 @@ from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 import os
 import json
+import re
 import time
 import threading
 import uuid
@@ -251,27 +252,27 @@ INSTRUCTIONS:
 4. Add "Note" decisions (no start_ms/end_ms) for observations that don't require a cut.
 5. Use ONLY ms values from the data above — never invent values.
 
-Return ONLY a JSON array, no other text:
+Return ONLY a JSON array, no other text. Do not wrap in code fences. Start your response with [ and end with ].
+Example format:
 [
   {{"type": "Remove Filler", "description": "Remove 'um'", "start_ms": 12680, "end_ms": 12900, "confidence": 95, "rationale": "Filler word"}},
   {{"type": "Trim Pause", "description": "Trim 2500ms pause to 800ms", "start_ms": 15800, "end_ms": 17500, "confidence": 90, "rationale": "Excessive pause"}},
   {{"type": "Note", "description": "Strong section, no edit needed", "confidence": 100, "rationale": "Preserve energy"}}
 ]"""
 
-    # Prefill the assistant turn with "[" — Claude must continue the JSON array.
-    # This makes it structurally impossible to return prose or a code fence.
     message = client.messages.create(
         model="claude-sonnet-4-6",
         max_tokens=4000,
         messages=[
             {"role": "user", "content": prompt},
-            {"role": "assistant", "content": "["},
         ]
     )
 
-    # The API returns only the continuation; we prepend the "[" we sent.
-    continuation = message.content[0].text.strip()
-    response_text = "[" + continuation
+    response_text = message.content[0].text.strip()
+    # Strip code fences if present (e.g. ```json ... ```)
+    if response_text.startswith('```'):
+        response_text = re.sub(r'^```\w*\n?', '', response_text)
+        response_text = re.sub(r'\n?```$', '', response_text).strip()
     print(f"Claude response (first 300 chars): {response_text[:300]}")
 
     try:

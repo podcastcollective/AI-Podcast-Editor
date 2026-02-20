@@ -154,6 +154,8 @@
             const [processingComplete, setProcessingComplete] = useState(false);
             const [pendingTranscript, setPendingTranscript] = useState(null); // {transcript_id, filename} for retries
             const [claudeOverloaded, setClaudeOverloaded] = useState(false);
+            const [editDecisions, setEditDecisions] = useState([]);
+            const [isDownloading, setIsDownloading] = useState(false);
 
             const agents = [
                 {
@@ -292,11 +294,11 @@ const runClaudeAnalysis = async (transcript_id, filename) => {
         }
 
         // All done!
+        setEditDecisions(responseData.edit_decisions || []);
         setCompletedAgents(['audio-analysis', 'content-editor', 'audio-engineer', 'qa-agent']);
         setCurrentAgent(null);
         setIsProcessing(false);
         setProcessingComplete(true);
-        setPendingTranscript(null);
         alert('Processing complete! Check the Review tab.');
 
     } catch (error) {
@@ -304,6 +306,37 @@ const runClaudeAnalysis = async (transcript_id, filename) => {
         alert('Processing failed: ' + error.message + '\n\nCheck the browser console for details.');
         setIsProcessing(false);
         setCurrentAgent(null);
+    }
+};
+
+const downloadEditedAudio = async () => {
+    if (!pendingTranscript) {
+        alert('No processed audio available. Please process a file first.');
+        return;
+    }
+    const cuts = editDecisions.filter(d => d.start_ms != null && d.end_ms != null);
+    setIsDownloading(true);
+    try {
+        const res = await fetch(`${API_URL}/api/edit-audio`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ transcript_id: pendingTranscript.transcript_id, cuts })
+        });
+        if (!res.ok) {
+            const err = await res.json();
+            throw new Error(err.error || 'Audio editing failed');
+        }
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'edited_podcast.mp3';
+        a.click();
+        URL.revokeObjectURL(url);
+    } catch (error) {
+        alert('Download failed: ' + error.message);
+    } finally {
+        setIsDownloading(false);
     }
 };
 
@@ -702,26 +735,42 @@ const startProcessing = async () => {
                                         <h3 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
                                             <FileText className="w-5 h-5" />
                                             Edit Decision Log
+                                            {editDecisions.length > 0 && (
+                                                <span className="ml-auto text-xs bg-purple-500/30 text-purple-300 px-2 py-1 rounded-full">
+                                                    {editDecisions.filter(d => d.start_ms != null).length} cuts · {editDecisions.length} total
+                                                </span>
+                                            )}
                                         </h3>
                                         <div className="space-y-2 max-h-64 overflow-y-auto">
-                                            {mockEditDecisions.map((edit, index) => (
-                                                <div key={index} className="bg-white/5 rounded-lg p-3 flex items-start gap-3 hover:bg-white/10 transition-all">
-                                                    <span className="font-mono text-purple-300 text-sm">{edit.time}</span>
-                                                    <div className="flex-1">
-                                                        <span className={`inline-block px-2 py-0.5 rounded text-xs font-semibold mb-1 ${
-                                                            edit.type === 'Remove Filler' ? 'bg-orange-500/20 text-orange-300' :
-                                                            edit.type === 'Trim Pause' ? 'bg-blue-500/20 text-blue-300' :
-                                                            edit.type === 'Keep Pause' ? 'bg-green-500/20 text-green-300' :
-                                                            edit.type === 'Noise Reduction' ? 'bg-purple-500/20 text-purple-300' :
-                                                            'bg-gray-500/20 text-gray-300'
-                                                        }`}>
-                                                            {edit.type}
-                                                        </span>
-                                                        <p className="text-sm text-white">{edit.content}</p>
+                                            {(editDecisions.length > 0 ? editDecisions : mockEditDecisions).map((edit, index) => {
+                                                const isReal = editDecisions.length > 0;
+                                                const timestamp = isReal
+                                                    ? (edit.start_ms != null ? `${Math.floor(edit.start_ms/60000)}:${String(Math.floor((edit.start_ms%60000)/1000)).padStart(2,'0')}` : '—')
+                                                    : edit.time;
+                                                const label = isReal ? edit.type : edit.type;
+                                                const content = isReal ? edit.description : edit.content;
+                                                const conf = edit.confidence;
+                                                const isCut = isReal && edit.start_ms != null;
+                                                return (
+                                                    <div key={index} className="bg-white/5 rounded-lg p-3 flex items-start gap-3 hover:bg-white/10 transition-all">
+                                                        <span className="font-mono text-purple-300 text-sm w-12 shrink-0">{timestamp}</span>
+                                                        <div className="flex-1">
+                                                            <span className={`inline-block px-2 py-0.5 rounded text-xs font-semibold mb-1 ${
+                                                                label === 'Remove Filler' ? 'bg-orange-500/20 text-orange-300' :
+                                                                label === 'Trim Pause' ? 'bg-blue-500/20 text-blue-300' :
+                                                                label === 'Keep Pause' ? 'bg-green-500/20 text-green-300' :
+                                                                label === 'Note' ? 'bg-gray-500/20 text-gray-300' :
+                                                                isCut ? 'bg-red-500/20 text-red-300' :
+                                                                'bg-gray-500/20 text-gray-300'
+                                                            }`}>
+                                                                {label}
+                                                            </span>
+                                                            <p className="text-sm text-white">{content}</p>
+                                                        </div>
+                                                        <span className="text-xs text-purple-300 shrink-0">{conf}%</span>
                                                     </div>
-                                                    <span className="text-xs text-purple-300">{edit.confidence}%</span>
-                                                </div>
-                                            ))}
+                                                );
+                                            })}
                                         </div>
                                     </div>
 
@@ -733,11 +782,11 @@ const startProcessing = async () => {
                                         <div className="space-y-2">
                                             {[
                                                 'Listen to full edited episode',
-                                                'Verify no jarring cuts or artifacts',
+                                                'Verify no jarring cuts or audio artifacts',
                                                 'Check natural speech flow maintained',
                                                 'Confirm all client requirements met',
                                                 'Validate audio levels consistent',
-                                                'Review flagged sections (4 items)'
+                                                'Review any flagged sections'
                                             ].map((item, i) => (
                                                 <label key={i} className="flex items-center gap-3 text-amber-100 cursor-pointer hover:text-white transition-all">
                                                     <input type="checkbox" className="w-5 h-5 rounded accent-amber-500" />
@@ -748,12 +797,17 @@ const startProcessing = async () => {
                                     </div>
 
                                     <div className="flex gap-4">
-                                        <button className="flex-1 bg-red-500 text-white py-4 rounded-xl font-semibold hover:bg-red-600 transition-all">
-                                            Request Re-Edit
-                                        </button>
-                                        <button className="flex-1 bg-gradient-to-r from-green-500 to-emerald-500 text-white py-4 rounded-xl font-semibold hover:from-green-600 hover:to-emerald-600 transition-all flex items-center justify-center gap-2">
-                                            <CheckCircle />
-                                            Approve & Deliver
+                                        <button
+                                            onClick={downloadEditedAudio}
+                                            disabled={isDownloading || !processingComplete}
+                                            className={`flex-1 py-4 rounded-xl font-semibold transition-all flex items-center justify-center gap-2 ${
+                                                processingComplete && !isDownloading
+                                                    ? 'bg-gradient-to-r from-green-500 to-emerald-500 text-white hover:from-green-600 hover:to-emerald-600'
+                                                    : 'bg-white/10 text-white/40 cursor-not-allowed'
+                                            }`}
+                                        >
+                                            <Download className="w-5 h-5" />
+                                            {isDownloading ? 'Editing audio...' : 'Download Edited Audio'}
                                         </button>
                                     </div>
                                 </div>

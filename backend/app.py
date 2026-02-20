@@ -89,78 +89,134 @@ def get_transcription(transcript_id):
     return response.json()
 
 
+FILLER_WORDS = {
+    'um', 'uh', 'hmm', 'mhm', 'hm',
+    'like', 'basically', 'literally', 'actually', 'honestly',
+    'right', 'okay', 'ok', 'so', 'well',
+    'you know', 'i mean', 'kind of', 'sort of', 'you know what i mean',
+}
+
+
+def _find_fillers(words):
+    """Scan word list for filler words/phrases; return list of {text, start_ms, end_ms, speaker}."""
+    found = []
+    i = 0
+    while i < len(words):
+        w = words[i]
+        tok = w.get('text', '').lower().strip('.,!?;:')
+        # Two-word phrases first
+        if i + 1 < len(words):
+            two = tok + ' ' + words[i + 1].get('text', '').lower().strip('.,!?;:')
+            if two in FILLER_WORDS:
+                found.append({
+                    'text': two,
+                    'start_ms': w.get('start', 0),
+                    'end_ms': words[i + 1].get('end', 0),
+                    'speaker': w.get('speaker', '?'),
+                })
+                i += 2
+                continue
+        if tok in FILLER_WORDS:
+            found.append({
+                'text': tok,
+                'start_ms': w.get('start', 0),
+                'end_ms': w.get('end', 0),
+                'speaker': w.get('speaker', '?'),
+            })
+        i += 1
+    return found
+
+
+def _find_pauses(words, min_ms=1000):
+    """Return list of pauses longer than min_ms between consecutive words."""
+    pauses = []
+    for i in range(len(words) - 1):
+        gap_start = words[i].get('end', 0)
+        gap_end = words[i + 1].get('start', 0)
+        gap_ms = gap_end - gap_start
+        if gap_ms >= min_ms:
+            pauses.append({
+                'start_ms': gap_start,
+                'end_ms': gap_end,
+                'duration_ms': gap_ms,
+                'before': words[i].get('text', ''),
+                'after': words[i + 1].get('text', ''),
+            })
+    return pauses
+
+
 def analyze_transcript_with_claude(transcript_data, requirements, custom_instructions=""):
-    """Use Claude to analyze transcript and generate edit decisions with ms-precise timestamps."""
+    """
+    Pre-detect fillers and pauses in Python, then ask Claude only for
+    confirmation / content-level editorial decisions. Keeps the prompt small
+    so the request stays well within Railway's timeout.
+    """
     print("Analyzing transcript with Claude...")
     client = anthropic.Anthropic(api_key=CLAUDE_API_KEY)
 
     words = transcript_data.get("words", [])
+    utterances = transcript_data.get("utterances", [])
 
-    # Build word-level transcript with ms timestamps (cap at 5000 words ~33 min)
-    word_lines = []
-    for w in words[:5000]:
-        word_lines.append(
-            f'{w.get("start", 0)} {w.get("end", 0)} {json.dumps(w.get("text", ""))} {w.get("speaker", "?")}'
-        )
-    word_text = "\n".join(word_lines)
+    # --- Build a compact utterance transcript for content context ---
+    utt_lines = []
+    for utt in utterances[:80]:
+        start = format_timestamp(utt.get("start", 0))
+        speaker = utt.get("speaker", "?")
+        text = utt.get("text", "")
+        utt_lines.append(f"[{start}] Speaker {speaker}: {text}")
+    utt_text = "\n".join(utt_lines) if utt_lines else transcript_data.get("text", "")[:4000]
 
-    # Detect pauses > 1000ms between consecutive words
-    pause_lines = []
-    for i in range(len(words) - 1):
-        gap_start = words[i].get("end", 0)
-        gap_end = words[i + 1].get("start", 0)
-        gap_ms = gap_end - gap_start
-        if gap_ms > 1000:
-            pause_lines.append(f"{gap_start} {gap_end} {gap_ms}ms")
-    pause_text = "\n".join(pause_lines[:300]) if pause_lines else "None detected"
+    # --- Pre-detect fillers ---
+    remove_fillers = requirements.get('removeFillerWords', True)
+    fillers = _find_fillers(words) if remove_fillers else []
+    filler_lines = [
+        f'{f["start_ms"]} {f["end_ms"]} "{f["text"]}" (Speaker {f["speaker"]})'
+        for f in fillers[:200]
+    ]
+    filler_text = "\n".join(filler_lines) if filler_lines else "None detected"
 
-    prompt = f"""You are an expert podcast editor. Analyze the word-level transcript below and produce a list of precise audio edits.
+    # --- Pre-detect long pauses ---
+    remove_pauses = requirements.get('removeLongPauses', True)
+    pauses = _find_pauses(words, min_ms=1500) if remove_pauses else []
+    pause_lines = [
+        f'{p["start_ms"]} {p["end_ms"]} {p["duration_ms"]}ms  ("{p["before"]}" → "{p["after"]}")'
+        for p in pauses[:100]
+    ]
+    pause_text = "\n".join(pause_lines) if pause_lines else "None detected"
 
-WORD-LEVEL TRANSCRIPT (format: start_ms end_ms "word" speaker):
-{word_text}
+    print(f"Pre-detected {len(fillers)} fillers, {len(pauses)} pauses")
 
-DETECTED PAUSES >1000ms (format: start_ms end_ms duration):
+    prompt = f"""You are an expert podcast editor. Review the pre-detected issues and transcript below, then return a final edit decision list with precise millisecond timestamps.
+
+UTTERANCE TRANSCRIPT (for context):
+{utt_text}
+
+PRE-DETECTED FILLER WORDS (format: start_ms end_ms "word" speaker):
+{filler_text}
+
+PRE-DETECTED PAUSES >1500ms (format: start_ms end_ms duration before→after):
 {pause_text}
 
 CLIENT REQUIREMENTS:
-- Remove filler words (um, uh, like, you know, basically, right, etc.): {requirements.get('removeFillerWords', True)}
-- Trim long pauses to 800ms: {requirements.get('removeLongPauses', True)}
+- Remove filler words: {remove_fillers}
+- Trim long pauses to 800ms: {remove_pauses}
 - Target length: {requirements.get('targetLength', 'Not specified')}
 
 CUSTOM INSTRUCTIONS:
 {custom_instructions if custom_instructions else "None"}
 
-RULES:
-1. For filler words: use the word's exact start_ms and end_ms from the transcript.
-2. For long pauses to trim: set start_ms = pause_start_ms + 800, end_ms = pause_end_ms (keeps first 800ms).
-3. For content cuts: span the full ms range of the words to remove.
-4. Decisions without a physical cut (notes, keep decisions) must omit start_ms and end_ms entirely.
-5. Use ONLY millisecond values that appear in the transcript above — do not invent values.
+INSTRUCTIONS:
+1. Confirm filler removals: include each filler as a "Remove Filler" decision using the EXACT start_ms and end_ms provided above.
+2. Trim long pauses: for each pause, set start_ms = pause_start_ms + 800, end_ms = pause_end_ms (keeps 800ms of natural pause).
+3. Add "Content Cut" decisions for any sections in the transcript that should be removed for editorial reasons (use ms values matching utterance start/end times).
+4. Add "Note" decisions (no start_ms/end_ms) for observations that don't require a cut.
+5. Use ONLY ms values from the data above — never invent values.
 
 Return ONLY a JSON array, no other text:
 [
-  {{
-    "type": "Remove Filler",
-    "description": "Remove 'um'",
-    "start_ms": 12680,
-    "end_ms": 12900,
-    "confidence": 95,
-    "rationale": "Filler word with no content value"
-  }},
-  {{
-    "type": "Trim Pause",
-    "description": "Trim 2100ms pause to 800ms",
-    "start_ms": 15700,
-    "end_ms": 17000,
-    "confidence": 90,
-    "rationale": "Excessive pause after sentence"
-  }},
-  {{
-    "type": "Note",
-    "description": "Good energy in this section, no edit needed",
-    "confidence": 100,
-    "rationale": "Preserve natural delivery"
-  }}
+  {{"type": "Remove Filler", "description": "Remove 'um'", "start_ms": 12680, "end_ms": 12900, "confidence": 95, "rationale": "Filler word"}},
+  {{"type": "Trim Pause", "description": "Trim 2500ms pause to 800ms", "start_ms": 15800, "end_ms": 17500, "confidence": 90, "rationale": "Excessive pause"}},
+  {{"type": "Note", "description": "Strong section, no edit needed", "confidence": 100, "rationale": "Preserve energy"}}
 ]"""
 
     message = client.messages.create(

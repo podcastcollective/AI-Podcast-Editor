@@ -258,63 +258,35 @@ const startProcessing = async () => {
     setActiveTab('processing');
 
     try {
-        // Agent 1: Upload and Transcribe
+        // Agent 1: Uploading
         setCurrentAgent('audio-analysis');
-        
+        console.log('Sending file for processing...');
+
         const formData = new FormData();
         formData.append('file', file);
-        
-        console.log('Uploading file...');
-        const uploadRes = await fetch(`${API_URL}/api/upload`, {
-            method: 'POST',
-            body: formData
-        });
-        
-        if (!uploadRes.ok) {
-            throw new Error('Upload failed');
-        }
-        
-        const uploadData = await uploadRes.json();
-        console.log('Upload successful:', uploadData);
-        
-        if (!uploadData.success) {
-            throw new Error('Upload failed: ' + (uploadData.error || 'Unknown error'));
-        }
-        
-        // Mark audio analysis complete
-        setCompletedAgents(['audio-analysis']);
+        formData.append('requirements', JSON.stringify({
+            removeFillerWords: requirements.removeFillerWords,
+            removeLongPauses: requirements.removeLongPauses,
+            normalizeAudio: requirements.normalizeAudio,
+            removeBackgroundNoise: requirements.removeBackgroundNoise,
+            targetLength: requirements.targetLength
+        }));
+        formData.append('customInstructions', requirements.customInstructions);
+
+        // Advance UI through agents while backend works
         await new Promise(resolve => setTimeout(resolve, 500));
-        
-        // Agent 2: Content Editor (processing happens on backend)
+        setCompletedAgents(['audio-analysis']);
         setCurrentAgent('content-editor');
-        await new Promise(resolve => setTimeout(resolve, 1000));
+        await new Promise(resolve => setTimeout(resolve, 800));
         setCompletedAgents(['audio-analysis', 'content-editor']);
-        
-        // Agent 3: Audio Engineer (processing happens on backend)
         setCurrentAgent('audio-engineer');
-        await new Promise(resolve => setTimeout(resolve, 1000));
+        await new Promise(resolve => setTimeout(resolve, 800));
         setCompletedAgents(['audio-analysis', 'content-editor', 'audio-engineer']);
-        
-        // Agent 4: QA + Process
         setCurrentAgent('qa-agent');
-        console.log('Processing podcast...');
-        
+
         const processRes = await fetch(`${API_URL}/api/process`, {
             method: 'POST',
-            headers: { 
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({
-                filename: uploadData.filename,
-                requirements: {
-                    removeFillerWords: requirements.removeFillerWords,
-                    removeLongPauses: requirements.removeLongPauses,
-                    normalizeAudio: requirements.normalizeAudio,
-                    removeBackgroundNoise: requirements.removeBackgroundNoise,
-                    targetLength: requirements.targetLength
-                },
-                customInstructions: requirements.customInstructions
-            })
+            body: formData
         });
         
         if (!processRes.ok) {

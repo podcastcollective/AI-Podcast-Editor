@@ -82,22 +82,14 @@ def start_transcription(audio_url):
     return transcript_id
 
 
-def poll_transcription(transcript_id):
-    """Poll AssemblyAI until transcription is complete, return transcript data."""
-    print(f"Polling transcription {transcript_id}...")
+def get_transcription(transcript_id):
+    """Fetch current transcription state from AssemblyAI (single request, no polling)."""
     headers = {"authorization": ASSEMBLYAI_API_KEY}
     url = f"https://api.assemblyai.com/v2/transcript/{transcript_id}"
-    while True:
-        response = requests.get(url, headers=headers)
-        data = response.json()
-        status = data.get("status")
-        if status == "completed":
-            print("Transcription complete!")
-            return data
-        elif status == "error":
-            raise Exception(f"Transcription failed: {data.get('error', 'Unknown error')}")
-        print(f"Transcription status: {status}... waiting 5s")
-        time.sleep(5)
+    response = requests.get(url, headers=headers)
+    if response.status_code != 200:
+        raise Exception(f"AssemblyAI status check failed: {response.status_code} - {response.text}")
+    return response.json()
 
 
 def analyze_transcript_with_claude(transcript_data, requirements, custom_instructions=""):
@@ -314,6 +306,22 @@ def upload_file():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route('/api/transcription-status/<transcript_id>', methods=['GET'])
+def transcription_status(transcript_id):
+    """Return current AssemblyAI transcription status without blocking."""
+    if not ASSEMBLYAI_API_KEY:
+        return jsonify({"error": "ASSEMBLYAI_API_KEY not configured"}), 500
+    try:
+        data = get_transcription(transcript_id)
+        status = data.get("status")
+        return jsonify({
+            "status": status,
+            "error": data.get("error") if status == "error" else None
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route('/api/process', methods=['POST', 'OPTIONS'])
 def process_podcast():
     """
@@ -343,9 +351,14 @@ def process_podcast():
         print(f"transcript_id: {transcript_id}")
         print(f"Requirements: {requirements}")
 
-        # Step 1: Wait for transcription to finish
-        print("\nSTEP 1: POLLING TRANSCRIPTION")
-        transcript_data = poll_transcription(transcript_id)
+        # Step 1: Fetch transcript (must already be completed — frontend polls status endpoint)
+        print("\nSTEP 1: FETCHING TRANSCRIPT")
+        transcript_data = get_transcription(transcript_id)
+        status = transcript_data.get("status")
+        if status == "error":
+            raise Exception(f"Transcription failed: {transcript_data.get('error', 'Unknown error')}")
+        if status != "completed":
+            return jsonify({"error": f"Transcription not ready (status: {status}). Poll /api/transcription-status first."}), 400
         print(f"Transcription complete. Duration: {transcript_data.get('audio_duration')}ms")
 
         # Step 2: Analyze with Claude

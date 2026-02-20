@@ -280,14 +280,30 @@ const startProcessing = async () => {
 
         setCompletedAgents(['audio-analysis']);
         setCurrentAgent('content-editor');
-        await new Promise(resolve => setTimeout(resolve, 800));
+
+        // Step 2: Poll transcription status until ready
+        console.log('Waiting for transcription...');
+        let transcriptReady = false;
+        while (!transcriptReady) {
+            await new Promise(resolve => setTimeout(resolve, 5000));
+            const statusRes = await fetch(`${API_URL}/api/transcription-status/${uploadData.transcript_id}`);
+            const statusData = await statusRes.json();
+            console.log('Transcription status:', statusData.status);
+            if (statusData.status === 'completed') {
+                transcriptReady = true;
+            } else if (statusData.status === 'error') {
+                throw new Error('Transcription failed: ' + (statusData.error || 'Unknown error'));
+            }
+            // else still processing — loop again
+        }
+
         setCompletedAgents(['audio-analysis', 'content-editor']);
         setCurrentAgent('audio-engineer');
         await new Promise(resolve => setTimeout(resolve, 800));
         setCompletedAgents(['audio-analysis', 'content-editor', 'audio-engineer']);
         setCurrentAgent('qa-agent');
 
-        // Step 2: Poll transcription + run Claude (small JSON request)
+        // Step 3: Run Claude analysis (transcript already done, this is fast)
         console.log('Processing transcript...');
         const processRes = await fetch(`${API_URL}/api/process`, {
             method: 'POST',

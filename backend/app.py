@@ -258,28 +258,26 @@ Return ONLY a JSON array, no other text:
   {{"type": "Note", "description": "Strong section, no edit needed", "confidence": 100, "rationale": "Preserve energy"}}
 ]"""
 
+    # Prefill the assistant turn with "[" — Claude must continue the JSON array.
+    # This makes it structurally impossible to return prose or a code fence.
     message = client.messages.create(
         model="claude-sonnet-4-6",
         max_tokens=4000,
-        messages=[{"role": "user", "content": prompt}]
+        messages=[
+            {"role": "user", "content": prompt},
+            {"role": "assistant", "content": "["},
+        ]
     )
 
-    response_text = message.content[0].text.strip()
-    print(f"Claude raw response (first 300 chars): {response_text[:300]}")
-
-    # Strip markdown code fences if present (```json ... ``` or ``` ... ```)
-    if response_text.startswith('```'):
-        lines = response_text.splitlines()
-        # Remove opening fence line and closing ``` line
-        inner = lines[1:]
-        if inner and inner[-1].strip() == '```':
-            inner = inner[:-1]
-        response_text = '\n'.join(inner).strip()
+    # The API returns only the continuation; we prepend the "[" we sent.
+    continuation = message.content[0].text.strip()
+    response_text = "[" + continuation
+    print(f"Claude response (first 300 chars): {response_text[:300]}")
 
     try:
         edit_decisions = json.loads(response_text)
     except json.JSONDecodeError:
-        # Balanced-bracket scan: find the first complete JSON array in the text
+        # Balanced-bracket scan as a last resort
         array_text = _extract_json_array(response_text)
         if array_text:
             edit_decisions = json.loads(array_text)

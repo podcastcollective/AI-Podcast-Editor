@@ -12,23 +12,13 @@ from datetime import datetime
 from werkzeug.utils import secure_filename
 import anthropic
 import requests
-from pathlib import Path
 
 app = Flask(__name__)
 
 # CORS: allow all origins without credentials (required for GitHub Pages -> Railway)
 CORS(app)
 
-# Configuration
-UPLOAD_FOLDER = '/tmp/uploads'
-OUTPUT_FOLDER = '/tmp/outputs'
 ALLOWED_EXTENSIONS = {'mp3', 'wav', 'm4a', 'aac', 'ogg'}
-
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-os.makedirs(OUTPUT_FOLDER, exist_ok=True)
-
-app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
-app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024  # 500MB max file size
 
 # Get API keys from environment variables
 ASSEMBLYAI_API_KEY = os.environ.get('ASSEMBLYAI_API_KEY')
@@ -39,94 +29,80 @@ if not ASSEMBLYAI_API_KEY or not CLAUDE_API_KEY:
 
 
 def allowed_file(filename):
-    """Check if file extension is allowed"""
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
 
-def upload_to_assemblyai(audio_file_path):
-    """Upload audio file to AssemblyAI and return upload URL"""
-    print(f"Uploading to AssemblyAI: {audio_file_path}")
+def stream_to_assemblyai(file_obj):
+    """Stream file object directly to AssemblyAI, return upload URL."""
+    print("Streaming file to AssemblyAI...")
     headers = {"authorization": ASSEMBLYAI_API_KEY}
-
-    with open(audio_file_path, "rb") as f:
-        response = requests.post(
-            "https://api.assemblyai.com/v2/upload",
-            headers=headers,
-            data=f
-        )
-
-    if response.status_code == 200:
-        upload_url = response.json()["upload_url"]
-        print(f"Upload successful: {upload_url}")
-        return upload_url
-    else:
-        raise Exception(f"Upload failed: {response.status_code} - {response.text}")
+    response = requests.post(
+        "https://api.assemblyai.com/v2/upload",
+        headers=headers,
+        data=file_obj
+    )
+    if response.status_code != 200:
+        raise Exception(f"AssemblyAI upload failed: {response.status_code} - {response.text}")
+    upload_url = response.json()["upload_url"]
+    print(f"AssemblyAI upload URL: {upload_url}")
+    return upload_url
 
 
-def transcribe_audio(audio_url):
-    """Transcribe audio using AssemblyAI with speaker detection"""
-    print("Starting transcription...")
+def start_transcription(audio_url):
+    """Submit transcription job to AssemblyAI, return transcript_id immediately."""
+    print("Submitting transcription job...")
     headers = {
         "authorization": ASSEMBLYAI_API_KEY,
         "content-type": "application/json"
     }
-
-    transcription_config = {
+    config = {
         "audio_url": audio_url,
-        "speech_models": ["universal-2"],
+        "speech_model": "universal-2",
         "speaker_labels": True,
         "punctuate": True,
         "format_text": True,
     }
-
-    print(f"Sending transcription request...")
     response = requests.post(
         "https://api.assemblyai.com/v2/transcript",
-        json=transcription_config,
+        json=config,
         headers=headers
     )
-
-    print(f"Transcription API response status: {response.status_code}")
-    print(f"Transcription API response: {response.text[:500]}")
-
+    print(f"Transcription submit status: {response.status_code}")
+    print(f"Transcription submit response: {response.text[:500]}")
     if response.status_code != 200:
-        raise Exception(f"Transcription request failed: {response.status_code} - {response.text}")
+        raise Exception(f"Transcription submit failed: {response.status_code} - {response.text}")
+    data = response.json()
+    if 'id' not in data:
+        raise Exception(f"No 'id' in transcription response: {data}")
+    transcript_id = data["id"]
+    print(f"Transcription job started: {transcript_id}")
+    return transcript_id
 
-    response_data = response.json()
 
-    if 'id' not in response_data:
-        raise Exception(f"No 'id' in response. Full response: {response_data}")
-
-    transcript_id = response_data["id"]
-    print(f"Transcription job created: {transcript_id}")
-
-    polling_url = f"https://api.assemblyai.com/v2/transcript/{transcript_id}"
-
-    # Poll for completion
+def poll_transcription(transcript_id):
+    """Poll AssemblyAI until transcription is complete, return transcript data."""
+    print(f"Polling transcription {transcript_id}...")
+    headers = {"authorization": ASSEMBLYAI_API_KEY}
+    url = f"https://api.assemblyai.com/v2/transcript/{transcript_id}"
     while True:
-        poll_response = requests.get(polling_url, headers={"authorization": ASSEMBLYAI_API_KEY})
-        poll_data = poll_response.json()
-        status = poll_data.get("status")
-
+        response = requests.get(url, headers=headers)
+        data = response.json()
+        status = data.get("status")
         if status == "completed":
             print("Transcription complete!")
-            return poll_data
+            return data
         elif status == "error":
-            raise Exception(f"Transcription failed: {poll_data.get('error', 'Unknown error')}")
-
-        print(f"Transcription status: {status}... waiting 5 seconds")
+            raise Exception(f"Transcription failed: {data.get('error', 'Unknown error')}")
+        print(f"Transcription status: {status}... waiting 5s")
         time.sleep(5)
 
 
 def analyze_transcript_with_claude(transcript_data, requirements, custom_instructions=""):
-    """Use Claude to analyze transcript and generate intelligent edit decisions"""
+    """Use Claude to analyze transcript and generate intelligent edit decisions."""
     print("Analyzing transcript with Claude...")
     client = anthropic.Anthropic(api_key=CLAUDE_API_KEY)
 
-    # Extract utterances
     utterances = transcript_data.get("utterances", [])
-
-    # Build transcript text with timestamps (limit for token efficiency)
     transcript_text = ""
     for utt in utterances[:100]:
         speaker = utt.get("speaker", "Unknown")
@@ -135,7 +111,6 @@ def analyze_transcript_with_claude(transcript_data, requirements, custom_instruc
         transcript_text += f"[{start_time}] Speaker {speaker}: {text}\n"
 
     if not transcript_text:
-        # Fall back to plain text if no utterances
         transcript_text = transcript_data.get("text", "")[:5000]
 
     prompt = f"""You are an expert podcast editor. Analyze this podcast transcript and generate intelligent editing decisions.
@@ -206,7 +181,6 @@ Return ONLY the JSON array, no other text."""
 
 
 def format_timestamp(milliseconds):
-    """Convert milliseconds to HH:MM:SS format"""
     seconds = milliseconds / 1000
     hours = int(seconds // 3600)
     minutes = int((seconds % 3600) // 60)
@@ -215,7 +189,6 @@ def format_timestamp(milliseconds):
 
 
 def generate_edit_report(filename, transcript_data, edit_analysis, requirements):
-    """Generate a comprehensive edit report"""
     report = f"""
 ================================================================================
                         AI PODCAST EDIT REPORT
@@ -247,7 +220,6 @@ EDIT DECISION LIST (EDL)
 Total edits: {len(edit_analysis['edit_decisions'])}
 
 """
-
     for i, decision in enumerate(edit_analysis['edit_decisions'], 1):
         report += f"""
 [{i}] {decision.get('timestamp', 'N/A')} - {decision.get('type', 'N/A')}
@@ -255,7 +227,6 @@ Total edits: {len(edit_analysis['edit_decisions'])}
     Confidence: {decision.get('confidence', 0)}%
     Rationale: {decision.get('rationale', 'N/A')}
 """
-
     report += """
 --------------------------------------------------------------------------------
 HUMAN EDITOR CHECKLIST
@@ -275,7 +246,6 @@ EDITOR SIGNATURE: _________________ DATE: _____________
 
 ================================================================================
 """
-
     return report
 
 
@@ -285,17 +255,19 @@ EDITOR SIGNATURE: _________________ DATE: _____________
 
 @app.route('/')
 def index():
-    """Health check endpoint"""
     return jsonify({
         "status": "online",
         "service": "AI Podcast Editor API",
-        "version": "1.0.0"
+        "version": "2.0.0"
     })
 
 
 @app.route('/api/upload', methods=['POST', 'OPTIONS'])
 def upload_file():
-    """Handle file upload"""
+    """
+    Step 1: Receive audio file, stream it to AssemblyAI, start transcription.
+    Returns transcript_id immediately — no local file storage needed.
+    """
     if request.method == 'OPTIONS':
         return '', 204
 
@@ -303,40 +275,42 @@ def upload_file():
     print("UPLOAD REQUEST RECEIVED")
     print("=" * 60)
 
+    if not ASSEMBLYAI_API_KEY:
+        return jsonify({"error": "ASSEMBLYAI_API_KEY not configured"}), 500
+
     if 'file' not in request.files:
-        print("ERROR: No file in request")
         return jsonify({"error": "No file provided"}), 400
 
     file = request.files['file']
 
     if file.filename == '':
-        print("ERROR: Empty filename")
         return jsonify({"error": "No file selected"}), 400
 
     if not allowed_file(file.filename):
-        print(f"ERROR: File type not allowed: {file.filename}")
         return jsonify({"error": "File type not allowed. Use MP3, WAV, M4A, AAC, or OGG"}), 400
 
-    # Save file
-    filename = secure_filename(file.filename)
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    unique_filename = f"{timestamp}_{filename}"
-    filepath = os.path.join(app.config['UPLOAD_FOLDER'], unique_filename)
-    file.save(filepath)
+    print(f"Received file: {file.filename}")
 
-    print(f"File saved: {filepath}")
-    print(f"File size: {os.path.getsize(filepath)} bytes")
+    # Stream directly to AssemblyAI — no local disk write
+    upload_url = stream_to_assemblyai(file)
+
+    # Submit transcription job (returns immediately with ID)
+    transcript_id = start_transcription(upload_url)
 
     return jsonify({
         "success": True,
-        "filename": unique_filename,
-        "message": "File uploaded successfully"
+        "transcript_id": transcript_id,
+        "filename": secure_filename(file.filename),
+        "message": "File uploaded and transcription started"
     })
 
 
 @app.route('/api/process', methods=['POST', 'OPTIONS'])
 def process_podcast():
-    """Process podcast episode with AI agents"""
+    """
+    Step 2: Poll AssemblyAI for transcript, then run Claude analysis.
+    Accepts JSON: { transcript_id, filename, requirements, customInstructions }
+    """
     if request.method == 'OPTIONS':
         return '', 204
 
@@ -348,65 +322,25 @@ def process_podcast():
         if not ASSEMBLYAI_API_KEY or not CLAUDE_API_KEY:
             return jsonify({"error": "API keys not configured on server"}), 500
 
-        # Accept multipart (file + JSON fields) or legacy JSON-only
-        if request.content_type and 'multipart/form-data' in request.content_type:
-            if 'file' not in request.files:
-                return jsonify({"error": "No file provided"}), 400
-            file = request.files['file']
-            if file.filename == '' or not allowed_file(file.filename):
-                return jsonify({"error": "Invalid file"}), 400
+        data = request.json
+        transcript_id = data.get('transcript_id')
+        filename = data.get('filename', 'episode')
+        requirements = data.get('requirements', {})
+        custom_instructions = data.get('customInstructions', '')
 
-            import json as _json
-            requirements = _json.loads(request.form.get('requirements', '{}'))
-            custom_instructions = request.form.get('customInstructions', '')
+        if not transcript_id:
+            return jsonify({"error": "No transcript_id provided"}), 400
 
-            filename = secure_filename(file.filename)
-            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            unique_filename = f"{timestamp}_{filename}"
-            filepath = os.path.join(app.config['UPLOAD_FOLDER'], unique_filename)
-            file.save(filepath)
-            print(f"File saved: {filepath} ({os.path.getsize(filepath)} bytes)")
-        else:
-            data = request.json
-            print(f"Request data keys: {list(data.keys()) if data else 'None'}")
-            filename = data.get('filename')
-            requirements = data.get('requirements', {})
-            custom_instructions = data.get('customInstructions', '')
-
-            if not filename:
-                return jsonify({"error": "No filename provided"}), 400
-
-            filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-            if not os.path.exists(filepath):
-                print(f"ERROR: File not found at {filepath}")
-                return jsonify({"error": f"File not found: {filename}"}), 404
-            unique_filename = filename
-
-        print(f"Processing file: {unique_filename}")
+        print(f"transcript_id: {transcript_id}")
         print(f"Requirements: {requirements}")
-        print("API keys verified")
 
-        # Create job ID and output directory
-        job_id = datetime.now().strftime('%Y%m%d_%H%M%S')
-        job_output_dir = os.path.join(OUTPUT_FOLDER, job_id)
-        os.makedirs(job_output_dir, exist_ok=True)
-
-        # Step 1: Upload to AssemblyAI
-        print("\nSTEP 1: UPLOADING TO ASSEMBLYAI")
-        audio_url = upload_to_assemblyai(filepath)
-
-        # Step 2: Transcribe
-        print("\nSTEP 2: TRANSCRIBING AUDIO")
-        transcript_data = transcribe_audio(audio_url)
+        # Step 1: Wait for transcription to finish
+        print("\nSTEP 1: POLLING TRANSCRIPTION")
+        transcript_data = poll_transcription(transcript_id)
         print(f"Transcription complete. Duration: {transcript_data.get('audio_duration')}ms")
 
-        # Save transcript
-        transcript_path = os.path.join(job_output_dir, "transcript.json")
-        with open(transcript_path, "w") as f:
-            json.dump(transcript_data, f, indent=2)
-
-        # Step 3: Analyze with Claude
-        print("\nSTEP 3: ANALYZING WITH CLAUDE")
+        # Step 2: Analyze with Claude
+        print("\nSTEP 2: ANALYZING WITH CLAUDE")
         edit_analysis = analyze_transcript_with_claude(
             transcript_data,
             requirements,
@@ -414,33 +348,15 @@ def process_podcast():
         )
         print(f"Analysis complete. Generated {len(edit_analysis['edit_decisions'])} edit decisions")
 
-        # Save edit decisions
-        edit_decisions_path = os.path.join(job_output_dir, "edit_decisions.json")
-        with open(edit_decisions_path, "w") as f:
-            json.dump(edit_analysis, f, indent=2)
-
-        # Step 4: Generate report
-        print("\nSTEP 4: GENERATING REPORT")
-        report = generate_edit_report(
-            filename,
-            transcript_data,
-            edit_analysis,
-            requirements
-        )
-
-        report_path = os.path.join(job_output_dir, "edit_report.txt")
-        with open(report_path, "w") as f:
-            f.write(report)
-
-        # Clean up uploaded file
-        os.remove(filepath)
+        # Step 3: Generate report
+        print("\nSTEP 3: GENERATING REPORT")
+        report = generate_edit_report(filename, transcript_data, edit_analysis, requirements)
 
         print("\nPROCESSING COMPLETE!")
         print("=" * 60)
 
         return jsonify({
             "success": True,
-            "job_id": job_id,
             "edit_decisions": edit_analysis['edit_decisions'],
             "report": report,
             "transcript": {
@@ -458,29 +374,8 @@ def process_podcast():
         return jsonify({"error": str(e)}), 500
 
 
-@app.route('/api/download/<job_id>/<file_type>', methods=['GET'])
-def download_file(job_id, file_type):
-    """Download generated files"""
-    file_mapping = {
-        'transcript': 'transcript.json',
-        'decisions': 'edit_decisions.json',
-        'report': 'edit_report.txt'
-    }
-
-    if file_type not in file_mapping:
-        return jsonify({"error": "Invalid file type"}), 400
-
-    filepath = os.path.join(OUTPUT_FOLDER, job_id, file_mapping[file_type])
-
-    if not os.path.exists(filepath):
-        return jsonify({"error": "File not found"}), 404
-
-    return send_file(filepath, as_attachment=True)
-
-
 @app.route('/api/status', methods=['GET'])
 def status():
-    """Check API status and configuration"""
     return jsonify({
         "status": "online",
         "assemblyai_configured": bool(ASSEMBLYAI_API_KEY),

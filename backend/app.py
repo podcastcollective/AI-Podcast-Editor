@@ -607,8 +607,8 @@ def process_with_cleanvoice(audio_path):
 def _run_edit_job(job_id, audio_path, cuts_ms, use_auphonic):
     """
     Background thread: cutting → cleanvoice → auphonic → completed.
-    Each stage is mandatory if its API key is configured — failures stop the
-    pipeline so the client is never silently given an incomplete product.
+    Every stage is mandatory if its API key is configured — any failure stops
+    the pipeline and reports the error so nothing incomplete reaches the client.
     """
     active_stage = 'init'
     try:
@@ -618,27 +618,19 @@ def _run_edit_job(job_id, audio_path, cuts_ms, use_auphonic):
             _edit_jobs[job_id]['status'] = 'cutting'
         wav_path = apply_audio_edits(audio_path, cuts_ms)
 
-        # Stage 2: Cleanvoice — AI audio-level cleaning (soft failure — skip on error)
+        # Stage 2: Cleanvoice — AI audio-level cleaning (hard failure — stops pipeline)
         if CLEANVOICE_API_KEY:
             active_stage = 'cleanvoice'
             with _edit_jobs_lock:
                 _edit_jobs[job_id]['status'] = 'cleanvoice'
-            try:
-                wav_path = process_with_cleanvoice(wav_path)
-            except Exception as cv_err:
-                print(f"WARNING: Cleanvoice failed, skipping: {cv_err}")
-                # Continue with the existing wav_path
+            wav_path = process_with_cleanvoice(wav_path)
 
-        # Stage 3: Auphonic — loudness normalisation + noise reduction (soft failure — skip on error)
+        # Stage 3: Auphonic — loudness normalisation + noise reduction (hard failure — stops pipeline)
         if use_auphonic and AUPHONIC_API_KEY:
             active_stage = 'auphonic'
             with _edit_jobs_lock:
                 _edit_jobs[job_id]['status'] = 'auphonic'
-            try:
-                final_path = process_with_auphonic(wav_path)
-            except Exception as au_err:
-                print(f"WARNING: Auphonic failed, skipping: {au_err}")
-                final_path = wav_path
+            final_path = process_with_auphonic(wav_path)
         else:
             final_path = wav_path
 

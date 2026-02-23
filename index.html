@@ -156,7 +156,8 @@
             const [claudeOverloaded, setClaudeOverloaded] = useState(false);
             const [editDecisions, setEditDecisions] = useState([]);
             const [isDownloading, setIsDownloading] = useState(false);
-            const [editStage, setEditStage] = useState(null); // null | 'cutting' | 'auphonic' | 'completed'
+            const [editStage, setEditStage] = useState(null); // null | 'cutting' | 'cleanvoice' | 'auphonic' | 'completed'
+            const [editError, setEditError] = useState(null); // null | {step, message}
             const [reportText, setReportText] = useState('');
             const [originalAudioUrl, setOriginalAudioUrl] = useState(null);
             const [editedAudioUrl, setEditedAudioUrl] = useState(null);
@@ -257,6 +258,7 @@
                     setEditedAudioUrl(null);
                     setEditedAudioSize(null);
                     setEditStage(null);
+                    setEditError(null);
                 }
             };
 
@@ -349,6 +351,7 @@ const downloadEditedAudio = async () => {
     try {
         // Step 1: kick off async edit job
         setEditStage('cutting');
+        setEditError(null);
         const startRes = await fetch(`${API_URL}/api/edit-audio`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -360,17 +363,27 @@ const downloadEditedAudio = async () => {
         console.log(`Edit job ${job_id} started (auphonic=${auphonic})`);
 
         // Step 2: poll until complete, surfacing each stage
+        let jobFailed = false;
         while (true) {
             await new Promise(r => setTimeout(r, 4000));
             const statusRes = await fetch(`${API_URL}/api/edit-audio-status/${job_id}`);
             const statusData = await statusRes.json();
-            console.log('edit-audio poll:', statusData.status || 'done');
-            if (!statusRes.ok) throw new Error(statusData.error || 'Edit job failed');
+            console.log('edit-audio poll:', statusData.status || 'error', statusData);
             if (statusData.status === 'cutting')    setEditStage('cutting');
             if (statusData.status === 'cleanvoice') setEditStage('cleanvoice');
             if (statusData.status === 'auphonic')   setEditStage('auphonic');
             if (statusData.status === 'completed')  { setEditStage('completed'); break; }
+            if (!statusRes.ok) {
+                // Pipeline stopped at a specific step — surface it clearly
+                setEditError({
+                    step: statusData.failed_step || 'unknown',
+                    message: statusData.error || 'An unexpected error occurred'
+                });
+                jobFailed = true;
+                break;
+            }
         }
+        if (jobFailed) return; // don't attempt download
 
         // Step 3: download the file
         const dlRes = await fetch(`${API_URL}/api/edit-audio-download/${job_id}`);
@@ -864,23 +877,26 @@ const startProcessing = async () => {
                                             return (
                                                 <div className="space-y-2 mb-5">
                                                     {stages.map((s, i) => {
-                                                        const done    = currentIdx > i || editStage === 'completed';
-                                                        const active  = editStage === s.key && s.key !== 'completed';
-                                                        const pending = currentIdx < i && editStage !== 'completed';
+                                                        const failed  = editError && editError.step === s.key;
+                                                        const done    = !failed && (currentIdx > i || editStage === 'completed');
+                                                        const active  = !failed && editStage === s.key && s.key !== 'completed';
                                                         return (
                                                             <div key={s.key} className={`flex items-center gap-3 rounded-lg px-4 py-3 transition-all ${
+                                                                failed  ? 'bg-red-500/20 border border-red-500/60' :
                                                                 active  ? 'bg-purple-500/20 border border-purple-500/50' :
                                                                 done    ? 'bg-green-500/10 border border-green-500/30' :
                                                                           'bg-white/5 border border-white/10'
                                                             }`}>
                                                                 <span className="text-lg w-6 text-center">
-                                                                    {done   ? '✓' :
+                                                                    {failed ? '✗' :
+                                                                     done   ? '✓' :
                                                                      active ? '⟳' : '○'}
                                                                 </span>
                                                                 <div className="flex-1">
-                                                                    <p className={`font-semibold text-sm ${done ? 'text-green-300' : active ? 'text-white' : 'text-white/40'}`}>{s.label}</p>
-                                                                    <p className={`text-xs ${done ? 'text-green-400/70' : active ? 'text-purple-300' : 'text-white/25'}`}>{s.sub}</p>
+                                                                    <p className={`font-semibold text-sm ${failed ? 'text-red-300' : done ? 'text-green-300' : active ? 'text-white' : 'text-white/40'}`}>{s.label}</p>
+                                                                    <p className={`text-xs ${failed ? 'text-red-400/80' : done ? 'text-green-400/70' : active ? 'text-purple-300' : 'text-white/25'}`}>{s.sub}</p>
                                                                 </div>
+                                                                {failed && <span className="text-xs text-red-300 font-semibold">Failed</span>}
                                                                 {active && <span className="text-xs text-purple-300 animate-pulse">In progress…</span>}
                                                                 {done   && s.key !== 'completed' && <span className="text-xs text-green-400">Done</span>}
                                                             </div>
@@ -890,11 +906,32 @@ const startProcessing = async () => {
                                             );
                                         })()}
 
+                                        {/* ── Step failure card ── */}
+                                        {editError && (
+                                            <div className="bg-red-500/10 border border-red-500/50 rounded-xl p-4 mb-4">
+                                                <p className="text-red-300 font-semibold text-sm mb-1">
+                                                    Pipeline stopped — {editError.step} step failed
+                                                </p>
+                                                <p className="text-red-200/70 text-xs mb-3 font-mono break-all">
+                                                    {editError.message}
+                                                </p>
+                                                <p className="text-red-200/60 text-xs mb-3">
+                                                    No audio was delivered to avoid giving the client an incomplete product. Fix the issue above (check your API key and account limits) then retry.
+                                                </p>
+                                                <button
+                                                    onClick={() => { setEditError(null); setEditStage(null); downloadEditedAudio(); }}
+                                                    className="flex items-center gap-2 bg-red-500 hover:bg-red-600 text-white px-4 py-2 rounded-lg text-sm font-semibold transition-all"
+                                                >
+                                                    ↺ Retry pipeline
+                                                </button>
+                                            </div>
+                                        )}
+
                                         <button
                                             onClick={downloadEditedAudio}
-                                            disabled={isDownloading || !processingComplete}
+                                            disabled={isDownloading || !processingComplete || !!editError}
                                             className={`w-full py-4 rounded-xl font-semibold transition-all flex items-center justify-center gap-2 ${
-                                                processingComplete && !isDownloading
+                                                processingComplete && !isDownloading && !editError
                                                     ? 'bg-gradient-to-r from-green-500 to-emerald-500 text-white hover:from-green-600 hover:to-emerald-600'
                                                     : 'bg-white/10 text-white/40 cursor-not-allowed'
                                             }`}

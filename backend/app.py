@@ -475,31 +475,32 @@ def process_with_cleanvoice(audio_path):
 
 
 def _run_edit_job(job_id, audio_path, cuts_ms, use_auphonic):
-    """Background thread: cutting → cleanvoice → auphonic → completed."""
+    """
+    Background thread: cutting → cleanvoice → auphonic → completed.
+    Each stage is mandatory if its API key is configured — failures stop the
+    pipeline so the client is never silently given an incomplete product.
+    """
+    active_stage = 'init'
     try:
         # Stage 1: apply timestamp cuts with pydub
+        active_stage = 'cutting'
         with _edit_jobs_lock:
             _edit_jobs[job_id]['status'] = 'cutting'
         wav_path = apply_audio_edits(audio_path, cuts_ms)
 
-        # Stage 2: Cleanvoice — AI audio-level cleaning (optional)
+        # Stage 2: Cleanvoice — AI audio-level cleaning (no silent fallback)
         if CLEANVOICE_API_KEY:
+            active_stage = 'cleanvoice'
             with _edit_jobs_lock:
                 _edit_jobs[job_id]['status'] = 'cleanvoice'
-            try:
-                wav_path = process_with_cleanvoice(wav_path)
-            except Exception as e:
-                print(f"Cleanvoice failed, continuing without it: {e}")
+            wav_path = process_with_cleanvoice(wav_path)
 
-        # Stage 3: Auphonic — loudness normalisation + noise reduction (optional)
+        # Stage 3: Auphonic — loudness normalisation + noise reduction (no silent fallback)
         if use_auphonic and AUPHONIC_API_KEY:
+            active_stage = 'auphonic'
             with _edit_jobs_lock:
                 _edit_jobs[job_id]['status'] = 'auphonic'
-            try:
-                final_path = process_with_auphonic(wav_path)
-            except Exception as e:
-                print(f"Auphonic failed, falling back to WAV: {e}")
-                final_path = wav_path
+            final_path = process_with_auphonic(wav_path)
         else:
             final_path = wav_path
 
@@ -515,7 +516,11 @@ def _run_edit_job(job_id, audio_path, cuts_ms, use_auphonic):
         import traceback
         traceback.print_exc()
         with _edit_jobs_lock:
-            _edit_jobs[job_id] = {'status': 'error', 'error': str(e)}
+            _edit_jobs[job_id] = {
+                'status': 'error',
+                'error': str(e),
+                'failed_step': active_stage,
+            }
 
 
 def format_timestamp(milliseconds):
@@ -858,7 +863,7 @@ def edit_audio_status(job_id):
     if job['status'] == 'completed':
         return jsonify({"status": "completed", "is_mp3": job.get('is_mp3', False)})
     if job['status'] == 'error':
-        return jsonify({"error": job['error']}), 500
+        return jsonify({"error": job['error'], "failed_step": job.get('failed_step')}), 500
     return jsonify({"status": job['status']})
 
 

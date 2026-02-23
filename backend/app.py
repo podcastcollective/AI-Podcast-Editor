@@ -575,9 +575,11 @@ def process_with_cleanvoice(audio_path):
         print(f"Cleanvoice status: {status}")
 
         if status in ('completed', 'SUCCESS', 'done'):
-            # Find the download URL in the response
+            # Find the download URL — Cleanvoice v2 puts it at result.download_url
+            result = data.get('result', {})
             download_url = (
-                data.get('result', {}).get('url') or
+                result.get('download_url') or
+                result.get('url') or
                 data.get('download_url') or
                 data.get('output', {}).get('url')
             )

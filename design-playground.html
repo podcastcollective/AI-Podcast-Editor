@@ -1,0 +1,847 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Design Playground</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+      background: #0f0f11;
+      color: #e4e4e7;
+      height: 100vh;
+      display: grid;
+      grid-template-columns: 320px 1fr;
+      overflow: hidden;
+    }
+
+    /* ── Controls panel ── */
+    #controls {
+      background: #18181b;
+      border-right: 1px solid #27272a;
+      overflow-y: auto;
+      padding: 20px;
+    }
+
+    /* ── Right panel ── */
+    #right {
+      display: grid;
+      grid-template-rows: 1fr auto;
+      overflow: hidden;
+    }
+
+    #preview-area {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 40px;
+      overflow: auto;
+      position: relative;
+      transition: background 0.3s;
+    }
+
+    /* ── Prompt area ── */
+    #prompt-area {
+      background: #18181b;
+      border-top: 1px solid #27272a;
+      padding: 16px 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    #prompt-text {
+      font-family: ui-monospace, 'SF Mono', 'Cascadia Code', monospace;
+      font-size: 13px;
+      line-height: 1.6;
+      color: #a1a1aa;
+      min-height: 3.5em;
+    }
+
+    #copy-btn {
+      align-self: flex-start;
+      background: #27272a;
+      border: 1px solid #3f3f46;
+      color: #e4e4e7;
+      padding: 6px 14px;
+      border-radius: 6px;
+      font-size: 12px;
+      cursor: pointer;
+      font-family: inherit;
+      transition: background 0.15s, color 0.15s, border-color 0.15s;
+    }
+    #copy-btn:hover { background: #3f3f46; }
+    #copy-btn.copied { color: #4ade80; border-color: #4ade80; }
+
+    /* ── Section ── */
+    .section { margin-bottom: 24px; }
+
+    .section-title {
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: #71717a;
+      margin-bottom: 12px;
+      padding-bottom: 6px;
+      border-bottom: 1px solid #27272a;
+    }
+
+    .control-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 10px;
+      gap: 12px;
+    }
+
+    .control-label {
+      font-size: 12px;
+      color: #a1a1aa;
+      min-width: 90px;
+      flex-shrink: 0;
+    }
+
+    .control-value {
+      font-size: 11px;
+      font-family: ui-monospace, monospace;
+      color: #71717a;
+      min-width: 36px;
+      text-align: right;
+      flex-shrink: 0;
+    }
+
+    input[type="range"] {
+      flex: 1;
+      -webkit-appearance: none;
+      height: 3px;
+      background: #3f3f46;
+      border-radius: 2px;
+      outline: none;
+      cursor: pointer;
+    }
+    input[type="range"]::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: #a78bfa;
+      cursor: pointer;
+      transition: transform 0.1s;
+    }
+    input[type="range"]::-webkit-slider-thumb:hover { transform: scale(1.2); }
+
+    select {
+      flex: 1;
+      background: #27272a;
+      border: 1px solid #3f3f46;
+      color: #e4e4e7;
+      padding: 5px 8px;
+      border-radius: 6px;
+      font-size: 12px;
+      font-family: inherit;
+      cursor: pointer;
+      outline: none;
+    }
+
+    .toggle-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 10px;
+    }
+
+    .toggle { position: relative; width: 32px; height: 18px; }
+    .toggle input { opacity: 0; width: 0; height: 0; }
+    .toggle-track {
+      position: absolute;
+      inset: 0;
+      background: #3f3f46;
+      border-radius: 9px;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+    .toggle input:checked + .toggle-track { background: #7c3aed; }
+    .toggle-track::after {
+      content: '';
+      position: absolute;
+      left: 2px; top: 2px;
+      width: 14px; height: 14px;
+      background: white;
+      border-radius: 50%;
+      transition: left 0.15s;
+    }
+    .toggle input:checked + .toggle-track::after { left: 16px; }
+
+    /* ── Presets ── */
+    .presets {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 6px;
+      margin-bottom: 24px;
+    }
+
+    .preset-btn {
+      background: #27272a;
+      border: 1px solid #3f3f46;
+      color: #a1a1aa;
+      padding: 6px 10px;
+      border-radius: 6px;
+      font-size: 11px;
+      cursor: pointer;
+      font-family: inherit;
+      transition: all 0.15s;
+      text-align: center;
+    }
+    .preset-btn:hover { background: #3f3f46; color: #e4e4e7; border-color: #52525b; }
+    .preset-btn.active { border-color: #7c3aed; color: #a78bfa; background: #1e1333; }
+
+    /* ── Context toggle ── */
+    .context-toggle {
+      display: flex;
+      gap: 4px;
+      background: #27272a;
+      padding: 3px;
+      border-radius: 8px;
+      position: absolute;
+      top: 16px;
+      right: 16px;
+    }
+    .ctx-btn {
+      padding: 4px 12px;
+      border-radius: 5px;
+      font-size: 11px;
+      cursor: pointer;
+      border: none;
+      font-family: inherit;
+      background: transparent;
+      color: #71717a;
+      transition: all 0.15s;
+    }
+    .ctx-btn.active { background: #3f3f46; color: #e4e4e7; }
+
+    /* ── Card preview ── */
+    #preview-card {
+      transition: transform 0.2s ease, box-shadow 0.2s ease;
+      width: 100%;
+    }
+
+    .card-image-el {
+      width: 100%;
+      aspect-ratio: 16/9;
+      display: block;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    }
+
+    .card-tag {
+      display: inline-block;
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+    }
+
+    .card-title { font-weight: 700; line-height: 1.25; margin: 6px 0 8px; }
+
+    .card-description { line-height: 1.6; }
+
+    .card-footer {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-top: 16px;
+    }
+
+    .card-avatar {
+      width: 28px; height: 28px;
+      border-radius: 50%;
+      background: linear-gradient(135deg, #f59e0b, #ef4444);
+      flex-shrink: 0;
+    }
+
+    .card-meta { display: flex; align-items: center; gap: 8px; }
+
+    .card-cta {
+      font-size: 13px;
+      font-weight: 600;
+      border: none;
+      cursor: pointer;
+      font-family: inherit;
+      transition: opacity 0.15s;
+    }
+    .card-cta:hover { opacity: 0.85; }
+
+    .hue-swatch {
+      width: 22px; height: 22px;
+      border-radius: 4px;
+      flex-shrink: 0;
+      border: 1px solid rgba(255,255,255,0.1);
+    }
+  </style>
+</head>
+<body>
+
+<!-- ── LEFT: Controls ── -->
+<div id="controls">
+
+  <div style="margin-bottom:20px;">
+    <div style="font-size:15px;font-weight:700;color:#e4e4e7;margin-bottom:4px;">Design Explorer</div>
+    <div style="font-size:12px;color:#52525b;">Card component · tweak controls, copy the prompt</div>
+  </div>
+
+  <!-- Presets -->
+  <div class="section">
+    <div class="section-title">Presets</div>
+    <div class="presets">
+      <button class="preset-btn active" data-preset="minimal">Clean & Minimal</button>
+      <button class="preset-btn" data-preset="elevated">Elevated</button>
+      <button class="preset-btn" data-preset="bold">Bold & Playful</button>
+      <button class="preset-btn" data-preset="glass">Glass Effect</button>
+      <button class="preset-btn" data-preset="compact">Dense & Compact</button>
+    </div>
+  </div>
+
+  <!-- Spacing -->
+  <div class="section">
+    <div class="section-title">Spacing</div>
+    <div class="control-row">
+      <span class="control-label">Padding</span>
+      <input type="range" id="padding" min="8" max="48" step="2">
+      <span class="control-value" id="val-padding">24px</span>
+    </div>
+    <div class="control-row">
+      <span class="control-label">Border Radius</span>
+      <input type="range" id="radius" min="0" max="32" step="1">
+      <span class="control-value" id="val-radius">12px</span>
+    </div>
+    <div class="control-row">
+      <span class="control-label">Image Radius</span>
+      <input type="range" id="imageRadius" min="0" max="24" step="1">
+      <span class="control-value" id="val-imageRadius">0px</span>
+    </div>
+    <div class="control-row">
+      <span class="control-label">Max Width</span>
+      <input type="range" id="maxWidth" min="240" max="480" step="8">
+      <span class="control-value" id="val-maxWidth">360</span>
+    </div>
+  </div>
+
+  <!-- Color -->
+  <div class="section">
+    <div class="section-title">Color</div>
+    <div class="control-row">
+      <span class="control-label">Accent Hue</span>
+      <input type="range" id="accentHue" min="0" max="360" step="1">
+      <div class="hue-swatch" id="hue-swatch"></div>
+    </div>
+    <div class="control-row">
+      <span class="control-label">Card BG</span>
+      <select id="cardBg">
+        <option value="white">White</option>
+        <option value="light">Light Grey</option>
+        <option value="tinted">Accent Tinted</option>
+        <option value="surface">Dark Surface</option>
+      </select>
+    </div>
+    <div class="toggle-row">
+      <span class="control-label">Show border</span>
+      <label class="toggle">
+        <input type="checkbox" id="showBorder">
+        <span class="toggle-track"></span>
+      </label>
+    </div>
+    <div class="control-row">
+      <span class="control-label">Border Width</span>
+      <input type="range" id="borderWidth" min="1" max="4" step="1">
+      <span class="control-value" id="val-borderWidth">1px</span>
+    </div>
+  </div>
+
+  <!-- Shadow -->
+  <div class="section">
+    <div class="section-title">Shadow</div>
+    <div class="toggle-row">
+      <span class="control-label">Enable shadow</span>
+      <label class="toggle">
+        <input type="checkbox" id="showShadow" checked>
+        <span class="toggle-track"></span>
+      </label>
+    </div>
+    <div class="control-row">
+      <span class="control-label">Blur</span>
+      <input type="range" id="shadowBlur" min="0" max="60" step="2">
+      <span class="control-value" id="val-shadowBlur">16px</span>
+    </div>
+    <div class="control-row">
+      <span class="control-label">Y Offset</span>
+      <input type="range" id="shadowY" min="0" max="32" step="1">
+      <span class="control-value" id="val-shadowY">4px</span>
+    </div>
+    <div class="control-row">
+      <span class="control-label">Opacity</span>
+      <input type="range" id="shadowOpacity" min="0" max="40" step="1">
+      <span class="control-value" id="val-shadowOpacity">10%</span>
+    </div>
+  </div>
+
+  <!-- Typography -->
+  <div class="section">
+    <div class="section-title">Typography</div>
+    <div class="control-row">
+      <span class="control-label">Font</span>
+      <select id="fontFamily">
+        <option value="system">System UI</option>
+        <option value="serif">Serif</option>
+        <option value="mono">Monospace</option>
+        <option value="georgia">Georgia</option>
+      </select>
+    </div>
+    <div class="control-row">
+      <span class="control-label">Title Size</span>
+      <input type="range" id="titleSize" min="14" max="28" step="1">
+      <span class="control-value" id="val-titleSize">18px</span>
+    </div>
+    <div class="control-row">
+      <span class="control-label">Body Size</span>
+      <input type="range" id="bodySize" min="11" max="18" step="1">
+      <span class="control-value" id="val-bodySize">14px</span>
+    </div>
+    <div class="control-row">
+      <span class="control-label">Title Weight</span>
+      <select id="titleWeight">
+        <option value="400">Regular (400)</option>
+        <option value="500">Medium (500)</option>
+        <option value="600">Semibold (600)</option>
+        <option value="700" selected>Bold (700)</option>
+        <option value="800">Extrabold (800)</option>
+        <option value="900">Black (900)</option>
+      </select>
+    </div>
+  </div>
+
+  <!-- Hover -->
+  <div class="section">
+    <div class="section-title">Hover / Interaction</div>
+    <div class="toggle-row">
+      <span class="control-label">Lift on hover</span>
+      <label class="toggle">
+        <input type="checkbox" id="hoverLift" checked>
+        <span class="toggle-track"></span>
+      </label>
+    </div>
+    <div class="control-row">
+      <span class="control-label">Lift Amount</span>
+      <input type="range" id="liftAmount" min="1" max="12" step="1">
+      <span class="control-value" id="val-liftAmount">3px</span>
+    </div>
+    <div class="toggle-row">
+      <span class="control-label">Show image</span>
+      <label class="toggle">
+        <input type="checkbox" id="showImage" checked>
+        <span class="toggle-track"></span>
+      </label>
+    </div>
+  </div>
+
+</div>
+
+<!-- ── RIGHT: Preview + Prompt ── -->
+<div id="right">
+  <div id="preview-area">
+    <div class="context-toggle">
+      <button class="ctx-btn" data-ctx="light">Light</button>
+      <button class="ctx-btn active" data-ctx="dark">Dark</button>
+    </div>
+
+    <div id="preview-card">
+      <div id="card-image-wrap">
+        <div class="card-image-el" id="card-image"></div>
+      </div>
+      <div id="card-body-el">
+        <span class="card-tag" id="card-tag">Design</span>
+        <div class="card-title" id="card-title">The Art of Good Design</div>
+        <div class="card-description" id="card-desc">
+          Good design isn't just aesthetics — it's about clarity, intention, and making things work beautifully for the people who use them.
+        </div>
+        <div class="card-footer">
+          <div class="card-meta">
+            <div class="card-avatar"></div>
+            <div style="font-size:12px;">
+              <div id="card-author" style="font-weight:600;">Alex Chen</div>
+              <div id="card-meta-sub" style="color:#6b7280;">4 min read</div>
+            </div>
+          </div>
+          <button class="card-cta" id="card-cta">Read more</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="prompt-area">
+    <div style="font-size:11px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;color:#71717a;">Generated Prompt</div>
+    <div id="prompt-text"></div>
+    <button id="copy-btn" onclick="copyPrompt()">Copy Prompt</button>
+  </div>
+</div>
+
+<script>
+  // ── State & defaults ─────────────────────────────────────────────────────
+  const DEFAULTS = {
+    padding: 24, radius: 12, imageRadius: 0, maxWidth: 360,
+    accentHue: 258,
+    cardBg: 'white', showBorder: false, borderWidth: 1,
+    showShadow: true, shadowBlur: 16, shadowY: 4, shadowOpacity: 10,
+    fontFamily: 'system', titleSize: 18, bodySize: 14, titleWeight: '700',
+    hoverLift: true, liftAmount: 3, showImage: true,
+  };
+
+  const state = { ...DEFAULTS };
+  let ctx = 'dark';
+
+  // ── Presets ──────────────────────────────────────────────────────────────
+  const PRESETS = {
+    minimal: {
+      padding: 24, radius: 8, imageRadius: 0, maxWidth: 360,
+      accentHue: 220, cardBg: 'white', showBorder: false, borderWidth: 1,
+      showShadow: false, shadowBlur: 0, shadowY: 0, shadowOpacity: 5,
+      fontFamily: 'system', titleSize: 18, bodySize: 14, titleWeight: '600',
+      hoverLift: false, liftAmount: 2, showImage: true,
+    },
+    elevated: {
+      padding: 28, radius: 16, imageRadius: 0, maxWidth: 380,
+      accentHue: 258, cardBg: 'white', showBorder: false, borderWidth: 1,
+      showShadow: true, shadowBlur: 32, shadowY: 8, shadowOpacity: 12,
+      fontFamily: 'system', titleSize: 20, bodySize: 14, titleWeight: '700',
+      hoverLift: true, liftAmount: 4, showImage: true,
+    },
+    bold: {
+      padding: 24, radius: 20, imageRadius: 16, maxWidth: 360,
+      accentHue: 24, cardBg: 'tinted', showBorder: false, borderWidth: 1,
+      showShadow: true, shadowBlur: 20, shadowY: 6, shadowOpacity: 20,
+      fontFamily: 'system', titleSize: 22, bodySize: 14, titleWeight: '800',
+      hoverLift: true, liftAmount: 6, showImage: true,
+    },
+    glass: {
+      padding: 28, radius: 20, imageRadius: 12, maxWidth: 360,
+      accentHue: 210, cardBg: 'surface', showBorder: true, borderWidth: 1,
+      showShadow: true, shadowBlur: 40, shadowY: 8, shadowOpacity: 30,
+      fontFamily: 'system', titleSize: 18, bodySize: 14, titleWeight: '600',
+      hoverLift: true, liftAmount: 3, showImage: true,
+    },
+    compact: {
+      padding: 14, radius: 6, imageRadius: 0, maxWidth: 300,
+      accentHue: 160, cardBg: 'light', showBorder: true, borderWidth: 1,
+      showShadow: false, shadowBlur: 4, shadowY: 1, shadowOpacity: 6,
+      fontFamily: 'system', titleSize: 15, bodySize: 12, titleWeight: '600',
+      hoverLift: false, liftAmount: 1, showImage: false,
+    },
+  };
+
+  // ── Wire up controls ─────────────────────────────────────────────────────
+  const sliders = ['padding','radius','imageRadius','maxWidth','accentHue','borderWidth',
+                   'shadowBlur','shadowY','shadowOpacity','titleSize','bodySize','liftAmount'];
+  const selects = ['cardBg','fontFamily','titleWeight'];
+  const toggles = ['showBorder','showShadow','hoverLift','showImage'];
+
+  sliders.forEach(k => {
+    document.getElementById(k).addEventListener('input', e => {
+      state[k] = Number(e.target.value);
+      clearPresetHighlight();
+      updateAll();
+    });
+  });
+  selects.forEach(k => {
+    document.getElementById(k).addEventListener('change', e => {
+      state[k] = e.target.value;
+      clearPresetHighlight();
+      updateAll();
+    });
+  });
+  toggles.forEach(k => {
+    document.getElementById(k).addEventListener('change', e => {
+      state[k] = e.target.checked;
+      clearPresetHighlight();
+      updateAll();
+    });
+  });
+
+  document.querySelectorAll('.preset-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const p = PRESETS[btn.dataset.preset];
+      Object.assign(state, p);
+      syncControls();
+      document.querySelectorAll('.preset-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      updateAll();
+    });
+  });
+
+  document.querySelectorAll('.ctx-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      ctx = btn.dataset.ctx;
+      document.querySelectorAll('.ctx-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      renderPreview();
+    });
+  });
+
+  function clearPresetHighlight() {
+    document.querySelectorAll('.preset-btn').forEach(b => b.classList.remove('active'));
+  }
+
+  function syncControls() {
+    sliders.forEach(k => { document.getElementById(k).value = state[k]; });
+    selects.forEach(k => { document.getElementById(k).value = state[k]; });
+    toggles.forEach(k => { document.getElementById(k).checked = state[k]; });
+  }
+
+  // ── Render preview ───────────────────────────────────────────────────────
+  function renderPreview() {
+    const card   = document.getElementById('preview-card');
+    const body   = document.getElementById('card-body-el');
+    const imgW   = document.getElementById('card-image-wrap');
+    const img    = document.getElementById('card-image');
+    const cta    = document.getElementById('card-cta');
+    const tag    = document.getElementById('card-tag');
+    const title  = document.getElementById('card-title');
+    const desc   = document.getElementById('card-desc');
+    const author = document.getElementById('card-author');
+    const metaSub= document.getElementById('card-meta-sub');
+    const area   = document.getElementById('preview-area');
+    const swatch = document.getElementById('hue-swatch');
+
+    const S = state;
+    const accent      = `hsl(${S.accentHue},70%,55%)`;
+    const accentTinted= `hsl(${S.accentHue},30%,96%)`;
+
+    swatch.style.background = accent;
+
+    // Preview area background
+    area.style.background = ctx === 'dark' ? '#0f0f11' : '#f4f4f5';
+
+    // Card background
+    const bgMap = {
+      white:   '#ffffff',
+      light:   '#f9f9fb',
+      tinted:  accentTinted,
+      surface: '#1c1c1f',
+    };
+    const cardBgColor = bgMap[S.cardBg] || '#ffffff';
+    const isDark = S.cardBg === 'surface';
+    const textColor    = isDark ? '#e4e4e7' : '#18181b';
+    const subTextColor = isDark ? '#71717a'  : '#6b7280';
+    const borderColor  = isDark ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.1)';
+
+    // Card
+    card.style.maxWidth   = S.maxWidth + 'px';
+    card.style.background = cardBgColor;
+    card.style.borderRadius = S.radius + 'px';
+    card.style.overflow   = 'hidden';
+    card.style.cursor     = 'pointer';
+
+    // Shadow
+    card.style.boxShadow = S.showShadow
+      ? `0 ${S.shadowY}px ${S.shadowBlur}px rgba(0,0,0,${S.shadowOpacity / 100})`
+      : 'none';
+
+    // Border
+    card.style.border = S.showBorder
+      ? `${S.borderWidth}px solid ${borderColor}`
+      : 'none';
+
+    // Hover
+    const baseShadow = card.style.boxShadow;
+    card.onmouseenter = () => {
+      if (S.hoverLift) {
+        card.style.transform = `translateY(-${S.liftAmount}px)`;
+        if (S.showShadow) {
+          const op  = Math.min((S.shadowOpacity + 6) / 100, 0.4);
+          const blur = S.shadowBlur + 8;
+          const y    = S.shadowY + S.liftAmount;
+          card.style.boxShadow = `0 ${y}px ${blur}px rgba(0,0,0,${op})`;
+        }
+      }
+    };
+    card.onmouseleave = () => {
+      card.style.transform = 'translateY(0)';
+      card.style.boxShadow = baseShadow;
+    };
+
+    // Image
+    imgW.style.display = S.showImage ? 'block' : 'none';
+    img.style.borderRadius = S.imageRadius > 0
+      ? `${S.imageRadius}px ${S.imageRadius}px 0 0` : '0';
+
+    // Body
+    const fontMap = {
+      system:  "-apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif",
+      serif:   "Georgia, 'Times New Roman', serif",
+      mono:    "ui-monospace, 'SF Mono', monospace",
+      georgia: "Georgia, serif",
+    };
+    body.style.padding    = `${S.padding}px`;
+    card.style.fontFamily = fontMap[S.fontFamily] || fontMap.system;
+
+    title.style.fontSize  = S.titleSize + 'px';
+    title.style.fontWeight= S.titleWeight;
+    title.style.color     = textColor;
+    desc.style.fontSize   = S.bodySize + 'px';
+    desc.style.color      = subTextColor;
+    tag.style.color       = accent;
+    author.style.color    = textColor;
+    metaSub.style.color   = subTextColor;
+
+    // CTA
+    cta.style.background   = accent;
+    cta.style.color        = '#fff';
+    cta.style.borderRadius = Math.max(4, S.radius - 8) + 'px';
+    cta.style.padding      = `${Math.max(6, Math.round(S.padding * 0.35))}px ${Math.max(10, Math.round(S.padding * 0.7))}px`;
+
+    // Value labels
+    document.getElementById('val-padding').textContent     = S.padding + 'px';
+    document.getElementById('val-radius').textContent      = S.radius + 'px';
+    document.getElementById('val-imageRadius').textContent = S.imageRadius + 'px';
+    document.getElementById('val-maxWidth').textContent    = S.maxWidth + '';
+    document.getElementById('val-borderWidth').textContent = S.borderWidth + 'px';
+    document.getElementById('val-shadowBlur').textContent  = S.shadowBlur + 'px';
+    document.getElementById('val-shadowY').textContent     = S.shadowY + 'px';
+    document.getElementById('val-shadowOpacity').textContent = S.shadowOpacity + '%';
+    document.getElementById('val-titleSize').textContent   = S.titleSize + 'px';
+    document.getElementById('val-bodySize').textContent    = S.bodySize + 'px';
+    document.getElementById('val-liftAmount').textContent  = S.liftAmount + 'px';
+  }
+
+  // ── Prompt output ────────────────────────────────────────────────────────
+  function updatePrompt() {
+    const S = state;
+    const D = DEFAULTS;
+    const parts = [];
+
+    // Shape — always included as the anchor
+    const shapeDesc =
+      S.radius === 0  ? 'sharp, square corners (no border-radius)'
+      : S.radius <= 6  ? `slightly rounded corners (${S.radius}px radius)`
+      : S.radius <= 14 ? `rounded corners (${S.radius}px radius)`
+      : S.radius <= 22 ? `generously rounded corners (${S.radius}px radius)`
+      :                  `very rounded corners (${S.radius}px radius)`;
+    parts.push(shapeDesc);
+
+    // Padding
+    const padDesc =
+      S.padding <= 12 ? `tight padding (${S.padding}px)`
+      : S.padding <= 20 ? `standard padding (${S.padding}px)`
+      : S.padding <= 32 ? `comfortable padding (${S.padding}px)`
+      :                   `spacious padding (${S.padding}px)`;
+    if (S.padding !== D.padding) parts.push(padDesc);
+
+    // Max width
+    if (S.maxWidth !== D.maxWidth)
+      parts.push(`max-width of ${S.maxWidth}px`);
+
+    // Background
+    const bgLabel = { white: null, light: 'a light grey background', tinted: 'an accent-tinted background', surface: 'a dark surface background' };
+    if (bgLabel[S.cardBg]) parts.push(bgLabel[S.cardBg]);
+
+    // Accent hue
+    if (S.accentHue !== D.accentHue)
+      parts.push(`${hueToLabel(S.accentHue)} accent color`);
+
+    // Border
+    if (S.showBorder)
+      parts.push(S.borderWidth === 1 ? 'a subtle 1px border' : `a ${S.borderWidth}px border`);
+
+    // Shadow
+    if (!S.showShadow) {
+      parts.push('no shadow (flat, borderless look)');
+    } else if (S.shadowBlur !== D.shadowBlur || S.shadowY !== D.shadowY || S.shadowOpacity !== D.shadowOpacity) {
+      const desc =
+        S.shadowBlur <= 4  ? 'a barely-there shadow'
+        : S.shadowBlur <= 12 ? 'a soft, subtle shadow'
+        : S.shadowBlur <= 24 ? 'a medium drop-shadow'
+        : S.shadowBlur <= 40 ? 'a pronounced elevation shadow'
+        :                      'a deep, dramatic shadow';
+      parts.push(`${desc} (${S.shadowY}px offset, ${S.shadowBlur}px blur, ${S.shadowOpacity}% opacity)`);
+    }
+
+    // Typography
+    if (S.fontFamily !== D.fontFamily) {
+      const fl = { system: 'system UI font', serif: 'serif typeface', mono: 'monospace font', georgia: 'Georgia serif' };
+      parts.push(fl[S.fontFamily]);
+    }
+    if (S.titleSize !== D.titleSize)
+      parts.push(`${S.titleSize}px title`);
+    if (S.bodySize !== D.bodySize)
+      parts.push(`${S.bodySize}px body text`);
+    const wl = { '400':'regular','500':'medium','600':'semibold','700':'bold','800':'extrabold','900':'black-weight' };
+    if (S.titleWeight !== D.titleWeight)
+      parts.push(`${wl[S.titleWeight]} title weight`);
+
+    // Image
+    if (!S.showImage) parts.push('no image (text-only layout)');
+    else if (S.imageRadius > 0) parts.push(`${S.imageRadius}px image corner radius`);
+
+    // Hover
+    if (!S.hoverLift) {
+      parts.push('no hover lift (static card)');
+    } else if (S.liftAmount !== D.liftAmount) {
+      const liftLabel = S.liftAmount <= 2 ? 'gentle' : S.liftAmount <= 5 ? 'noticeable' : 'dramatic';
+      parts.push(`a ${liftLabel} hover lift (translateY −${S.liftAmount}px)`);
+    }
+
+    // Assemble sentence
+    let prompt;
+    if (parts.length === 1) {
+      prompt = `Design a card component with ${parts[0]}.`;
+    } else {
+      const [first, ...rest] = parts;
+      const cap = first.charAt(0).toUpperCase() + first.slice(1);
+      const joined = rest.length === 1
+        ? `${cap} and ${rest[0]}`
+        : `${cap}, ${rest.slice(0,-1).join(', ')}, and ${rest[rest.length-1]}`;
+      prompt = `Design a card component with ${joined}.`;
+    }
+
+    // Hover addendum
+    if (S.hoverLift) {
+      const feel = S.liftAmount <= 2 ? 'gently' : S.liftAmount <= 5 ? 'slightly' : 'prominently';
+      prompt += ` On hover, lift the card ${feel} with \`translateY(−${S.liftAmount}px)\` and deepen the shadow.`;
+    }
+
+    document.getElementById('prompt-text').textContent = prompt;
+  }
+
+  function hueToLabel(h) {
+    if (h < 15 || h >= 345) return 'red';
+    if (h < 40)  return 'orange';
+    if (h < 70)  return 'yellow';
+    if (h < 150) return 'green';
+    if (h < 200) return 'teal';
+    if (h < 260) return 'blue';
+    if (h < 290) return 'violet';
+    if (h < 330) return 'purple/pink';
+    return 'red';
+  }
+
+  function updateAll() {
+    renderPreview();
+    updatePrompt();
+  }
+
+  // ── Copy ─────────────────────────────────────────────────────────────────
+  function copyPrompt() {
+    navigator.clipboard.writeText(document.getElementById('prompt-text').textContent).then(() => {
+      const btn = document.getElementById('copy-btn');
+      btn.textContent = 'Copied!';
+      btn.classList.add('copied');
+      setTimeout(() => { btn.textContent = 'Copy Prompt'; btn.classList.remove('copied'); }, 1800);
+    });
+  }
+
+  // ── Init ─────────────────────────────────────────────────────────────────
+  syncControls();
+  updateAll();
+</script>
+</body>
+</html>

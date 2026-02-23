@@ -435,12 +435,10 @@ def process_with_auphonic(wav_path):
                 'action': 'start',
                 'title': 'Podcast Edit',
                 'output_basename': 'edited_podcast',
-                'output_files[0].format': 'mp3',
-                'output_files[0].bitrate': '192',
-                'algorithms[loudnesstarget]': '-16',
-                'algorithms[denoise]': '1',
-                'algorithms[filtering]': '1',
-                'algorithms[normloudness]': '1',
+                'loudnesstarget': '-16',
+                'denoise': 'true',
+                'filtering': 'true',
+                'normloudness': 'true',
             },
             timeout=180,
         )
@@ -482,11 +480,14 @@ def process_with_auphonic(wav_path):
             if dl.status_code != 200:
                 raise Exception(f"Auphonic download failed: {dl.status_code}")
 
-            mp3_path = wav_path.rsplit('.', 1)[0] + '_auphonic.mp3'
-            with open(mp3_path, 'wb') as out:
+            # Detect format from the output file info or URL
+            out_format = output_files[0].get('format', 'wav')
+            out_ext = 'mp3' if 'mp3' in out_format.lower() else out_format.lower()
+            out_path = wav_path.rsplit('.', 1)[0] + f'_auphonic.{out_ext}'
+            with open(out_path, 'wb') as out:
                 out.write(dl.content)
-            print(f"Auphonic output saved: {mp3_path} ({len(dl.content) // 1024}KB)")
-            return mp3_path
+            print(f"Auphonic output saved: {out_path} ({len(dl.content) // 1024}KB)")
+            return out_path
 
         if status in ('Error', 'Failed'):
             msg = data.get('error_message') or data.get('warning_message') or 'Unknown Auphonic error'

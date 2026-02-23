@@ -710,11 +710,28 @@ def _run_analysis_job(job_id, transcript_data, filename, requirements, custom_in
         report = generate_edit_report(filename, transcript_data, edit_analysis, requirements)
         cuts_count = sum(1 for d in edit_analysis['edit_decisions'] if 'start_ms' in d and 'end_ms' in d)
 
+        # Build a compact utterances list for the frontend transcript viewer.
+        # Include per-word timestamps so the UI can do word-level cut highlighting.
+        utterances = [
+            {
+                'speaker': u.get('speaker', '?'),
+                'start': u.get('start', 0),
+                'end': u.get('end', 0),
+                'text': u.get('text', ''),
+                'words': [
+                    {'text': w.get('text', ''), 'start': w.get('start', 0), 'end': w.get('end', 0)}
+                    for w in (u.get('words') or [])
+                ]
+            }
+            for u in transcript_data.get('utterances', [])
+        ]
+
         result = {
             "success": True,
             "edit_decisions": edit_analysis['edit_decisions'],
             "cuts_count": cuts_count,
             "report": report,
+            "utterances": utterances,
             "transcript": {
                 "duration": transcript_data.get('audio_duration', 0),
                 "words": len(transcript_data.get('words', [])),

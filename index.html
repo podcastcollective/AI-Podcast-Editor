@@ -156,6 +156,9 @@
             const [claudeOverloaded, setClaudeOverloaded] = useState(false);
             const [editDecisions, setEditDecisions] = useState([]);
             const [isDownloading, setIsDownloading] = useState(false);
+            const [originalAudioUrl, setOriginalAudioUrl] = useState(null);
+            const [editedAudioUrl, setEditedAudioUrl] = useState(null);
+            const [editedAudioSize, setEditedAudioSize] = useState(null);
 
             const agents = [
                 {
@@ -245,6 +248,12 @@
                     setFile(uploadedFile);
                     setProcessingComplete(false);
                     setCompletedAgents([]);
+                    // Revoke previous object URLs to free memory
+                    if (originalAudioUrl) URL.revokeObjectURL(originalAudioUrl);
+                    if (editedAudioUrl) URL.revokeObjectURL(editedAudioUrl);
+                    setOriginalAudioUrl(URL.createObjectURL(uploadedFile));
+                    setEditedAudioUrl(null);
+                    setEditedAudioSize(null);
                 }
             };
 
@@ -344,12 +353,16 @@ const downloadEditedAudio = async () => {
             throw new Error(err.error || 'Audio editing failed');
         }
         const blob = await res.blob();
+        // Revoke previous edited URL if any
+        if (editedAudioUrl) URL.revokeObjectURL(editedAudioUrl);
         const url = URL.createObjectURL(blob);
+        setEditedAudioUrl(url);
+        setEditedAudioSize(blob.size);
+        // Trigger download
         const a = document.createElement('a');
         a.href = url;
         a.download = 'edited_podcast.mp3';
         a.click();
-        URL.revokeObjectURL(url);
     } catch (error) {
         alert('Download failed: ' + error.message);
     } finally {
@@ -716,35 +729,50 @@ const startProcessing = async () => {
                                                 <Volume2 className="w-5 h-5" />
                                                 Original Audio
                                             </h3>
-                                            <div className="bg-slate-800 rounded-lg p-4 mb-2">
-                                                <div className="flex items-center gap-3">
-                                                    <button className="bg-purple-500 p-2 rounded-full hover:bg-purple-600">
-                                                        <PlayCircle className="w-5 h-5" />
-                                                    </button>
-                                                    <div className="flex-1 h-2 bg-white/20 rounded-full overflow-hidden">
-                                                        <div className="h-full bg-purple-500" style={{width: '0%'}}></div>
-                                                    </div>
+                                            {originalAudioUrl ? (
+                                                <audio
+                                                    controls
+                                                    src={originalAudioUrl}
+                                                    className="w-full rounded-lg"
+                                                    style={{accentColor: '#a855f7'}}
+                                                />
+                                            ) : (
+                                                <div className="bg-slate-800 rounded-lg p-4 text-center text-purple-300 text-sm">
+                                                    No file uploaded yet
                                                 </div>
-                                            </div>
-                                            <p className="text-sm text-purple-200">Length: 48:23 • Size: 67.2 MB</p>
+                                            )}
+                                            {file && (
+                                                <p className="text-sm text-purple-200 mt-2">
+                                                    {file.name} • {(file.size / 1024 / 1024).toFixed(1)} MB
+                                                </p>
+                                            )}
                                         </div>
 
                                         <div className="bg-white/5 rounded-xl p-6 border border-green-500/30">
-                                            <h3 className="text-lg font-semibold text-white mb-3 flex items-center gap-2">
+                                            <h3 className="text-lg font-semibond text-white mb-3 flex items-center gap-2">
                                                 <Sparkles className="w-5 h-5" />
                                                 AI Edited Audio
                                             </h3>
-                                            <div className="bg-slate-800 rounded-lg p-4 mb-2">
-                                                <div className="flex items-center gap-3">
-                                                    <button className="bg-green-500 p-2 rounded-full hover:bg-green-600">
-                                                        <PlayCircle className="w-5 h-5" />
-                                                    </button>
-                                                    <div className="flex-1 h-2 bg-white/20 rounded-full overflow-hidden">
-                                                        <div className="h-full bg-green-500" style={{width: '0%'}}></div>
-                                                    </div>
+                                            {editedAudioUrl ? (
+                                                <audio
+                                                    controls
+                                                    src={editedAudioUrl}
+                                                    className="w-full rounded-lg"
+                                                    style={{accentColor: '#22c55e'}}
+                                                />
+                                            ) : (
+                                                <div className="bg-slate-800 rounded-lg p-4 text-center text-green-300 text-sm">
+                                                    {processingComplete
+                                                        ? 'Click "Download Edited Audio" to generate'
+                                                        : 'Process a file first'}
                                                 </div>
-                                            </div>
-                                            <p className="text-sm text-green-200">Length: 45:12 • Size: 62.8 MB • 3:11 removed</p>
+                                            )}
+                                            {editedAudioSize && (
+                                                <p className="text-sm text-green-200 mt-2">
+                                                    {(editedAudioSize / 1024 / 1024).toFixed(1)} MB
+                                                    {file && ` • ${((1 - editedAudioSize / file.size) * 100).toFixed(0)}% smaller`}
+                                                </p>
+                                            )}
                                         </div>
                                     </div>
 

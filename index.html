@@ -366,9 +366,10 @@ const downloadEditedAudio = async () => {
             const statusData = await statusRes.json();
             console.log('edit-audio poll:', statusData.status || 'done');
             if (!statusRes.ok) throw new Error(statusData.error || 'Edit job failed');
-            if (statusData.status === 'cutting')   setEditStage('cutting');
-            if (statusData.status === 'auphonic')  setEditStage('auphonic');
-            if (statusData.status === 'completed') { setEditStage('completed'); break; }
+            if (statusData.status === 'cutting')    setEditStage('cutting');
+            if (statusData.status === 'cleanvoice') setEditStage('cleanvoice');
+            if (statusData.status === 'auphonic')   setEditStage('auphonic');
+            if (statusData.status === 'completed')  { setEditStage('completed'); break; }
         }
 
         // Step 3: download the file
@@ -852,12 +853,13 @@ const startProcessing = async () => {
 
                                         {/* Stage steps */}
                                         {(() => {
-                                            const stageOrder = ['cutting', 'auphonic', 'completed'];
+                                            const stageOrder = ['cutting', 'cleanvoice', 'auphonic', 'completed'];
                                             const currentIdx = editStage ? stageOrder.indexOf(editStage) : -1;
                                             const stages = [
-                                                { key: 'cutting',   label: 'Applying Claude\'s cuts',              sub: 'Removing fillers, trimming pauses' },
-                                                { key: 'auphonic',  label: 'Mastering with Auphonic',              sub: 'Loudness normalisation · noise reduction' },
-                                                { key: 'completed', label: 'Export complete',                      sub: 'MP3 ready for human review' },
+                                                { key: 'cutting',    label: "Applying Claude's cuts",              sub: 'Removing fillers, trimming pauses' },
+                                                { key: 'cleanvoice', label: 'AI voice cleaning (Cleanvoice)',      sub: 'Mouth noises · stutters · breathing · dead air' },
+                                                { key: 'auphonic',   label: 'Mastering with Auphonic',             sub: 'Loudness normalisation · noise reduction' },
+                                                { key: 'completed',  label: 'Export complete',                     sub: 'MP3 ready for human review' },
                                             ];
                                             return (
                                                 <div className="space-y-2 mb-5">

@@ -25,7 +25,8 @@ ALLOWED_EXTENSIONS = {'mp3', 'wav', 'm4a', 'aac', 'ogg'}
 # Get API keys from environment variables
 ASSEMBLYAI_API_KEY = os.environ.get('ASSEMBLYAI_API_KEY')
 CLAUDE_API_KEY = os.environ.get('CLAUDE_API_KEY')
-AUPHONIC_API_KEY = os.environ.get('AUPHONIC_API_KEY')  # Bearer token from auphonic.com/accounts/api-access/
+AUPHONIC_API_KEY = os.environ.get('AUPHONIC_API_KEY')    # Bearer token from auphonic.com/accounts/api-access/
+CLEANVOICE_API_KEY = os.environ.get('CLEANVOICE_API_KEY')  # API key from cleanvoice.ai/dashboard
 
 if not ASSEMBLYAI_API_KEY or not CLAUDE_API_KEY:
     print("WARNING: API keys not set. Please set ASSEMBLYAI_API_KEY and CLAUDE_API_KEY environment variables")
@@ -399,7 +400,7 @@ def process_with_auphonic(wav_path):
             if dl.status_code != 200:
                 raise Exception(f"Auphonic download failed: {dl.status_code}")
 
-            mp3_path = wav_path.replace('_edited.wav', '_auphonic.mp3')
+            mp3_path = wav_path.rsplit('.', 1)[0] + '_auphonic.mp3'
             with open(mp3_path, 'wb') as out:
                 out.write(dl.content)
             print(f"Auphonic output saved: {mp3_path} ({len(dl.content) // 1024}KB)")
@@ -412,14 +413,85 @@ def process_with_auphonic(wav_path):
     raise Exception("Auphonic timed out after 12 minutes")
 
 
+def process_with_cleanvoice(audio_path):
+    """
+    Send audio to Cleanvoice for AI-powered removal of mouth noises, stutters,
+    breathing, and any remaining filler words at the audio level.
+    Returns path to the cleaned WAV file.
+    Raises on failure so the caller can skip and continue.
+    """
+    headers = {"X-API-Key": CLEANVOICE_API_KEY}
+
+    print(f"Uploading to Cleanvoice: {audio_path} ({os.path.getsize(audio_path) // 1024 // 1024}MB)")
+    with open(audio_path, 'rb') as f:
+        resp = requests.post(
+            'https://api.cleanvoice.ai/v2/feed',
+            headers=headers,
+            files={'feed': (os.path.basename(audio_path), f, 'audio/wav')},
+            timeout=120,
+        )
+
+    if resp.status_code not in (200, 201):
+        raise Exception(f"Cleanvoice upload failed: {resp.status_code} — {resp.text[:300]}")
+
+    task_id = resp.json().get('id')
+    if not task_id:
+        raise Exception(f"No task ID in Cleanvoice response: {resp.text[:300]}")
+    print(f"Cleanvoice task started: {task_id}")
+
+    # Poll until SUCCESS (max 10 minutes, 10s interval)
+    deadline = time.time() + 600
+    while time.time() < deadline:
+        time.sleep(10)
+        check = requests.get(
+            f'https://api.cleanvoice.ai/v2/feed/{task_id}',
+            headers=headers,
+            timeout=30,
+        )
+        if check.status_code != 200:
+            raise Exception(f"Cleanvoice status check failed: {check.status_code}")
+        data = check.json()
+        status = data.get('status', '')
+        print(f"Cleanvoice status: {status}")
+
+        if status == 'SUCCESS':
+            download_url = data.get('result', {}).get('url')
+            if not download_url:
+                raise Exception(f"Cleanvoice: no download URL in result: {data}")
+            print(f"Downloading Cleanvoice output: {download_url}")
+            dl = requests.get(download_url, timeout=300)
+            if dl.status_code != 200:
+                raise Exception(f"Cleanvoice download failed: {dl.status_code}")
+            output_path = audio_path.rsplit('.', 1)[0] + '_cleanvoice.wav'
+            with open(output_path, 'wb') as out:
+                out.write(dl.content)
+            print(f"Cleanvoice output saved: {output_path} ({len(dl.content) // 1024}KB)")
+            return output_path
+
+        if status == 'ERROR':
+            raise Exception(f"Cleanvoice processing failed: {data}")
+
+    raise Exception("Cleanvoice timed out after 10 minutes")
+
+
 def _run_edit_job(job_id, audio_path, cuts_ms, use_auphonic):
-    """Background thread: apply cuts then optionally run Auphonic."""
+    """Background thread: cutting → cleanvoice → auphonic → completed."""
     try:
+        # Stage 1: apply timestamp cuts with pydub
         with _edit_jobs_lock:
             _edit_jobs[job_id]['status'] = 'cutting'
-
         wav_path = apply_audio_edits(audio_path, cuts_ms)
 
+        # Stage 2: Cleanvoice — AI audio-level cleaning (optional)
+        if CLEANVOICE_API_KEY:
+            with _edit_jobs_lock:
+                _edit_jobs[job_id]['status'] = 'cleanvoice'
+            try:
+                wav_path = process_with_cleanvoice(wav_path)
+            except Exception as e:
+                print(f"Cleanvoice failed, continuing without it: {e}")
+
+        # Stage 3: Auphonic — loudness normalisation + noise reduction (optional)
         if use_auphonic and AUPHONIC_API_KEY:
             with _edit_jobs_lock:
                 _edit_jobs[job_id]['status'] = 'auphonic'
@@ -749,7 +821,7 @@ def edit_audio():
             for c in cuts
             if 'start_ms' in c and 'end_ms' in c
         ]
-        print(f"Starting edit job: {len(cuts_ms)} cuts, auphonic={'yes' if AUPHONIC_API_KEY else 'no'}")
+        print(f"Starting edit job: {len(cuts_ms)} cuts, cleanvoice={'yes' if CLEANVOICE_API_KEY else 'no'}, auphonic={'yes' if AUPHONIC_API_KEY else 'no'}")
 
         job_id = str(uuid.uuid4())
         with _edit_jobs_lock:
@@ -762,7 +834,12 @@ def edit_audio():
         )
         thread.start()
 
-        return jsonify({"success": True, "job_id": job_id, "auphonic": bool(AUPHONIC_API_KEY)})
+        return jsonify({
+            "success": True,
+            "job_id": job_id,
+            "cleanvoice": bool(CLEANVOICE_API_KEY),
+            "auphonic": bool(AUPHONIC_API_KEY),
+        })
 
     except Exception as e:
         print(f"Edit audio error: {e}")
@@ -807,6 +884,7 @@ def status():
         "status": "online",
         "assemblyai_configured": bool(ASSEMBLYAI_API_KEY),
         "claude_configured": bool(CLAUDE_API_KEY),
+        "cleanvoice_configured": bool(CLEANVOICE_API_KEY),
         "auphonic_configured": bool(AUPHONIC_API_KEY),
     })
 

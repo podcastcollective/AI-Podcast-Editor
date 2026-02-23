@@ -317,9 +317,39 @@ Example tool input for reference:
     }
 
 
+def _noise_gate(audio, threshold_db=-40, min_silence_ms=100):
+    """
+    Simple noise gate: silence any segment below threshold_db that lasts at
+    least min_silence_ms. Reduces background hum/noise between speech.
+    """
+    from pydub import AudioSegment
+    from pydub.silence import detect_nonsilent
+
+    nonsilent = detect_nonsilent(audio, min_silence_len=min_silence_ms, silence_thresh=threshold_db)
+    if not nonsilent:
+        return audio
+
+    # Build output: keep non-silent ranges, replace gaps with true silence
+    silence = AudioSegment.silent(duration=0, frame_rate=audio.frame_rate)
+    result = AudioSegment.empty()
+    pos = 0
+    for start, end in nonsilent:
+        if start > pos:
+            # Replace the quiet gap with actual silence (removes hum/noise)
+            gap_duration = start - pos
+            result += AudioSegment.silent(duration=gap_duration, frame_rate=audio.frame_rate)
+        result += audio[start:end]
+        pos = end
+    if pos < len(audio):
+        result += AudioSegment.silent(duration=len(audio) - pos, frame_rate=audio.frame_rate)
+
+    print(f"Noise gate: {len(nonsilent)} speech segments, silenced {len(audio) - sum(e-s for s,e in nonsilent)}ms of background noise")
+    return result
+
+
 def apply_audio_edits(audio_path, cuts_ms):
     """
-    Remove segments from audio using pydub, export as WAV (no ffmpeg needed).
+    Remove segments from audio using pydub, apply noise gate, export as WAV.
     cuts_ms: list of (start_ms, end_ms) tuples to remove.
     Returns path to the edited WAV file.
     """
@@ -341,24 +371,43 @@ def apply_audio_edits(audio_path, cuts_ms):
             merged.append([s, e])
 
     # Build segments to keep (inverse of cuts)
+    FADE_MS = 5       # tiny fade at each boundary to eliminate mid-waveform clicks
+    CROSSFADE_MS = 50  # crossfade overlap to blend segments smoothly
     segments = []
     pos = 0
     for s, e in merged:
         if s > pos:
-            segments.append(audio[pos:s])
+            seg = audio[pos:s]
+            # Apply fade-out at the end (where the cut starts)
+            if len(seg) > FADE_MS:
+                seg = seg.fade_out(FADE_MS)
+            segments.append(seg)
         pos = e
     if pos < total_ms:
-        segments.append(audio[pos:])
+        seg = audio[pos:]
+        # Apply fade-in at the start (where the cut ended)
+        if len(seg) > FADE_MS:
+            seg = seg.fade_in(FADE_MS)
+        segments.append(seg)
 
-    # Join segments with short crossfades to avoid harsh jumps at cut points
-    CROSSFADE_MS = 30  # 30ms crossfade — smooth but preserves speech clarity
+    # Also fade-in the very first segment's start after a cut
+    if merged and merged[0][0] == 0 and segments:
+        if len(segments[0]) > FADE_MS:
+            segments[0] = segments[0].fade_in(FADE_MS)
+
+    # Join segments with crossfades for smooth transitions
     edited = segments[0] if segments else audio
     for seg in segments[1:]:
-        # Only crossfade if both segments are long enough
         if len(edited) > CROSSFADE_MS and len(seg) > CROSSFADE_MS:
             edited = edited.append(seg, crossfade=CROSSFADE_MS)
         else:
             edited += seg
+
+    # Apply noise gate to reduce background hum between speech
+    edited = _noise_gate(edited, threshold_db=-40, min_silence_ms=150)
+
+    removed_ms = total_ms - len(edited)
+    print(f"Cuts complete: {len(merged)} cuts, removed {removed_ms}ms, {len(edited)}ms remaining")
 
     # Export as WAV — works without ffmpeg; Auphonic will encode to MP3
     wav_path = audio_path.rsplit('.', 1)[0] + '_edited.wav'

@@ -13,7 +13,7 @@
     <div id="root"></div>
 
     <script type="text/babel">
-        const { useState } = React;
+        const { useState, useRef } = React;
 
         // Icons
         const Upload = () => (
@@ -162,6 +162,8 @@
             const [originalAudioUrl, setOriginalAudioUrl] = useState(null);
             const [editedAudioUrl, setEditedAudioUrl] = useState(null);
             const [editedAudioSize, setEditedAudioSize] = useState(null);
+            const [transcriptUtterances, setTranscriptUtterances] = useState([]);
+            const originalAudioRef = useRef(null);
 
             const agents = [
                 {
@@ -259,6 +261,7 @@
                     setEditedAudioSize(null);
                     setEditStage(null);
                     setEditError(null);
+                    setTranscriptUtterances([]);
                 }
             };
 
@@ -327,6 +330,7 @@ const runClaudeAnalysis = async (transcript_id, filename) => {
         // All done!
         setEditDecisions(responseData.edit_decisions || []);
         setReportText(responseData.report || '');
+        setTranscriptUtterances(responseData.utterances || []);
         setCompletedAgents(['audio-analysis', 'content-editor', 'audio-engineer', 'qa-agent']);
         setCurrentAgent(null);
         setIsProcessing(false);
@@ -338,6 +342,13 @@ const runClaudeAnalysis = async (transcript_id, filename) => {
         alert('Processing failed: ' + error.message + '\n\nCheck the browser console for details.');
         setIsProcessing(false);
         setCurrentAgent(null);
+    }
+};
+
+const seekToTime = (ms) => {
+    if (originalAudioRef.current) {
+        originalAudioRef.current.currentTime = ms / 1000;
+        originalAudioRef.current.play().catch(() => {});
     }
 };
 
@@ -769,6 +780,7 @@ const startProcessing = async () => {
                                             </h3>
                                             {originalAudioUrl ? (
                                                 <audio
+                                                    ref={originalAudioRef}
                                                     controls
                                                     src={originalAudioUrl}
                                                     className="w-full rounded-lg"
@@ -813,6 +825,84 @@ const startProcessing = async () => {
                                             )}
                                         </div>
                                     </div>
+
+                                    {/* ── Transcript Review (Descript-style) ── */}
+                                    {transcriptUtterances.length > 0 && (
+                                        <div className="bg-white/5 rounded-xl p-6 border border-white/20 mb-6">
+                                            <div className="flex items-center justify-between mb-1">
+                                                <h3 className="text-lg font-semibold text-white flex items-center gap-2">
+                                                    <FileText className="w-5 h-5" />
+                                                    Transcript Review
+                                                </h3>
+                                                <span className="text-xs font-semibold px-2 py-1 rounded bg-red-500/20 text-red-300">
+                                                    Red = being cut
+                                                </span>
+                                            </div>
+                                            <p className="text-xs text-purple-300 mb-4">Click any timestamp to jump to that point in the original audio.</p>
+                                            <div className="space-y-3 max-h-[28rem] overflow-y-auto pr-1">
+                                                {(() => {
+                                                    const SPEAKER_STYLES = [
+                                                        'bg-purple-500/20 text-purple-300',
+                                                        'bg-green-500/20 text-green-300',
+                                                        'bg-blue-500/20 text-blue-300',
+                                                        'bg-yellow-500/20 text-yellow-300',
+                                                        'bg-pink-500/20 text-pink-300',
+                                                    ];
+                                                    const speakerIdx = {};
+                                                    let nextIdx = 0;
+                                                    transcriptUtterances.forEach(u => {
+                                                        if (u.speaker != null && !(u.speaker in speakerIdx)) {
+                                                            speakerIdx[u.speaker] = nextIdx++ % SPEAKER_STYLES.length;
+                                                        }
+                                                    });
+                                                    const cuts = editDecisions.filter(d => d.start_ms != null && d.end_ms != null);
+                                                    const isInCut = (wStart, wEnd) =>
+                                                        cuts.some(d => wStart < d.end_ms && wEnd > d.start_ms);
+                                                    const fmtMs = (ms) => {
+                                                        const s = Math.floor(ms / 1000);
+                                                        const m = Math.floor(s / 60);
+                                                        const sec = s % 60;
+                                                        return `${m}:${String(sec).padStart(2, '0')}`;
+                                                    };
+                                                    return transcriptUtterances.map((utt, i) => {
+                                                        const styleIdx = speakerIdx[utt.speaker] ?? 0;
+                                                        const badgeClass = SPEAKER_STYLES[styleIdx];
+                                                        const words = utt.words || [];
+                                                        return (
+                                                            <div key={i} className="bg-white/5 hover:bg-white/10 rounded-lg p-3 transition-all">
+                                                                <div className="flex items-center gap-2 mb-1.5">
+                                                                    <span className={`text-xs font-bold px-2 py-0.5 rounded ${badgeClass}`}>
+                                                                        {utt.speaker ? `Speaker ${utt.speaker}` : 'Speaker'}
+                                                                    </span>
+                                                                    <button
+                                                                        onClick={() => seekToTime(utt.start)}
+                                                                        className="text-xs text-purple-400 hover:text-white font-mono underline transition-colors"
+                                                                        title="Jump to this point in original audio"
+                                                                    >
+                                                                        {fmtMs(utt.start)}
+                                                                    </button>
+                                                                </div>
+                                                                <p className="text-sm text-white/90 leading-relaxed">
+                                                                    {words.length > 0 ? words.map((w, wi) => {
+                                                                        const cut = isInCut(w.start, w.end);
+                                                                        return (
+                                                                            <span
+                                                                                key={wi}
+                                                                                className={cut ? 'line-through bg-red-500/25 text-red-300 rounded px-0.5' : ''}
+                                                                                title={cut ? 'This word will be cut' : ''}
+                                                                            >
+                                                                                {w.text + ' '}
+                                                                            </span>
+                                                                        );
+                                                                    }) : <span>{utt.text}</span>}
+                                                                </p>
+                                                            </div>
+                                                        );
+                                                    });
+                                                })()}
+                                            </div>
+                                        </div>
+                                    )}
 
                                     <div className="bg-white/5 rounded-xl p-6 border border-white/20 mb-6">
                                         <h3 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">

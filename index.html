@@ -343,25 +343,42 @@ const downloadEditedAudio = async () => {
     const cuts = editDecisions.filter(d => d.start_ms != null && d.end_ms != null);
     setIsDownloading(true);
     try {
-        const res = await fetch(`${API_URL}/api/edit-audio`, {
+        // Step 1: kick off async edit job
+        const startRes = await fetch(`${API_URL}/api/edit-audio`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ transcript_id: pendingTranscript.transcript_id, cuts })
         });
-        if (!res.ok) {
-            const err = await res.json();
-            throw new Error(err.error || 'Audio editing failed');
+        const startData = await startRes.json();
+        if (!startRes.ok) throw new Error(startData.error || 'Failed to start edit job');
+        const { job_id, auphonic } = startData;
+        console.log(`Edit job ${job_id} started (auphonic=${auphonic})`);
+
+        // Step 2: poll until complete
+        while (true) {
+            await new Promise(r => setTimeout(r, 4000));
+            const statusRes = await fetch(`${API_URL}/api/edit-audio-status/${job_id}`);
+            const statusData = await statusRes.json();
+            console.log('edit-audio poll:', statusData.status || 'done');
+            if (!statusRes.ok) throw new Error(statusData.error || 'Edit job failed');
+            if (statusData.status === 'completed') break;
         }
-        const blob = await res.blob();
-        // Revoke previous edited URL if any
+
+        // Step 3: download the file
+        const dlRes = await fetch(`${API_URL}/api/edit-audio-download/${job_id}`);
+        if (!dlRes.ok) {
+            const err = await dlRes.json();
+            throw new Error(err.error || 'Download failed');
+        }
+        const blob = await dlRes.blob();
         if (editedAudioUrl) URL.revokeObjectURL(editedAudioUrl);
         const url = URL.createObjectURL(blob);
         setEditedAudioUrl(url);
         setEditedAudioSize(blob.size);
-        // Trigger download
+        const ext = auphonic ? 'mp3' : 'wav';
         const a = document.createElement('a');
         a.href = url;
-        a.download = 'edited_podcast.mp3';
+        a.download = `edited_podcast.${ext}`;
         a.click();
     } catch (error) {
         alert('Download failed: ' + error.message);
@@ -852,7 +869,7 @@ const startProcessing = async () => {
                                             }`}
                                         >
                                             <Download className="w-5 h-5" />
-                                            {isDownloading ? 'Editing audio...' : 'Download Edited Audio'}
+                                            {isDownloading ? 'Editing & mastering audio...' : 'Download Edited Audio'}
                                         </button>
                                     </div>
                                 </div>

@@ -25,14 +25,17 @@ ALLOWED_EXTENSIONS = {'mp3', 'wav', 'm4a', 'aac', 'ogg'}
 # Get API keys from environment variables
 ASSEMBLYAI_API_KEY = os.environ.get('ASSEMBLYAI_API_KEY')
 CLAUDE_API_KEY = os.environ.get('CLAUDE_API_KEY')
+AUPHONIC_API_KEY = os.environ.get('AUPHONIC_API_KEY')  # Bearer token from auphonic.com/accounts/api-access/
 
 if not ASSEMBLYAI_API_KEY or not CLAUDE_API_KEY:
     print("WARNING: API keys not set. Please set ASSEMBLYAI_API_KEY and CLAUDE_API_KEY environment variables")
 
-# In-memory job store for async Claude analysis.
-# Gunicorn must use threads (not multiple processes) so this dict is shared.
+# In-memory job stores (Claude analysis + audio editing).
+# Gunicorn must use threads (not multiple processes) so these dicts are shared.
 _jobs: dict = {}
 _jobs_lock = threading.Lock()
+_edit_jobs: dict = {}
+_edit_jobs_lock = threading.Lock()
 
 
 def allowed_file(filename):
@@ -294,9 +297,9 @@ Return ONLY a JSON array, no other text:
 
 def apply_audio_edits(audio_path, cuts_ms):
     """
-    Remove segments from audio using pydub.
+    Remove segments from audio using pydub, export as WAV (no ffmpeg needed).
     cuts_ms: list of (start_ms, end_ms) tuples to remove.
-    Returns path to the edited output file.
+    Returns path to the edited WAV file.
     """
     from pydub import AudioSegment
 
@@ -325,17 +328,122 @@ def apply_audio_edits(audio_path, cuts_ms):
     if pos < total_ms:
         segments.append(audio[pos:])
 
-    if not segments:
-        edited = audio
-    else:
-        edited = segments[0]
-        for seg in segments[1:]:
-            edited += seg
+    edited = segments[0] if segments else audio
+    for seg in segments[1:]:
+        edited += seg
 
-    output_path = audio_path.rsplit('.', 1)[0] + '_edited.mp3'
-    edited.export(output_path, format='mp3', bitrate='192k')
-    print(f"Exported edited audio to {output_path} ({len(edited)}ms)")
-    return output_path
+    # Export as WAV — works without ffmpeg; Auphonic will encode to MP3
+    wav_path = audio_path.rsplit('.', 1)[0] + '_edited.wav'
+    edited.export(wav_path, format='wav')
+    print(f"Exported edited audio: {wav_path} ({len(edited)}ms, {os.path.getsize(wav_path) // 1024}KB)")
+    return wav_path
+
+
+def process_with_auphonic(wav_path):
+    """
+    Send a WAV file to Auphonic for professional audio post-production:
+    loudness normalisation (-16 LUFS podcast standard) + noise reduction.
+    Returns the path to the downloaded MP3 output file.
+    Raises an exception on any failure so the caller can fall back to the WAV.
+    """
+    headers = {"Authorization": f"Bearer {AUPHONIC_API_KEY}"}
+
+    print(f"Uploading to Auphonic: {wav_path} ({os.path.getsize(wav_path) // 1024 // 1024}MB)")
+    with open(wav_path, 'rb') as f:
+        resp = requests.post(
+            'https://auphonic.com/api/simple/productions.json',
+            headers=headers,
+            files={'file': (os.path.basename(wav_path), f, 'audio/wav')},
+            data={
+                'loudness_normalization_type': 'podcast',  # -16 LUFS
+                'noise_reduction': '1',
+                'filtering': '1',
+            },
+            timeout=180,
+        )
+
+    if resp.status_code not in (200, 201):
+        raise Exception(f"Auphonic upload failed: {resp.status_code} — {resp.text[:300]}")
+
+    production = resp.json().get('data', {})
+    prod_uuid = production.get('uuid')
+    if not prod_uuid:
+        raise Exception(f"No UUID in Auphonic response: {resp.text[:300]}")
+    print(f"Auphonic production started: {prod_uuid}")
+
+    # Poll until Done (max 12 minutes, 15s interval)
+    deadline = time.time() + 720
+    while time.time() < deadline:
+        time.sleep(15)
+        check = requests.get(
+            f'https://auphonic.com/api/production/{prod_uuid}.json',
+            headers=headers,
+            timeout=30,
+        )
+        if check.status_code != 200:
+            raise Exception(f"Auphonic status check failed: {check.status_code}")
+        data = check.json().get('data', {})
+        status = data.get('status_string', '')
+        print(f"Auphonic status: {status}")
+
+        if status == 'Done':
+            output_files = data.get('output_files', [])
+            if not output_files:
+                raise Exception("Auphonic returned no output files")
+            download_url = output_files[0].get('download_url')
+            if not download_url:
+                raise Exception("Auphonic output has no download_url")
+
+            print(f"Downloading Auphonic output: {download_url}")
+            dl = requests.get(download_url, headers=headers, timeout=300)
+            if dl.status_code != 200:
+                raise Exception(f"Auphonic download failed: {dl.status_code}")
+
+            mp3_path = wav_path.replace('_edited.wav', '_auphonic.mp3')
+            with open(mp3_path, 'wb') as out:
+                out.write(dl.content)
+            print(f"Auphonic output saved: {mp3_path} ({len(dl.content) // 1024}KB)")
+            return mp3_path
+
+        if status in ('Error', 'Failed'):
+            msg = data.get('error_message') or data.get('warning_message') or 'Unknown Auphonic error'
+            raise Exception(f"Auphonic processing failed: {msg}")
+
+    raise Exception("Auphonic timed out after 12 minutes")
+
+
+def _run_edit_job(job_id, audio_path, cuts_ms, use_auphonic):
+    """Background thread: apply cuts then optionally run Auphonic."""
+    try:
+        with _edit_jobs_lock:
+            _edit_jobs[job_id]['status'] = 'cutting'
+
+        wav_path = apply_audio_edits(audio_path, cuts_ms)
+
+        if use_auphonic and AUPHONIC_API_KEY:
+            with _edit_jobs_lock:
+                _edit_jobs[job_id]['status'] = 'auphonic'
+            try:
+                final_path = process_with_auphonic(wav_path)
+            except Exception as e:
+                print(f"Auphonic failed, falling back to WAV: {e}")
+                final_path = wav_path
+        else:
+            final_path = wav_path
+
+        with _edit_jobs_lock:
+            _edit_jobs[job_id] = {
+                'status': 'completed',
+                'path': final_path,
+                'is_mp3': final_path.endswith('.mp3'),
+            }
+        print(f"Edit job {job_id} complete: {final_path}")
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        with _edit_jobs_lock:
+            _edit_jobs[job_id] = {'status': 'error', 'error': str(e)}
 
 
 def format_timestamp(milliseconds):
@@ -609,9 +717,9 @@ def process_status(job_id):
 @app.route('/api/edit-audio', methods=['POST', 'OPTIONS'])
 def edit_audio():
     """
-    Step 3: Apply Claude's edit decisions to the saved audio file.
+    Step 3: Start async audio editing job.
     Accepts JSON: { transcript_id, cuts: [{start_ms, end_ms}, ...] }
-    Returns the edited audio file as a download.
+    Returns { job_id } immediately — poll /api/edit-audio-status/<job_id>.
     """
     if request.method == 'OPTIONS':
         return '', 204
@@ -624,7 +732,6 @@ def edit_audio():
         if not transcript_id:
             return jsonify({"error": "No transcript_id provided"}), 400
 
-        # Find the saved audio file
         audio_path = None
         for ext in ALLOWED_EXTENSIONS:
             path = f"/tmp/{transcript_id}.{ext}"
@@ -642,16 +749,20 @@ def edit_audio():
             for c in cuts
             if 'start_ms' in c and 'end_ms' in c
         ]
-        print(f"Applying {len(cuts_ms)} cuts to {audio_path}")
+        print(f"Starting edit job: {len(cuts_ms)} cuts, auphonic={'yes' if AUPHONIC_API_KEY else 'no'}")
 
-        output_path = apply_audio_edits(audio_path, cuts_ms)
+        job_id = str(uuid.uuid4())
+        with _edit_jobs_lock:
+            _edit_jobs[job_id] = {'status': 'pending'}
 
-        return send_file(
-            output_path,
-            as_attachment=True,
-            download_name='edited_podcast.mp3',
-            mimetype='audio/mpeg'
+        thread = threading.Thread(
+            target=_run_edit_job,
+            args=(job_id, audio_path, cuts_ms, bool(AUPHONIC_API_KEY)),
+            daemon=True,
         )
+        thread.start()
+
+        return jsonify({"success": True, "job_id": job_id, "auphonic": bool(AUPHONIC_API_KEY)})
 
     except Exception as e:
         print(f"Edit audio error: {e}")
@@ -660,12 +771,43 @@ def edit_audio():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route('/api/edit-audio-status/<job_id>', methods=['GET'])
+def edit_audio_status(job_id):
+    """Poll after /api/edit-audio. Returns status or signals ready-to-download."""
+    with _edit_jobs_lock:
+        job = _edit_jobs.get(job_id)
+    if not job:
+        return jsonify({"error": "Job not found"}), 404
+    if job['status'] == 'completed':
+        return jsonify({"status": "completed", "is_mp3": job.get('is_mp3', False)})
+    if job['status'] == 'error':
+        return jsonify({"error": job['error']}), 500
+    return jsonify({"status": job['status']})
+
+
+@app.route('/api/edit-audio-download/<job_id>', methods=['GET'])
+def edit_audio_download(job_id):
+    """Download the completed edited audio file."""
+    with _edit_jobs_lock:
+        job = _edit_jobs.get(job_id)
+    if not job or job['status'] != 'completed':
+        return jsonify({"error": "File not ready"}), 404
+
+    path = job['path']
+    is_mp3 = job.get('is_mp3', False)
+    mimetype = 'audio/mpeg' if is_mp3 else 'audio/wav'
+    download_name = 'edited_podcast.mp3' if is_mp3 else 'edited_podcast.wav'
+
+    return send_file(path, as_attachment=True, download_name=download_name, mimetype=mimetype)
+
+
 @app.route('/api/status', methods=['GET'])
 def status():
     return jsonify({
         "status": "online",
         "assemblyai_configured": bool(ASSEMBLYAI_API_KEY),
         "claude_configured": bool(CLAUDE_API_KEY),
+        "auphonic_configured": bool(AUPHONIC_API_KEY),
     })
 
 

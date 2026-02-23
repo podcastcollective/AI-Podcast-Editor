@@ -432,9 +432,15 @@ def process_with_auphonic(wav_path):
             headers=headers,
             files={'input_file': (os.path.basename(wav_path), f, 'audio/wav')},
             data={
-                'loudness_normalization_type': 'podcast',  # -16 LUFS
-                'noise_reduction': '1',
-                'filtering': '1',
+                'action': 'start',
+                'title': 'Podcast Edit',
+                'output_basename': 'edited_podcast',
+                'output_files[0].format': 'mp3',
+                'output_files[0].bitrate': '192',
+                'algorithms[loudnesstarget]': '-16',
+                'algorithms[denoise]': '1',
+                'algorithms[filtering]': '1',
+                'algorithms[normloudness]': '1',
             },
             timeout=180,
         )
@@ -623,12 +629,16 @@ def _run_edit_job(job_id, audio_path, cuts_ms, use_auphonic):
                 print(f"WARNING: Cleanvoice failed, skipping: {cv_err}")
                 # Continue with the existing wav_path
 
-        # Stage 3: Auphonic — loudness normalisation + noise reduction (no silent fallback)
+        # Stage 3: Auphonic — loudness normalisation + noise reduction (soft failure — skip on error)
         if use_auphonic and AUPHONIC_API_KEY:
             active_stage = 'auphonic'
             with _edit_jobs_lock:
                 _edit_jobs[job_id]['status'] = 'auphonic'
-            final_path = process_with_auphonic(wav_path)
+            try:
+                final_path = process_with_auphonic(wav_path)
+            except Exception as au_err:
+                print(f"WARNING: Auphonic failed, skipping: {au_err}")
+                final_path = wav_path
         else:
             final_path = wav_path
 

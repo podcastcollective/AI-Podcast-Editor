@@ -163,6 +163,7 @@
             const [editedAudioUrl, setEditedAudioUrl] = useState(null);
             const [editedAudioSize, setEditedAudioSize] = useState(null);
             const [transcriptUtterances, setTranscriptUtterances] = useState([]);
+            const [episodeApproved, setEpisodeApproved] = useState(false);
             const originalAudioRef = useRef(null);
 
             const agents = [
@@ -262,6 +263,7 @@
                     setEditStage(null);
                     setEditError(null);
                     setTranscriptUtterances([]);
+                    setEpisodeApproved(false);
                 }
             };
 
@@ -770,7 +772,7 @@ const startProcessing = async () => {
 
                             {activeTab === 'review' && (
                                 <div>
-                                    <h2 className="text-2xl font-semibold text-white mb-6">Human Editor Review Dashboard</h2>
+                                    <h2 className="text-2xl font-semibold text-white mb-6">QA Review</h2>
                                     
                                     <div className="grid md:grid-cols-2 gap-6 mb-6">
                                         <div className="bg-white/5 rounded-xl p-6 border border-white/20">
@@ -835,10 +837,10 @@ const startProcessing = async () => {
                                                     Transcript Review
                                                 </h3>
                                                 <span className="text-xs font-semibold px-2 py-1 rounded bg-red-500/20 text-red-300">
-                                                    Red = being cut
+                                                    Red = removed by AI
                                                 </span>
                                             </div>
-                                            <p className="text-xs text-purple-300 mb-4">Click any timestamp to jump to that point in the original audio.</p>
+                                            <p className="text-xs text-purple-300 mb-4">Words in red were automatically removed. This is for reference only — no action needed. Click a timestamp to hear that section in the original.</p>
                                             <div className="space-y-3 max-h-[28rem] overflow-y-auto pr-1">
                                                 {(() => {
                                                     const SPEAKER_STYLES = [
@@ -962,7 +964,7 @@ const startProcessing = async () => {
                                                 { key: 'cutting',    label: "Applying Claude's cuts",              sub: 'Removing fillers, trimming pauses' },
                                                 { key: 'cleanvoice', label: 'AI voice cleaning (Cleanvoice)',      sub: 'Mouth noises · stutters · breathing · dead air' },
                                                 { key: 'auphonic',   label: 'Mastering with Auphonic',             sub: 'Loudness normalisation · noise reduction' },
-                                                { key: 'completed',  label: 'Export complete',                     sub: 'MP3 ready for human review' },
+                                                { key: 'completed',  label: 'Export complete',                     sub: 'Fully processed MP3 ready for QA listen' },
                                             ];
                                             return (
                                                 <div className="space-y-2 mb-5">
@@ -1031,69 +1033,95 @@ const startProcessing = async () => {
                                         </button>
                                     </div>
 
-                                    {/* ── Send to Human Editor — shown after download ── */}
+                                    {/* ── QA Sign-off — shown after download ── */}
                                     {editStage === 'completed' && (
-                                        <div className="bg-gradient-to-r from-amber-500/20 to-orange-500/20 border-2 border-amber-500/50 rounded-xl p-6">
-                                            <h3 className="text-lg font-semibold text-white mb-1 flex items-center gap-2">
-                                                <User className="w-5 h-5" />
-                                                Send to Human Editor
-                                            </h3>
-                                            <p className="text-amber-200 text-sm mb-4">Episode is edited and mastered. Hand off to your editor for final review before publishing.</p>
-
-                                            {/* Checklist */}
-                                            <div className="space-y-2 mb-5">
-                                                {[
-                                                    'Listen to full edited episode',
-                                                    'Verify no jarring cuts or audio artifacts',
-                                                    'Check natural speech flow maintained',
-                                                    'Confirm all client requirements met',
-                                                    'Validate audio levels are consistent',
-                                                    'Review any flagged sections'
-                                                ].map((item, i) => (
-                                                    <label key={i} className="flex items-center gap-3 text-amber-100 cursor-pointer hover:text-white transition-all">
-                                                        <input type="checkbox" className="w-4 h-4 rounded accent-amber-500" />
-                                                        <span className="text-sm">{item}</span>
-                                                    </label>
-                                                ))}
-                                            </div>
-
-                                            {/* Action buttons */}
-                                            <div className="flex gap-3 flex-wrap">
-                                                {reportText && (
+                                        episodeApproved ? (
+                                            /* Approved state */
+                                            <div className="bg-green-500/10 border-2 border-green-500/50 rounded-xl p-6">
+                                                <h3 className="text-lg font-semibold text-green-300 mb-1 flex items-center gap-2">
+                                                    ✓ Episode approved
+                                                </h3>
+                                                <p className="text-green-200/70 text-sm mb-4">Marked as ready to deliver to the client.</p>
+                                                <div className="flex gap-3 flex-wrap">
+                                                    {reportText && (
+                                                        <button
+                                                            onClick={() => {
+                                                                const blob = new Blob([reportText], { type: 'text/plain' });
+                                                                const a = document.createElement('a');
+                                                                a.href = URL.createObjectURL(blob);
+                                                                a.download = 'edit_report.txt';
+                                                                a.click();
+                                                            }}
+                                                            className="flex items-center gap-2 bg-white/10 hover:bg-white/20 text-white px-4 py-2 rounded-lg text-sm font-semibold transition-all"
+                                                        >
+                                                            <FileText className="w-4 h-4" />
+                                                            Download Report
+                                                        </button>
+                                                    )}
                                                     <button
                                                         onClick={() => {
-                                                            const blob = new Blob([reportText], { type: 'text/plain' });
-                                                            const a = document.createElement('a');
-                                                            a.href = URL.createObjectURL(blob);
-                                                            a.download = 'edit_report.txt';
-                                                            a.click();
+                                                            const subject = encodeURIComponent('Your podcast episode is ready');
+                                                            const body = encodeURIComponent(
+                                                                `Hi,\n\nYour podcast episode has been edited, cleaned, and mastered. It's ready to publish.\n\n` +
+                                                                `What was done automatically:\n` +
+                                                                `• ${editDecisions.filter(d => d.start_ms != null).length} edits applied (fillers, pauses, content cuts)\n` +
+                                                                `• AI voice cleaning (Cleanvoice)\n` +
+                                                                `• Loudness mastered to -16 LUFS (Auphonic)\n\n` +
+                                                                `Please find the edited file attached.\n\nThanks`
+                                                            );
+                                                            window.open(`mailto:?subject=${subject}&body=${body}`);
                                                         }}
-                                                        className="flex items-center gap-2 bg-white/10 hover:bg-white/20 text-white px-4 py-2 rounded-lg text-sm font-semibold transition-all"
+                                                        className="flex items-center gap-2 bg-green-500 hover:bg-green-600 text-white px-4 py-2 rounded-lg text-sm font-semibold transition-all"
                                                     >
-                                                        <FileText className="w-4 h-4" />
-                                                        Download Edit Report
+                                                        <User className="w-4 h-4" />
+                                                        Email to Client
                                                     </button>
-                                                )}
-                                                <button
-                                                    onClick={() => {
-                                                        const subject = encodeURIComponent('Podcast episode ready for your review');
-                                                        const body = encodeURIComponent(
-                                                            `Hi,\n\nYour podcast episode has been AI-edited and is ready for your review.\n\n` +
-                                                            `Edit summary:\n` +
-                                                            `• ${editDecisions.filter(d => d.start_ms != null).length} audio cuts applied\n` +
-                                                            `• Loudness normalised to -16 LUFS\n` +
-                                                            `• Noise reduction applied\n\n` +
-                                                            `Please review the attached edited file and edit report.\n\nThanks`
-                                                        );
-                                                        window.open(`mailto:?subject=${subject}&body=${body}`);
-                                                    }}
-                                                    className="flex items-center gap-2 bg-amber-500 hover:bg-amber-600 text-white px-4 py-2 rounded-lg text-sm font-semibold transition-all"
-                                                >
-                                                    <User className="w-4 h-4" />
-                                                    Email Editor
-                                                </button>
+                                                </div>
                                             </div>
-                                        </div>
+                                        ) : (
+                                            /* Pre-approval state */
+                                            <div className="bg-gradient-to-r from-green-500/10 to-emerald-500/10 border-2 border-green-500/40 rounded-xl p-6 text-center">
+                                                <p className="text-white font-semibold mb-1">Episode fully processed</p>
+                                                <p className="text-white/50 text-sm mb-5">
+                                                    Cuts applied · AI voice cleaned · Mastered to -16 LUFS.<br/>
+                                                    Listen above, then approve when it sounds good.
+                                                </p>
+                                                <button
+                                                    onClick={() => setEpisodeApproved(true)}
+                                                    className="w-full py-4 rounded-xl font-semibold bg-gradient-to-r from-green-500 to-emerald-500 text-white hover:from-green-600 hover:to-emerald-600 transition-all flex items-center justify-center gap-2 text-lg mb-3"
+                                                >
+                                                    ✓ Approve Episode
+                                                </button>
+                                                <div className="flex gap-3 justify-center flex-wrap">
+                                                    {reportText && (
+                                                        <button
+                                                            onClick={() => {
+                                                                const blob = new Blob([reportText], { type: 'text/plain' });
+                                                                const a = document.createElement('a');
+                                                                a.href = URL.createObjectURL(blob);
+                                                                a.download = 'edit_report.txt';
+                                                                a.click();
+                                                            }}
+                                                            className="text-xs text-white/40 hover:text-white/70 underline transition-colors"
+                                                        >
+                                                            Download edit report
+                                                        </button>
+                                                    )}
+                                                    <button
+                                                        onClick={() => {
+                                                            const subject = encodeURIComponent('Issue flagged — podcast episode needs review');
+                                                            const body = encodeURIComponent(
+                                                                `Hi,\n\nAn issue was flagged during QA of this episode.\n\nPlease describe the issue below:\n\n\n\nThanks`
+                                                            );
+                                                            window.open(`mailto:?subject=${subject}&body=${body}`);
+                                                        }}
+                                                        className="text-xs text-red-400/60 hover:text-red-300 underline transition-colors"
+                                                    >
+                                                        Flag an issue
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        )
                                     )}
                                 </div>
                             )}

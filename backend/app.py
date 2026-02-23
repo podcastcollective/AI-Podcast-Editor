@@ -350,9 +350,15 @@ def apply_audio_edits(audio_path, cuts_ms):
     if pos < total_ms:
         segments.append(audio[pos:])
 
+    # Join segments with short crossfades to avoid harsh jumps at cut points
+    CROSSFADE_MS = 30  # 30ms crossfade — smooth but preserves speech clarity
     edited = segments[0] if segments else audio
     for seg in segments[1:]:
-        edited += seg
+        # Only crossfade if both segments are long enough
+        if len(edited) > CROSSFADE_MS and len(seg) > CROSSFADE_MS:
+            edited = edited.append(seg, crossfade=CROSSFADE_MS)
+        else:
+            edited += seg
 
     # Export as WAV — works without ffmpeg; Auphonic will encode to MP3
     wav_path = audio_path.rsplit('.', 1)[0] + '_edited.wav'

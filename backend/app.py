@@ -491,49 +491,97 @@ def process_with_auphonic(wav_path):
 
 def process_with_cleanvoice(audio_path):
     """
-    Send audio to Cleanvoice for AI-powered removal of mouth noises, stutters,
-    breathing, and any remaining filler words at the audio level.
-    Returns path to the cleaned WAV file.
-    Raises on failure so the caller can skip and continue.
+    Send audio to Cleanvoice (v2 API) for AI-powered removal of mouth noises,
+    stutters, breathing, and remaining filler words at the audio level.
+    Flow: get signed URL → upload file → create edit → poll → download.
+    Returns path to the cleaned audio file.
     """
     headers = {"X-API-Key": CLEANVOICE_API_KEY}
+    filename = os.path.basename(audio_path)
+    file_size_mb = os.path.getsize(audio_path) / 1024 / 1024
 
-    print(f"Uploading to Cleanvoice: {audio_path} ({os.path.getsize(audio_path) // 1024 // 1024}MB)")
+    # Step 1: Get a signed upload URL
+    print(f"Cleanvoice: requesting signed URL for {filename} ({file_size_mb:.1f}MB)")
+    sign_resp = requests.post(
+        f'https://api.cleanvoice.ai/v2/upload?filename={filename}',
+        headers=headers,
+        timeout=30,
+    )
+    if sign_resp.status_code not in (200, 201):
+        raise Exception(f"Cleanvoice signed URL request failed: {sign_resp.status_code} — {sign_resp.text[:300]}")
+
+    signed_url = sign_resp.json().get('signedUrl')
+    if not signed_url:
+        raise Exception(f"No signedUrl in Cleanvoice response: {sign_resp.text[:300]}")
+    print(f"Cleanvoice: got signed URL")
+
+    # Step 2: Upload the file to the signed URL
+    print(f"Cleanvoice: uploading file...")
     with open(audio_path, 'rb') as f:
-        resp = requests.post(
-            'https://api.cleanvoice.ai/v2/feed',
-            headers=headers,
-            files={'feed': (os.path.basename(audio_path), f, 'audio/wav')},
-            timeout=120,
+        put_resp = requests.put(
+            signed_url,
+            data=f,
+            headers={'Content-Type': 'audio/wav'},
+            timeout=300,
         )
+    if put_resp.status_code not in (200, 201):
+        raise Exception(f"Cleanvoice file upload failed: {put_resp.status_code} — {put_resp.text[:300]}")
+    print(f"Cleanvoice: file uploaded")
 
-    if resp.status_code not in (200, 201):
-        raise Exception(f"Cleanvoice upload failed: {resp.status_code} — {resp.text[:300]}")
+    # Step 3: Create an edit job using the signed URL as the file reference
+    edit_resp = requests.post(
+        'https://api.cleanvoice.ai/v2/edits',
+        headers={**headers, 'Content-Type': 'application/json'},
+        json={
+            "input": {
+                "files": [signed_url.split('?')[0]],  # URL without query params
+                "config": {
+                    "remove_noise": True,
+                    "fillers": True,
+                    "long_silences": False,  # We already handle pauses ourselves
+                }
+            }
+        },
+        timeout=30,
+    )
+    if edit_resp.status_code not in (200, 201):
+        raise Exception(f"Cleanvoice edit creation failed: {edit_resp.status_code} — {edit_resp.text[:300]}")
 
-    task_id = resp.json().get('id')
-    if not task_id:
-        raise Exception(f"No task ID in Cleanvoice response: {resp.text[:300]}")
-    print(f"Cleanvoice task started: {task_id}")
+    edit_id = edit_resp.json().get('id')
+    if not edit_id:
+        raise Exception(f"No edit ID in Cleanvoice response: {edit_resp.text[:300]}")
+    print(f"Cleanvoice edit started: {edit_id}")
 
-    # Poll until SUCCESS (max 10 minutes, 10s interval)
+    # Step 4: Poll until complete (max 10 minutes, 10s interval)
     deadline = time.time() + 600
     while time.time() < deadline:
         time.sleep(10)
         check = requests.get(
-            f'https://api.cleanvoice.ai/v2/feed/{task_id}',
+            f'https://api.cleanvoice.ai/v2/edits/{edit_id}',
             headers=headers,
             timeout=30,
         )
         if check.status_code != 200:
-            raise Exception(f"Cleanvoice status check failed: {check.status_code}")
+            raise Exception(f"Cleanvoice status check failed: {check.status_code} — {check.text[:300]}")
         data = check.json()
         status = data.get('status', '')
         print(f"Cleanvoice status: {status}")
 
-        if status == 'SUCCESS':
-            download_url = data.get('result', {}).get('url')
+        if status in ('completed', 'SUCCESS', 'done'):
+            # Find the download URL in the response
+            download_url = (
+                data.get('result', {}).get('url') or
+                data.get('download_url') or
+                data.get('output', {}).get('url')
+            )
             if not download_url:
-                raise Exception(f"Cleanvoice: no download URL in result: {data}")
+                # Try output files array
+                outputs = data.get('output', {}).get('files', [])
+                if outputs:
+                    download_url = outputs[0] if isinstance(outputs[0], str) else outputs[0].get('url')
+            if not download_url:
+                raise Exception(f"Cleanvoice completed but no download URL found: {json.dumps(data)[:500]}")
+
             print(f"Downloading Cleanvoice output: {download_url}")
             dl = requests.get(download_url, timeout=300)
             if dl.status_code != 200:
@@ -544,8 +592,8 @@ def process_with_cleanvoice(audio_path):
             print(f"Cleanvoice output saved: {output_path} ({len(dl.content) // 1024}KB)")
             return output_path
 
-        if status == 'ERROR':
-            raise Exception(f"Cleanvoice processing failed: {data}")
+        if status in ('ERROR', 'error', 'failed'):
+            raise Exception(f"Cleanvoice processing failed: {json.dumps(data)[:500]}")
 
     raise Exception("Cleanvoice timed out after 10 minutes")
 
@@ -564,12 +612,16 @@ def _run_edit_job(job_id, audio_path, cuts_ms, use_auphonic):
             _edit_jobs[job_id]['status'] = 'cutting'
         wav_path = apply_audio_edits(audio_path, cuts_ms)
 
-        # Stage 2: Cleanvoice — AI audio-level cleaning (no silent fallback)
+        # Stage 2: Cleanvoice — AI audio-level cleaning (soft failure — skip on error)
         if CLEANVOICE_API_KEY:
             active_stage = 'cleanvoice'
             with _edit_jobs_lock:
                 _edit_jobs[job_id]['status'] = 'cleanvoice'
-            wav_path = process_with_cleanvoice(wav_path)
+            try:
+                wav_path = process_with_cleanvoice(wav_path)
+            except Exception as cv_err:
+                print(f"WARNING: Cleanvoice failed, skipping: {cv_err}")
+                # Continue with the existing wav_path
 
         # Stage 3: Auphonic — loudness normalisation + noise reduction (no silent fallback)
         if use_auphonic and AUPHONIC_API_KEY:

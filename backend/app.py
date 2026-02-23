@@ -430,7 +430,7 @@ def process_with_auphonic(wav_path):
         resp = requests.post(
             'https://auphonic.com/api/simple/productions.json',
             headers=headers,
-            files={'file': (os.path.basename(wav_path), f, 'audio/wav')},
+            files={'input_file': (os.path.basename(wav_path), f, 'audio/wav')},
             data={
                 'loudness_normalization_type': 'podcast',  # -16 LUFS
                 'noise_reduction': '1',

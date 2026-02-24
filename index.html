@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AI Podcast Editor - Production Ready</title>
+    <title>AI Podcast Editor</title>
     <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
@@ -13,21 +13,14 @@
     <div id="root"></div>
 
     <script type="text/babel">
-        const { useState } = React;
+        const { useState, useRef } = React;
 
         // Icons
-        const Upload = ({className}) => (
+        const UploadIcon = ({className}) => (
             <svg className={className} width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                 <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
                 <polyline points="17 8 12 3 7 8"></polyline>
                 <line x1="12" y1="3" x2="12" y2="15"></line>
-            </svg>
-        );
-
-        const PlayCircle = ({className}) => (
-            <svg className={className} width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <circle cx="12" cy="12" r="10"></circle>
-                <polygon points="10 8 16 12 10 16 10 8"></polygon>
             </svg>
         );
 
@@ -43,13 +36,6 @@
                 <circle cx="12" cy="12" r="10"></circle>
                 <line x1="12" y1="8" x2="12" y2="12"></line>
                 <line x1="12" y1="16" x2="12.01" y2="16"></line>
-            </svg>
-        );
-
-        const Clock = ({className}) => (
-            <svg className={className} width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <circle cx="12" cy="12" r="10"></circle>
-                <polyline points="12 6 12 12 16 14"></polyline>
             </svg>
         );
 
@@ -73,37 +59,6 @@
             </svg>
         );
 
-        const Volume2 = ({className}) => (
-            <svg className={className} width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon>
-                <path d="M15.54 8.46a5 5 0 0 1 0 7.07"></path>
-                <path d="M19.07 4.93a10 10 0 0 1 0 14.14"></path>
-            </svg>
-        );
-
-        const Scissors = ({className}) => (
-            <svg className={className} width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <circle cx="6" cy="6" r="3"></circle>
-                <circle cx="6" cy="18" r="3"></circle>
-                <line x1="20" y1="4" x2="8.12" y2="15.88"></line>
-                <line x1="14.47" y1="14.48" x2="20" y2="20"></line>
-                <line x1="8.12" y1="8.12" x2="12" y2="12"></line>
-            </svg>
-        );
-
-        const Zap = ({className}) => (
-            <svg className={className} width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon>
-            </svg>
-        );
-
-        const User = ({className}) => (
-            <svg className={className} width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"></path>
-                <circle cx="12" cy="7" r="4"></circle>
-            </svg>
-        );
-
         const Download = ({className}) => (
             <svg className={className} width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                 <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
@@ -112,996 +67,365 @@
             </svg>
         );
 
-        const Eye = ({className}) => (
-            <svg className={className} width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path>
-                <circle cx="12" cy="12" r="3"></circle>
-            </svg>
-        );
+        const API_URL = 'https://ai-podcast-editor-production.up.railway.app';
 
-        const DollarSign = ({className}) => (
-            <svg className={className} width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <line x1="12" y1="1" x2="12" y2="23"></line>
-                <path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"></path>
-            </svg>
-        );
-
-        const FileText = ({className}) => (
-            <svg className={className} width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
-                <polyline points="14 2 14 8 20 8"></polyline>
-                <line x1="16" y1="13" x2="8" y2="13"></line>
-                <line x1="16" y1="17" x2="8" y2="17"></line>
-                <polyline points="10 9 9 9 8 9"></polyline>
-            </svg>
-        );
+        const STAGES = [
+            { key: 'uploading',    label: 'Uploading audio' },
+            { key: 'transcribing', label: 'Transcribing audio (AssemblyAI)' },
+            { key: 'analyzing',    label: 'AI analysis (Claude)' },
+            { key: 'cutting',      label: 'Cutting audio (pydub)' },
+            { key: 'cleanvoice',   label: 'AI voice cleaning (Cleanvoice)' },
+            { key: 'auphonic',     label: 'Mastering audio (Auphonic)' },
+            { key: 'done',         label: 'Complete' },
+        ];
 
         function PodcastEditor() {
-            const [activeTab, setActiveTab] = useState('upload');
+            const [screen, setScreen] = useState('upload');
             const [file, setFile] = useState(null);
             const [requirements, setRequirements] = useState({
                 removeFillerWords: true,
                 removeLongPauses: true,
                 normalizeAudio: true,
-                addIntroOutro: false,
                 removeBackgroundNoise: true,
                 targetLength: '',
                 customInstructions: ''
             });
-            const [isProcessing, setIsProcessing] = useState(false);
-            const [currentAgent, setCurrentAgent] = useState(null);
-            const [completedAgents, setCompletedAgents] = useState([]);
-            const [processingComplete, setProcessingComplete] = useState(false);
-            const [pendingTranscript, setPendingTranscript] = useState(null); // {transcript_id, filename} for retries
-            const [claudeOverloaded, setClaudeOverloaded] = useState(false);
-            const [editDecisions, setEditDecisions] = useState([]);
-            const [isDownloading, setIsDownloading] = useState(false);
-            const [editStage, setEditStage] = useState(null); // null | 'cutting' | 'cleanvoice' | 'auphonic' | 'completed'
-            const [editError, setEditError] = useState(null); // null | {step, message}
-            const [reportText, setReportText] = useState('');
-            const [originalAudioUrl, setOriginalAudioUrl] = useState(null);
-            const [editedAudioUrl, setEditedAudioUrl] = useState(null);
-            const [editedAudioSize, setEditedAudioSize] = useState(null);
-
-            const agents = [
-                {
-                    id: 'audio-analysis',
-                    name: 'Audio Analysis Agent',
-                    icon: Volume2,
-                    description: 'Transcribes and analyzes audio quality',
-                    integration: 'AssemblyAI + Descript API',
-                    tasks: [
-                        'Transcribe via AssemblyAI (99% accuracy)',
-                        'Speaker diarization (identify hosts/guests)',
-                        'Detect silence periods > 2 seconds',
-                        'Flag filler words with confidence scores',
-                        'Audio quality analysis (noise floor, clipping)',
-                        'Generate timestamped edit decision list'
-                    ],
-                    color: 'bg-blue-500',
-                    cost: '$0.25'
-                },
-                {
-                    id: 'content-editor',
-                    name: 'Content Editor Agent',
-                    icon: Scissors,
-                    description: 'Makes intelligent editing decisions',
-                    integration: 'Claude API + Custom Logic',
-                    tasks: [
-                        'Analyze client requirements checklist',
-                        'Remove excessive filler words (preserve natural speech)',
-                        'Intelligent pause trimming (1-1.5s)',
-                        'Identify off-topic tangents for review',
-                        'Preserve comedic timing and emphasis',
-                        'Generate edit rationale document'
-                    ],
-                    color: 'bg-purple-500',
-                    cost: '$0.15'
-                },
-                {
-                    id: 'audio-engineer',
-                    name: 'Audio Engineering Agent',
-                    icon: Zap,
-                    description: 'Applies professional audio processing',
-                    integration: 'Auphonic + Cleanvoice APIs',
-                    tasks: [
-                        'Loudness normalization (-16 LUFS)',
-                        'AI noise reduction via Cleanvoice',
-                        'Dynamic range compression',
-                        'EQ optimization for voice clarity',
-                        'Crossfade generation at cuts',
-                        'Final mixdown and export'
-                    ],
-                    color: 'bg-green-500',
-                    cost: '$0.30'
-                },
-                {
-                    id: 'qa-agent',
-                    name: 'Quality Assurance Agent',
-                    icon: CheckCircle,
-                    description: 'Validates edits meet standards',
-                    integration: 'Claude API + Audio Analysis',
-                    tasks: [
-                        'Verify all client requirements met',
-                        'Detect jarring cuts or artifacts',
-                        'Validate natural speech flow',
-                        'Check target length compliance',
-                        'Technical QA (levels, format, metadata)',
-                        'Generate human review checklist'
-                    ],
-                    color: 'bg-orange-500',
-                    cost: '$0.10'
-                }
-            ];
-
-            const mockEditDecisions = [
-                { time: '00:02:34', type: 'Remove Filler', content: 'Removed "um, uh" (3 instances)', confidence: 95 },
-                { time: '00:05:12', type: 'Trim Pause', content: 'Reduced 4.2s pause to 1.5s', confidence: 100 },
-                { time: '00:08:45', type: 'Remove Filler', content: 'Removed "you know" filler', confidence: 92 },
-                { time: '00:12:23', type: 'Keep Pause', content: 'Preserved 3s pause (comedic timing)', confidence: 88 },
-                { time: '00:15:56', type: 'Noise Reduction', content: 'Reduced background hum -18dB', confidence: 97 },
-                { time: '00:19:10', type: 'Remove Filler', content: 'Removed "like" (2 instances)', confidence: 94 },
-                { time: '00:23:45', type: 'Trim Pause', content: 'Reduced 5.8s silence to 1.2s', confidence: 100 },
-                { time: '00:28:30', type: 'Level Adjustment', content: 'Normalized guest audio +3dB', confidence: 99 }
-            ];
+            const [pipelineStage, setPipelineStage] = useState(null);
+            const [pipelineError, setPipelineError] = useState(null);
+            const downloadBlobRef = useRef(null);
+            const downloadExtRef = useRef('mp3');
 
             const handleFileUpload = (e) => {
                 const uploadedFile = e.target.files[0];
                 if (uploadedFile && uploadedFile.type.includes('audio')) {
                     setFile(uploadedFile);
-                    setProcessingComplete(false);
-                    setCompletedAgents([]);
-                    // Revoke previous object URLs to free memory
-                    if (originalAudioUrl) URL.revokeObjectURL(originalAudioUrl);
-                    if (editedAudioUrl) URL.revokeObjectURL(editedAudioUrl);
-                    setOriginalAudioUrl(URL.createObjectURL(uploadedFile));
-                    setEditedAudioUrl(null);
-                    setEditedAudioSize(null);
-                    setEditStage(null);
-                    setEditError(null);
                 }
             };
 
-        const API_URL = 'https://ai-podcast-editor-production.up.railway.app';
+            const runFullPipeline = async () => {
+                if (!file) return;
+                setScreen('progress');
+                setPipelineError(null);
+                setPipelineStage('uploading');
 
-// Calls /api/process (returns job_id immediately), then polls /api/process-status.
-const runClaudeAnalysis = async (transcript_id, filename) => {
-    setClaudeOverloaded(false);
-    setIsProcessing(true);
-    setCurrentAgent('qa-agent');
+                try {
+                    // Stage 1: Upload
+                    const formData = new FormData();
+                    formData.append('file', file);
+                    const uploadRes = await fetch(`${API_URL}/api/upload`, { method: 'POST', body: formData });
+                    if (!uploadRes.ok) {
+                        const err = await uploadRes.json();
+                        throw { stage: 'uploading', message: err.error || 'Upload failed' };
+                    }
+                    const uploadData = await uploadRes.json();
+                    const { transcript_id, filename } = uploadData;
 
-    try {
-        console.log('Starting Claude analysis job...');
-        const processRes = await fetch(`${API_URL}/api/process`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                transcript_id,
-                filename,
-                requirements: {
-                    removeFillerWords: requirements.removeFillerWords,
-                    removeLongPauses: requirements.removeLongPauses,
-                    normalizeAudio: requirements.normalizeAudio,
-                    removeBackgroundNoise: requirements.removeBackgroundNoise,
-                    targetLength: requirements.targetLength
-                },
-                customInstructions: requirements.customInstructions
-            })
-        });
+                    // Stage 2: Transcribe (poll)
+                    setPipelineStage('transcribing');
+                    while (true) {
+                        await new Promise(r => setTimeout(r, 5000));
+                        const statusRes = await fetch(`${API_URL}/api/transcription-status/${transcript_id}`);
+                        const statusData = await statusRes.json();
+                        if (statusData.status === 'completed') break;
+                        if (statusData.status === 'error') {
+                            throw { stage: 'transcribing', message: statusData.error || 'Transcription failed' };
+                        }
+                    }
 
-        const startData = await processRes.json();
-        console.log('process response:', processRes.status, startData);
+                    // Stage 3: Claude analysis
+                    setPipelineStage('analyzing');
+                    const processRes = await fetch(`${API_URL}/api/process`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            transcript_id,
+                            filename,
+                            requirements: {
+                                removeFillerWords: requirements.removeFillerWords,
+                                removeLongPauses: requirements.removeLongPauses,
+                                normalizeAudio: requirements.normalizeAudio,
+                                removeBackgroundNoise: requirements.removeBackgroundNoise,
+                                targetLength: requirements.targetLength
+                            },
+                            customInstructions: requirements.customInstructions
+                        })
+                    });
+                    const processData = await processRes.json();
+                    if (!processRes.ok) throw { stage: 'analyzing', message: processData.error || 'Analysis failed to start' };
+                    const analysisJobId = processData.job_id;
+                    if (!analysisJobId) throw { stage: 'analyzing', message: 'No job_id returned' };
 
-        if (!processRes.ok) {
-            throw new Error(startData.error || 'Processing failed to start');
-        }
+                    let editDecisions = [];
+                    while (true) {
+                        await new Promise(r => setTimeout(r, 3000));
+                        const pollRes = await fetch(`${API_URL}/api/process-status/${analysisJobId}`);
+                        const pollData = await pollRes.json();
+                        if (pollData.retryable) throw { stage: 'analyzing', message: 'Claude API overloaded. Please try again.' };
+                        if (!pollRes.ok) throw { stage: 'analyzing', message: pollData.error || 'Analysis failed' };
+                        if (pollData.success) {
+                            editDecisions = pollData.edit_decisions || [];
+                            break;
+                        }
+                    }
 
-        const job_id = startData.job_id;
-        if (!job_id) throw new Error('No job_id returned from server');
+                    // Stage 4-6: Edit audio pipeline (cutting + cleanvoice + auphonic)
+                    setPipelineStage('cutting');
+                    const cuts = editDecisions.filter(d => d.start_ms != null && d.end_ms != null);
+                    const editRes = await fetch(`${API_URL}/api/edit-audio`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ transcript_id, cuts })
+                    });
+                    const editData = await editRes.json();
+                    if (!editRes.ok) throw { stage: 'cutting', message: editData.error || 'Edit job failed to start' };
+                    const editJobId = editData.job_id;
+                    downloadExtRef.current = editData.auphonic ? 'mp3' : 'wav';
 
-        // Poll /api/process-status until done
-        console.log(`Polling job ${job_id}...`);
-        let responseData = null;
-        while (true) {
-            await new Promise(r => setTimeout(r, 3000));
-            const statusRes = await fetch(`${API_URL}/api/process-status/${job_id}`);
-            const statusData = await statusRes.json();
-            console.log('poll:', statusData.status || 'done', statusData);
+                    while (true) {
+                        await new Promise(r => setTimeout(r, 4000));
+                        const statusRes = await fetch(`${API_URL}/api/edit-audio-status/${editJobId}`);
+                        const statusData = await statusRes.json();
+                        if (statusData.status === 'cutting')    setPipelineStage('cutting');
+                        if (statusData.status === 'cleanvoice') setPipelineStage('cleanvoice');
+                        if (statusData.status === 'auphonic')   setPipelineStage('auphonic');
+                        if (statusData.status === 'completed')  break;
+                        if (!statusRes.ok) {
+                            throw { stage: statusData.failed_step || 'cutting', message: statusData.error || 'Audio processing failed' };
+                        }
+                    }
 
-            if (statusData.retryable) {
-                setClaudeOverloaded(true);
-                setIsProcessing(false);
-                setCurrentAgent(null);
-                return;
-            }
-            if (!statusRes.ok) {
-                throw new Error(statusData.error || 'Analysis failed');
-            }
-            if (statusData.success) {
-                responseData = statusData;
-                break;
-            }
-            // Still pending/analyzing — keep polling
-        }
+                    // Stage 7: Download blob into memory
+                    const dlRes = await fetch(`${API_URL}/api/edit-audio-download/${editJobId}`);
+                    if (!dlRes.ok) {
+                        const err = await dlRes.json();
+                        throw { stage: 'done', message: err.error || 'Download failed' };
+                    }
+                    downloadBlobRef.current = await dlRes.blob();
 
-        // All done!
-        setEditDecisions(responseData.edit_decisions || []);
-        setReportText(responseData.report || '');
-        setCompletedAgents(['audio-analysis', 'content-editor', 'audio-engineer', 'qa-agent']);
-        setCurrentAgent(null);
-        setIsProcessing(false);
-        setProcessingComplete(true);
-        alert('Processing complete! Check the Review tab.');
+                    setPipelineStage('done');
+                    setScreen('download');
 
-    } catch (error) {
-        console.error('Error:', error);
-        alert('Processing failed: ' + error.message + '\n\nCheck the browser console for details.');
-        setIsProcessing(false);
-        setCurrentAgent(null);
-    }
-};
-
-const downloadEditedAudio = async () => {
-    if (!pendingTranscript) {
-        alert('No processed audio available. Please process a file first.');
-        return;
-    }
-    const cuts = editDecisions.filter(d => d.start_ms != null && d.end_ms != null);
-    setIsDownloading(true);
-    try {
-        // Step 1: kick off async edit job
-        setEditStage('cutting');
-        setEditError(null);
-        const startRes = await fetch(`${API_URL}/api/edit-audio`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ transcript_id: pendingTranscript.transcript_id, cuts })
-        });
-        const startData = await startRes.json();
-        if (!startRes.ok) throw new Error(startData.error || 'Failed to start edit job');
-        const { job_id, auphonic } = startData;
-        console.log(`Edit job ${job_id} started (auphonic=${auphonic})`);
-
-        // Step 2: poll until complete, surfacing each stage
-        let jobFailed = false;
-        while (true) {
-            await new Promise(r => setTimeout(r, 4000));
-            const statusRes = await fetch(`${API_URL}/api/edit-audio-status/${job_id}`);
-            const statusData = await statusRes.json();
-            console.log('edit-audio poll:', statusData.status || 'error', statusData);
-            if (statusData.status === 'cutting')    setEditStage('cutting');
-            if (statusData.status === 'cleanvoice') setEditStage('cleanvoice');
-            if (statusData.status === 'auphonic')   setEditStage('auphonic');
-            if (statusData.status === 'completed')  { setEditStage('completed'); break; }
-            if (!statusRes.ok) {
-                // Pipeline stopped at a specific step — surface it clearly
-                setEditError({
-                    step: statusData.failed_step || 'unknown',
-                    message: statusData.error || 'An unexpected error occurred'
-                });
-                jobFailed = true;
-                break;
-            }
-        }
-        if (jobFailed) return; // don't attempt download
-
-        // Step 3: download the file
-        const dlRes = await fetch(`${API_URL}/api/edit-audio-download/${job_id}`);
-        if (!dlRes.ok) {
-            const err = await dlRes.json();
-            throw new Error(err.error || 'Download failed');
-        }
-        const blob = await dlRes.blob();
-        if (editedAudioUrl) URL.revokeObjectURL(editedAudioUrl);
-        const url = URL.createObjectURL(blob);
-        setEditedAudioUrl(url);
-        setEditedAudioSize(blob.size);
-        const ext = auphonic ? 'mp3' : 'wav';
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `edited_podcast.${ext}`;
-        a.click();
-    } catch (error) {
-        alert('Download failed: ' + error.message);
-    } finally {
-        setIsDownloading(false);
-    }
-};
-
-const startProcessing = async () => {
-    if (!file) {
-        alert('Please upload a file first');
-        return;
-    }
-
-    setIsProcessing(true);
-    setCompletedAgents([]);
-    setCurrentAgent(null);
-    setClaudeOverloaded(false);
-    setPendingTranscript(null);
-    setActiveTab('processing');
-
-    try {
-        // Step 1: Upload file → AssemblyAI, get transcript_id back immediately
-        setCurrentAgent('audio-analysis');
-        console.log('Uploading file...');
-
-        const formData = new FormData();
-        formData.append('file', file);
-
-        const uploadRes = await fetch(`${API_URL}/api/upload`, {
-            method: 'POST',
-            body: formData
-        });
-
-        if (!uploadRes.ok) {
-            const err = await uploadRes.json();
-            throw new Error(err.error || 'Upload failed');
-        }
-
-        const uploadData = await uploadRes.json();
-        console.log('Upload complete, transcript_id:', uploadData.transcript_id);
-
-        setCompletedAgents(['audio-analysis']);
-        setCurrentAgent('content-editor');
-
-        // Step 2: Poll transcription status until ready
-        console.log('Waiting for transcription...');
-        let transcriptReady = false;
-        while (!transcriptReady) {
-            await new Promise(resolve => setTimeout(resolve, 5000));
-            const statusRes = await fetch(`${API_URL}/api/transcription-status/${uploadData.transcript_id}`);
-            const statusData = await statusRes.json();
-            console.log('Transcription status:', statusData.status);
-            if (statusData.status === 'completed') {
-                transcriptReady = true;
-            } else if (statusData.status === 'error') {
-                throw new Error('Transcription failed: ' + (statusData.error || 'Unknown error'));
-            }
-        }
-
-        setCompletedAgents(['audio-analysis', 'content-editor']);
-        setCurrentAgent('audio-engineer');
-        await new Promise(resolve => setTimeout(resolve, 800));
-        setCompletedAgents(['audio-analysis', 'content-editor', 'audio-engineer']);
-
-        // Step 3: Run Claude analysis
-        setPendingTranscript({ transcript_id: uploadData.transcript_id, filename: uploadData.filename });
-        await runClaudeAnalysis(uploadData.transcript_id, uploadData.filename);
-
-    } catch (error) {
-        console.error('Error:', error);
-        alert('Processing failed: ' + error.message + '\n\nCheck the browser console for details.');
-        setIsProcessing(false);
-        setCurrentAgent(null);
-        setCompletedAgents([]);
-    }
-};
-
-            const getAgentStatus = (agentId) => {
-                if (completedAgents.includes(agentId)) return 'completed';
-                if (currentAgent === agentId) return 'processing';
-                return 'pending';
+                } catch (err) {
+                    console.error('Pipeline error:', err);
+                    setPipelineError({
+                        stage: err.stage || 'uploading',
+                        message: err.message || 'An unexpected error occurred'
+                    });
+                }
             };
 
-            const totalAICost = agents.reduce((sum, agent) => sum + parseFloat(agent.cost.replace('$', '')), 0);
-            const traditionalCost = 45;
-            const savings = ((1 - totalAICost / traditionalCost) * 100).toFixed(0);
+            const handleDownload = () => {
+                if (!downloadBlobRef.current) return;
+                const url = URL.createObjectURL(downloadBlobRef.current);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `edited_podcast.${downloadExtRef.current}`;
+                a.click();
+                URL.revokeObjectURL(url);
+            };
+
+            const resetToUpload = () => {
+                setScreen('upload');
+                setPipelineStage(null);
+                setPipelineError(null);
+                setFile(null);
+                downloadBlobRef.current = null;
+            };
+
+            // --- Render ---
 
             return (
-                <div className="min-h-screen bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900 p-6">
-                    <div className="max-w-7xl mx-auto">
+                <div className="min-h-screen bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900 flex items-center justify-center p-6">
+                    <div className="w-full max-w-2xl">
+
+                        {/* Header */}
                         <div className="text-center mb-8">
-                            <div className="flex items-center justify-center gap-3 mb-3">
-                                <Sparkles />
-                                <h1 className="text-4xl font-bold text-white">AI Podcast Editor Pro</h1>
-                            </div>
-                            <p className="text-purple-200">Multi-Agent Workflow • Human-Verified Quality • Real Tool Integration</p>
-                        </div>
-
-                        <div className="bg-white/10 backdrop-blur-lg rounded-t-2xl border-t border-x border-white/20">
-                            <div className="flex gap-1 p-2">
-                                <button
-                                    onClick={() => setActiveTab('upload')}
-                                    className={`flex-1 py-3 px-6 rounded-lg font-semibold transition-all ${
-                                        activeTab === 'upload' 
-                                            ? 'bg-purple-500 text-white' 
-                                            : 'text-purple-200 hover:bg-white/5'
-                                    }`}
-                                >
-                                    <Upload className="w-4 h-4 inline mr-2" />
-                                    Upload
-                                </button>
-                                <button
-                                    onClick={() => setActiveTab('processing')}
-                                    className={`flex-1 py-3 px-6 rounded-lg font-semibold transition-all ${
-                                        activeTab === 'processing' 
-                                            ? 'bg-purple-500 text-white' 
-                                            : 'text-purple-200 hover:bg-white/5'
-                                    }`}
-                                >
-                                    <Zap className="w-4 h-4 inline mr-2" />
-                                    Processing
-                                </button>
-                                <button
-                                    onClick={() => setActiveTab('review')}
-                                    disabled={!processingComplete}
-                                    className={`flex-1 py-3 px-6 rounded-lg font-semibold transition-all ${
-                                        activeTab === 'review' 
-                                            ? 'bg-purple-500 text-white' 
-                                            : processingComplete ? 'text-purple-200 hover:bg-white/5' : 'text-purple-400/50 cursor-not-allowed'
-                                    }`}
-                                >
-                                    <Eye className="w-4 h-4 inline mr-2" />
-                                    Review
-                                </button>
-                                <button
-                                    onClick={() => setActiveTab('costs')}
-                                    className={`flex-1 py-3 px-6 rounded-lg font-semibold transition-all ${
-                                        activeTab === 'costs' 
-                                            ? 'bg-purple-500 text-white' 
-                                            : 'text-purple-200 hover:bg-white/5'
-                                    }`}
-                                >
-                                    <DollarSign className="w-4 h-4 inline mr-2" />
-                                    Costs
-                                </button>
+                            <div className="flex items-center justify-center gap-3 mb-2">
+                                <Sparkles className="text-purple-300" />
+                                <h1 className="text-3xl font-bold text-white">AI Podcast Editor</h1>
                             </div>
                         </div>
 
-                        <div className="bg-white/10 backdrop-blur-lg rounded-b-2xl border-b border-x border-white/20 p-8 min-h-[600px]">
-                            
-                            {activeTab === 'upload' && (
-                                <div>
-                                    <h2 className="text-2xl font-semibold text-white mb-6">Upload Episode</h2>
-                                    
-                                    <div className="border-2 border-dashed border-purple-400/50 rounded-xl p-8 text-center mb-6 bg-white/5 hover:bg-white/10 transition-all cursor-pointer">
-                                        <input
-                                            type="file"
-                                            accept="audio/*"
-                                            onChange={handleFileUpload}
-                                            className="hidden"
-                                            id="file-upload"
-                                        />
-                                        <label htmlFor="file-upload" className="cursor-pointer">
-                                            <div className="w-16 h-16 mx-auto mb-4 flex items-center justify-center">
-                                                <FileAudio />
-                                            </div>
-                                            {file ? (
-                                                <div className="text-white">
-                                                    <p className="font-semibold text-lg">{file.name}</p>
-                                                    <p className="text-sm text-purple-200">{(file.size / 1024 / 1024).toFixed(2)} MB</p>
-                                                </div>
-                                            ) : (
-                                                <div>
-                                                    <p className="text-white font-semibold mb-2">Drop your podcast file here</p>
-                                                    <p className="text-purple-200 text-sm">or click to browse • MP3, WAV, M4A</p>
-                                                </div>
-                                            )}
-                                        </label>
-                                    </div>
+                        {/* ─── Screen 1: Upload ─── */}
+                        {screen === 'upload' && (
+                            <div className="bg-white/10 backdrop-blur-lg rounded-2xl border border-white/20 p-8">
+                                <h2 className="text-xl font-semibold text-white mb-6">Upload Episode</h2>
 
-                                    <div className="grid md:grid-cols-2 gap-8">
-                                        <div>
-                                            <h3 className="text-xl font-semibold text-white mb-4">Edit Requirements</h3>
-                                            <div className="space-y-3 mb-4">
-                                                <label className="flex items-center gap-3 text-white cursor-pointer">
-                                                    <input
-                                                        type="checkbox"
-                                                        checked={requirements.removeFillerWords}
-                                                        onChange={(e) => setRequirements({...requirements, removeFillerWords: e.target.checked})}
-                                                        className="w-5 h-5 rounded accent-purple-500"
-                                                    />
-                                                    <span>Remove excessive filler words</span>
-                                                </label>
-                                                <label className="flex items-center gap-3 text-white cursor-pointer">
-                                                    <input
-                                                        type="checkbox"
-                                                        checked={requirements.removeLongPauses}
-                                                        onChange={(e) => setRequirements({...requirements, removeLongPauses: e.target.checked})}
-                                                        className="w-5 h-5 rounded accent-purple-500"
-                                                    />
-                                                    <span>Remove long pauses</span>
-                                                </label>
-                                                <label className="flex items-center gap-3 text-white cursor-pointer">
-                                                    <input
-                                                        type="checkbox"
-                                                        checked={requirements.normalizeAudio}
-                                                        onChange={(e) => setRequirements({...requirements, normalizeAudio: e.target.checked})}
-                                                        className="w-5 h-5 rounded accent-purple-500"
-                                                    />
-                                                    <span>Normalize audio levels</span>
-                                                </label>
-                                                <label className="flex items-center gap-3 text-white cursor-pointer">
-                                                    <input
-                                                        type="checkbox"
-                                                        checked={requirements.removeBackgroundNoise}
-                                                        onChange={(e) => setRequirements({...requirements, removeBackgroundNoise: e.target.checked})}
-                                                        className="w-5 h-5 rounded accent-purple-500"
-                                                    />
-                                                    <span>Remove background noise</span>
-                                                </label>
+                                {/* Drop zone */}
+                                <div className="border-2 border-dashed border-purple-400/50 rounded-xl p-8 text-center mb-6 bg-white/5 hover:bg-white/10 transition-all cursor-pointer">
+                                    <input type="file" accept="audio/*" onChange={handleFileUpload} className="hidden" id="file-upload" />
+                                    <label htmlFor="file-upload" className="cursor-pointer">
+                                        <div className="w-12 h-12 mx-auto mb-3 text-purple-300 flex items-center justify-center">
+                                            <FileAudio />
+                                        </div>
+                                        {file ? (
+                                            <div className="text-white">
+                                                <p className="font-semibold">{file.name}</p>
+                                                <p className="text-sm text-purple-200">{(file.size / 1024 / 1024).toFixed(2)} MB</p>
                                             </div>
+                                        ) : (
+                                            <div>
+                                                <p className="text-white font-semibold mb-1">Drop your podcast file here</p>
+                                                <p className="text-purple-200 text-sm">or click to browse</p>
+                                            </div>
+                                        )}
+                                    </label>
+                                </div>
 
-                                            <div className="mb-4">
-                                                <label className="block text-white mb-2">Target Length</label>
-                                                <input
-                                                    type="text"
-                                                    placeholder="e.g., 45 minutes"
-                                                    value={requirements.targetLength}
-                                                    onChange={(e) => setRequirements({...requirements, targetLength: e.target.value})}
-                                                    className="w-full p-3 rounded-lg bg-white/10 border border-white/20 text-white placeholder-purple-300"
-                                                />
-                                            </div>
+                                {/* Options grid */}
+                                <div className="grid md:grid-cols-2 gap-6 mb-6">
+                                    <div>
+                                        <h3 className="text-sm font-semibold text-purple-200 uppercase tracking-wide mb-3">Edit Options</h3>
+                                        <div className="space-y-3">
+                                            {[
+                                                { key: 'removeFillerWords', label: 'Remove filler words' },
+                                                { key: 'removeLongPauses', label: 'Remove long pauses' },
+                                                { key: 'normalizeAudio', label: 'Normalize audio levels' },
+                                                { key: 'removeBackgroundNoise', label: 'Remove background noise' },
+                                            ].map(opt => (
+                                                <label key={opt.key} className="flex items-center gap-3 text-white cursor-pointer">
+                                                    <input
+                                                        type="checkbox"
+                                                        checked={requirements[opt.key]}
+                                                        onChange={e => setRequirements({...requirements, [opt.key]: e.target.checked})}
+                                                        className="w-4 h-4 rounded accent-purple-500"
+                                                    />
+                                                    <span className="text-sm">{opt.label}</span>
+                                                </label>
+                                            ))}
                                         </div>
 
-                                        <div>
-                                            <h3 className="text-xl font-semibold text-white mb-4">Custom Instructions</h3>
-                                            <textarea
-                                                placeholder="e.g., Keep the banter between hosts, remove technical difficulties around 15:30, preserve the joke at 22:15..."
-                                                value={requirements.customInstructions}
-                                                onChange={(e) => setRequirements({...requirements, customInstructions: e.target.value})}
-                                                className="w-full p-3 rounded-lg bg-white/10 border border-white/20 text-white placeholder-purple-300 h-48 resize-none"
+                                        <div className="mt-4">
+                                            <label className="block text-sm text-purple-200 mb-1">Target length</label>
+                                            <input
+                                                type="text"
+                                                placeholder="e.g., 45 minutes"
+                                                value={requirements.targetLength}
+                                                onChange={e => setRequirements({...requirements, targetLength: e.target.value})}
+                                                className="w-full p-2.5 rounded-lg bg-white/10 border border-white/20 text-white placeholder-purple-300 text-sm"
                                             />
                                         </div>
                                     </div>
 
-                                    <button
-                                        onClick={startProcessing}
-                                        disabled={!file || isProcessing}
-                                        className="w-full mt-6 bg-gradient-to-r from-purple-500 to-pink-500 text-white font-semibold py-4 rounded-xl hover:from-purple-600 hover:to-pink-600 transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
-                                    >
-                                        <PlayCircle />
-                                        {isProcessing ? 'Processing...' : 'Start AI Edit'}
-                                    </button>
-                                </div>
-                            )}
-
-                            {activeTab === 'processing' && (
-                                <div>
-                                    <h2 className="text-2xl font-semibold text-white mb-6">Multi-Agent Workflow</h2>
-                                    
-                                    <div className="space-y-6">
-                                        {agents.map((agent, index) => {
-                                            const status = getAgentStatus(agent.id);
-                                            const Icon = agent.icon;
-                                            
-                                            return (
-                                                <div key={agent.id} className="relative">
-                                                    {index < agents.length - 1 && (
-                                                        <div className="absolute left-6 top-20 w-0.5 h-16 bg-white/20" />
-                                                    )}
-                                                    
-                                                    <div className={`bg-white/5 rounded-xl p-6 border-2 transition-all ${
-                                                        status === 'completed' ? 'border-green-500/50 bg-green-500/10' :
-                                                        status === 'processing' ? 'border-purple-500 bg-purple-500/10 animate-pulse' :
-                                                        'border-white/10'
-                                                    }`}>
-                                                        <div className="flex items-start gap-4">
-                                                            <div className={`${agent.color} p-3 rounded-lg shrink-0`}>
-                                                                <Icon />
-                                                            </div>
-                                                            
-                                                            <div className="flex-1">
-                                                                <div className="flex items-center justify-between mb-2">
-                                                                    <div>
-                                                                        <h3 className="text-xl font-semibold text-white">{agent.name}</h3>
-                                                                        <p className="text-sm text-purple-300 mt-1">
-                                                                            🔌 {agent.integration} • {agent.cost}/episode
-                                                                        </p>
-                                                                    </div>
-                                                                    {status === 'completed' && <CheckCircle />}
-                                                                    {status === 'processing' && (
-                                                                        <div className="animate-spin">
-                                                                            <Clock />
-                                                                        </div>
-                                                                    )}
-                                                                    {status === 'pending' && <AlertCircle />}
-                                                                </div>
-                                                                
-                                                                <p className="text-purple-200 mb-3">{agent.description}</p>
-                                                                
-                                                                <div className="bg-white/5 rounded-lg p-4">
-                                                                    <ul className="space-y-1.5">
-                                                                        {agent.tasks.map((task, i) => (
-                                                                            <li key={i} className="text-sm text-purple-100 flex items-start gap-2">
-                                                                                <span className="text-purple-400 mt-0.5">•</span>
-                                                                                <span>{task}</span>
-                                                                            </li>
-                                                                        ))}
-                                                                    </ul>
-                                                                </div>
-                                                            </div>
-                                                        </div>
-                                                    </div>
-                                                </div>
-                                            );
-                                        })}
+                                    <div>
+                                        <h3 className="text-sm font-semibold text-purple-200 uppercase tracking-wide mb-3">Custom Instructions</h3>
+                                        <textarea
+                                            placeholder="e.g., Keep the banter between hosts, remove technical difficulties around 15:30..."
+                                            value={requirements.customInstructions}
+                                            onChange={e => setRequirements({...requirements, customInstructions: e.target.value})}
+                                            className="w-full p-2.5 rounded-lg bg-white/10 border border-white/20 text-white placeholder-purple-300 text-sm h-44 resize-none"
+                                        />
                                     </div>
+                                </div>
 
-                                    {claudeOverloaded && pendingTranscript && (
-                                        <div className="mt-6 bg-gradient-to-r from-yellow-500/20 to-orange-500/20 border-2 border-yellow-500/50 rounded-xl p-6">
-                                            <div className="flex items-center gap-3 mb-2">
-                                                <span className="text-yellow-400 text-xl">⚠</span>
-                                                <h3 className="text-xl font-semibold text-white">Claude API Temporarily Overloaded</h3>
+                                <button
+                                    onClick={runFullPipeline}
+                                    disabled={!file}
+                                    className="w-full bg-gradient-to-r from-purple-500 to-pink-500 text-white font-semibold py-4 rounded-xl hover:from-purple-600 hover:to-pink-600 transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+                                >
+                                    <Sparkles className="w-5 h-5" />
+                                    Edit Audio
+                                </button>
+                            </div>
+                        )}
+
+                        {/* ─── Screen 2: Progress ─── */}
+                        {screen === 'progress' && (
+                            <div className="bg-white/10 backdrop-blur-lg rounded-2xl border border-white/20 p-8">
+                                <h2 className="text-xl font-semibold text-white mb-6">Editing in progress</h2>
+
+                                <div className="space-y-2">
+                                    {STAGES.map((stage, i) => {
+                                        const currentIdx = STAGES.findIndex(s => s.key === pipelineStage);
+                                        const failedStage = pipelineError && pipelineError.stage === stage.key;
+                                        const done = !failedStage && currentIdx > i;
+                                        const active = !failedStage && pipelineStage === stage.key && stage.key !== 'done';
+
+                                        let icon, textColor, bgColor;
+                                        if (failedStage) {
+                                            icon = <AlertCircle className="w-5 h-5 text-red-400" />;
+                                            textColor = 'text-red-300';
+                                            bgColor = 'bg-red-500/15 border-red-500/40';
+                                        } else if (done) {
+                                            icon = <CheckCircle className="w-5 h-5 text-green-400" />;
+                                            textColor = 'text-green-300';
+                                            bgColor = 'bg-green-500/10 border-green-500/30';
+                                        } else if (active) {
+                                            icon = (
+                                                <svg className="w-5 h-5 text-purple-400 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                                    <path d="M21 12a9 9 0 1 1-6.219-8.56" />
+                                                </svg>
+                                            );
+                                            textColor = 'text-white';
+                                            bgColor = 'bg-purple-500/15 border-purple-500/40';
+                                        } else {
+                                            icon = <div className="w-5 h-5 rounded-full border-2 border-white/20" />;
+                                            textColor = 'text-white/30';
+                                            bgColor = 'bg-white/5 border-white/10';
+                                        }
+
+                                        return (
+                                            <div key={stage.key} className={`flex items-center gap-3 rounded-lg px-4 py-3 border ${bgColor}`}>
+                                                <div className="shrink-0">{icon}</div>
+                                                <span className={`font-medium text-sm ${textColor}`}>{stage.label}</span>
                                             </div>
-                                            <p className="text-yellow-100 mb-4">
-                                                Transcription is complete. The Claude API is busy — wait a moment and try again. Your audio will not be re-uploaded.
-                                            </p>
+                                        );
+                                    })}
+                                </div>
+
+                                {/* Error card */}
+                                {pipelineError && (
+                                    <div className="mt-6 bg-red-500/10 border border-red-500/50 rounded-xl p-5">
+                                        <p className="text-red-300 font-semibold text-sm mb-1">
+                                            Pipeline stopped at: {pipelineError.stage}
+                                        </p>
+                                        <p className="text-red-200/70 text-xs font-mono break-all mb-4">
+                                            {pipelineError.message}
+                                        </p>
+                                        <div className="flex gap-3">
                                             <button
-                                                onClick={() => runClaudeAnalysis(pendingTranscript.transcript_id, pendingTranscript.filename)}
-                                                className="bg-yellow-500 text-white px-6 py-3 rounded-lg font-semibold hover:bg-yellow-600 transition-all"
+                                                onClick={() => { setPipelineError(null); runFullPipeline(); }}
+                                                className="bg-red-500 hover:bg-red-600 text-white px-4 py-2 rounded-lg text-sm font-semibold transition-all"
                                             >
-                                                Try Again
+                                                Retry from start
+                                            </button>
+                                            <button
+                                                onClick={resetToUpload}
+                                                className="bg-white/10 hover:bg-white/20 text-white px-4 py-2 rounded-lg text-sm font-semibold transition-all"
+                                            >
+                                                Back to upload
                                             </button>
                                         </div>
-                                    )}
+                                    </div>
+                                )}
+                            </div>
+                        )}
 
-                                    {processingComplete && (
-                                        <div className="mt-6 bg-gradient-to-r from-green-500/20 to-emerald-500/20 border-2 border-green-500/50 rounded-xl p-6">
-                                            <div className="flex items-center gap-3 mb-2">
-                                                <CheckCircle className="text-green-400" />
-                                                <h3 className="text-xl font-semibold text-white">Processing Complete!</h3>
-                                            </div>
-                                            <p className="text-green-100 mb-4">
-                                                AI editing complete. Ready for human verification.
-                                            </p>
-                                            <button
-                                                onClick={() => setActiveTab('review')}
-                                                className="bg-green-500 text-white px-6 py-3 rounded-lg font-semibold hover:bg-green-600 transition-all"
-                                            >
-                                                Review Edits →
-                                            </button>
-                                        </div>
-                                    )}
+                        {/* ─── Screen 3: Download ─── */}
+                        {screen === 'download' && (
+                            <div className="bg-white/10 backdrop-blur-lg rounded-2xl border border-white/20 p-8 text-center">
+                                <div className="w-16 h-16 mx-auto mb-4 text-green-400">
+                                    <CheckCircle className="w-16 h-16" />
                                 </div>
-                            )}
+                                <h2 className="text-2xl font-bold text-white mb-2">Your podcast is ready</h2>
+                                <p className="text-purple-200 mb-8">All editing stages completed successfully.</p>
 
-                            {activeTab === 'review' && (
-                                <div>
-                                    <h2 className="text-2xl font-semibold text-white mb-6">Human Editor Review Dashboard</h2>
-                                    
-                                    <div className="grid md:grid-cols-2 gap-6 mb-6">
-                                        <div className="bg-white/5 rounded-xl p-6 border border-white/20">
-                                            <h3 className="text-lg font-semibold text-white mb-3 flex items-center gap-2">
-                                                <Volume2 className="w-5 h-5" />
-                                                Original Audio
-                                            </h3>
-                                            {originalAudioUrl ? (
-                                                <audio
-                                                    controls
-                                                    src={originalAudioUrl}
-                                                    className="w-full rounded-lg"
-                                                    style={{accentColor: '#a855f7'}}
-                                                />
-                                            ) : (
-                                                <div className="bg-slate-800 rounded-lg p-4 text-center text-purple-300 text-sm">
-                                                    No file uploaded yet
-                                                </div>
-                                            )}
-                                            {file && (
-                                                <p className="text-sm text-purple-200 mt-2">
-                                                    {file.name} • {(file.size / 1024 / 1024).toFixed(1)} MB
-                                                </p>
-                                            )}
-                                        </div>
+                                <button
+                                    onClick={handleDownload}
+                                    className="bg-gradient-to-r from-green-500 to-emerald-500 text-white font-semibold py-4 px-8 rounded-xl hover:from-green-600 hover:to-emerald-600 transition-all flex items-center justify-center gap-2 mx-auto"
+                                >
+                                    <Download className="w-5 h-5" />
+                                    Download Edited Audio
+                                </button>
 
-                                        <div className="bg-white/5 rounded-xl p-6 border border-green-500/30">
-                                            <h3 className="text-lg font-semibond text-white mb-3 flex items-center gap-2">
-                                                <Sparkles className="w-5 h-5" />
-                                                AI Edited Audio
-                                            </h3>
-                                            {editedAudioUrl ? (
-                                                <audio
-                                                    controls
-                                                    src={editedAudioUrl}
-                                                    className="w-full rounded-lg"
-                                                    style={{accentColor: '#22c55e'}}
-                                                />
-                                            ) : (
-                                                <div className="bg-slate-800 rounded-lg p-4 text-center text-green-300 text-sm">
-                                                    {processingComplete
-                                                        ? 'Click "Download Edited Audio" to generate'
-                                                        : 'Process a file first'}
-                                                </div>
-                                            )}
-                                            {editedAudioSize && (
-                                                <p className="text-sm text-green-200 mt-2">
-                                                    {(editedAudioSize / 1024 / 1024).toFixed(1)} MB
-                                                    {file && ` • ${((1 - editedAudioSize / file.size) * 100).toFixed(0)}% smaller`}
-                                                </p>
-                                            )}
-                                        </div>
-                                    </div>
-
-                                    <div className="bg-white/5 rounded-xl p-6 border border-white/20 mb-6">
-                                        <h3 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
-                                            <FileText className="w-5 h-5" />
-                                            Edit Decision Log
-                                            {editDecisions.length > 0 && (
-                                                <span className="ml-auto text-xs bg-purple-500/30 text-purple-300 px-2 py-1 rounded-full">
-                                                    {editDecisions.filter(d => d.start_ms != null).length} cuts · {editDecisions.length} total
-                                                </span>
-                                            )}
-                                        </h3>
-                                        <div className="space-y-2 max-h-64 overflow-y-auto">
-                                            {(editDecisions.length > 0 ? editDecisions : mockEditDecisions).map((edit, index) => {
-                                                const isReal = editDecisions.length > 0;
-                                                const timestamp = isReal
-                                                    ? (edit.start_ms != null ? `${Math.floor(edit.start_ms/60000)}:${String(Math.floor((edit.start_ms%60000)/1000)).padStart(2,'0')}` : '—')
-                                                    : edit.time;
-                                                const label = isReal ? edit.type : edit.type;
-                                                const content = isReal ? edit.description : edit.content;
-                                                const conf = edit.confidence;
-                                                const isCut = isReal && edit.start_ms != null;
-                                                return (
-                                                    <div key={index} className="bg-white/5 rounded-lg p-3 flex items-start gap-3 hover:bg-white/10 transition-all">
-                                                        <span className="font-mono text-purple-300 text-sm w-12 shrink-0">{timestamp}</span>
-                                                        <div className="flex-1">
-                                                            <span className={`inline-block px-2 py-0.5 rounded text-xs font-semibold mb-1 ${
-                                                                label === 'Remove Filler' ? 'bg-orange-500/20 text-orange-300' :
-                                                                label === 'Trim Pause' ? 'bg-blue-500/20 text-blue-300' :
-                                                                label === 'Keep Pause' ? 'bg-green-500/20 text-green-300' :
-                                                                label === 'Note' ? 'bg-gray-500/20 text-gray-300' :
-                                                                isCut ? 'bg-red-500/20 text-red-300' :
-                                                                'bg-gray-500/20 text-gray-300'
-                                                            }`}>
-                                                                {label}
-                                                            </span>
-                                                            <p className="text-sm text-white">{content}</p>
-                                                        </div>
-                                                        <span className="text-xs text-purple-300 shrink-0">{conf}%</span>
-                                                    </div>
-                                                );
-                                            })}
-                                        </div>
-                                    </div>
-
-                                    {/* ── Stage progress + download button ── */}
-                                    <div className="bg-white/5 rounded-xl p-6 border border-white/20 mb-6">
-                                        <h3 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
-                                            <Zap className="w-5 h-5" />
-                                            Audio Post-Production Pipeline
-                                        </h3>
-
-                                        {/* Stage steps */}
-                                        {(() => {
-                                            const stageOrder = ['cutting', 'cleanvoice', 'auphonic', 'completed'];
-                                            const currentIdx = editStage ? stageOrder.indexOf(editStage) : -1;
-                                            const stages = [
-                                                { key: 'cutting',    label: "Applying Claude's cuts",              sub: 'Removing fillers, trimming pauses' },
-                                                { key: 'cleanvoice', label: 'AI voice cleaning (Cleanvoice)',      sub: 'Mouth noises · stutters · breathing · dead air' },
-                                                { key: 'auphonic',   label: 'Mastering with Auphonic',             sub: 'Loudness normalisation · noise reduction' },
-                                                { key: 'completed',  label: 'Export complete',                     sub: 'MP3 ready for human review' },
-                                            ];
-                                            return (
-                                                <div className="space-y-2 mb-5">
-                                                    {stages.map((s, i) => {
-                                                        const failed  = editError && editError.step === s.key;
-                                                        const done    = !failed && (currentIdx > i || editStage === 'completed');
-                                                        const active  = !failed && editStage === s.key && s.key !== 'completed';
-                                                        return (
-                                                            <div key={s.key} className={`flex items-center gap-3 rounded-lg px-4 py-3 transition-all ${
-                                                                failed  ? 'bg-red-500/20 border border-red-500/60' :
-                                                                active  ? 'bg-purple-500/20 border border-purple-500/50' :
-                                                                done    ? 'bg-green-500/10 border border-green-500/30' :
-                                                                          'bg-white/5 border border-white/10'
-                                                            }`}>
-                                                                <span className="text-lg w-6 text-center">
-                                                                    {failed ? '✗' :
-                                                                     done   ? '✓' :
-                                                                     active ? '⟳' : '○'}
-                                                                </span>
-                                                                <div className="flex-1">
-                                                                    <p className={`font-semibold text-sm ${failed ? 'text-red-300' : done ? 'text-green-300' : active ? 'text-white' : 'text-white/40'}`}>{s.label}</p>
-                                                                    <p className={`text-xs ${failed ? 'text-red-400/80' : done ? 'text-green-400/70' : active ? 'text-purple-300' : 'text-white/25'}`}>{s.sub}</p>
-                                                                </div>
-                                                                {failed && <span className="text-xs text-red-300 font-semibold">Failed</span>}
-                                                                {active && <span className="text-xs text-purple-300 animate-pulse">In progress…</span>}
-                                                                {done   && s.key !== 'completed' && <span className="text-xs text-green-400">Done</span>}
-                                                            </div>
-                                                        );
-                                                    })}
-                                                </div>
-                                            );
-                                        })()}
-
-                                        {/* ── Step failure card ── */}
-                                        {editError && (
-                                            <div className="bg-red-500/10 border border-red-500/50 rounded-xl p-4 mb-4">
-                                                <p className="text-red-300 font-semibold text-sm mb-1">
-                                                    Pipeline stopped — {editError.step} step failed
-                                                </p>
-                                                <p className="text-red-200/70 text-xs mb-3 font-mono break-all">
-                                                    {editError.message}
-                                                </p>
-                                                <p className="text-red-200/60 text-xs mb-3">
-                                                    No audio was delivered to avoid giving the client an incomplete product. Fix the issue above (check your API key and account limits) then retry.
-                                                </p>
-                                                <button
-                                                    onClick={() => { setEditError(null); setEditStage(null); downloadEditedAudio(); }}
-                                                    className="flex items-center gap-2 bg-red-500 hover:bg-red-600 text-white px-4 py-2 rounded-lg text-sm font-semibold transition-all"
-                                                >
-                                                    ↺ Retry pipeline
-                                                </button>
-                                            </div>
-                                        )}
-
-                                        <button
-                                            onClick={downloadEditedAudio}
-                                            disabled={isDownloading || !processingComplete || !!editError}
-                                            className={`w-full py-4 rounded-xl font-semibold transition-all flex items-center justify-center gap-2 ${
-                                                processingComplete && !isDownloading && !editError
-                                                    ? 'bg-gradient-to-r from-green-500 to-emerald-500 text-white hover:from-green-600 hover:to-emerald-600'
-                                                    : 'bg-white/10 text-white/40 cursor-not-allowed'
-                                            }`}
-                                        >
-                                            <Download className="w-5 h-5" />
-                                            {isDownloading ? 'Processing…' : 'Generate & Download Edited Audio'}
-                                        </button>
-                                    </div>
-
-                                    {/* ── Send to Human Editor — shown after download ── */}
-                                    {editStage === 'completed' && (
-                                        <div className="bg-gradient-to-r from-amber-500/20 to-orange-500/20 border-2 border-amber-500/50 rounded-xl p-6">
-                                            <h3 className="text-lg font-semibold text-white mb-1 flex items-center gap-2">
-                                                <User className="w-5 h-5" />
-                                                Send to Human Editor
-                                            </h3>
-                                            <p className="text-amber-200 text-sm mb-4">Episode is edited and mastered. Hand off to your editor for final review before publishing.</p>
-
-                                            {/* Checklist */}
-                                            <div className="space-y-2 mb-5">
-                                                {[
-                                                    'Listen to full edited episode',
-                                                    'Verify no jarring cuts or audio artifacts',
-                                                    'Check natural speech flow maintained',
-                                                    'Confirm all client requirements met',
-                                                    'Validate audio levels are consistent',
-                                                    'Review any flagged sections'
-                                                ].map((item, i) => (
-                                                    <label key={i} className="flex items-center gap-3 text-amber-100 cursor-pointer hover:text-white transition-all">
-                                                        <input type="checkbox" className="w-4 h-4 rounded accent-amber-500" />
-                                                        <span className="text-sm">{item}</span>
-                                                    </label>
-                                                ))}
-                                            </div>
-
-                                            {/* Action buttons */}
-                                            <div className="flex gap-3 flex-wrap">
-                                                {reportText && (
-                                                    <button
-                                                        onClick={() => {
-                                                            const blob = new Blob([reportText], { type: 'text/plain' });
-                                                            const a = document.createElement('a');
-                                                            a.href = URL.createObjectURL(blob);
-                                                            a.download = 'edit_report.txt';
-                                                            a.click();
-                                                        }}
-                                                        className="flex items-center gap-2 bg-white/10 hover:bg-white/20 text-white px-4 py-2 rounded-lg text-sm font-semibold transition-all"
-                                                    >
-                                                        <FileText className="w-4 h-4" />
-                                                        Download Edit Report
-                                                    </button>
-                                                )}
-                                                <button
-                                                    onClick={() => {
-                                                        const subject = encodeURIComponent('Podcast episode ready for your review');
-                                                        const body = encodeURIComponent(
-                                                            `Hi,\n\nYour podcast episode has been AI-edited and is ready for your review.\n\n` +
-                                                            `Edit summary:\n` +
-                                                            `• ${editDecisions.filter(d => d.start_ms != null).length} audio cuts applied\n` +
-                                                            `• Loudness normalised to -16 LUFS\n` +
-                                                            `• Noise reduction applied\n\n` +
-                                                            `Please review the attached edited file and edit report.\n\nThanks`
-                                                        );
-                                                        window.open(`mailto:?subject=${subject}&body=${body}`);
-                                                    }}
-                                                    className="flex items-center gap-2 bg-amber-500 hover:bg-amber-600 text-white px-4 py-2 rounded-lg text-sm font-semibold transition-all"
-                                                >
-                                                    <User className="w-4 h-4" />
-                                                    Email Editor
-                                                </button>
-                                            </div>
-                                        </div>
-                                    )}
-                                </div>
-                            )}
-
-                            {activeTab === 'costs' && (
-                                <div>
-                                    <h2 className="text-2xl font-semibold text-white mb-6">Cost Analysis</h2>
-                                    
-                                    <div className="grid md:grid-cols-3 gap-6 mb-8">
-                                        <div className="bg-gradient-to-br from-purple-500/20 to-pink-500/20 border-2 border-purple-500/50 rounded-xl p-6">
-                                            <div className="text-4xl font-bold text-purple-400 mb-2">${totalAICost.toFixed(2)}</div>
-                                            <p className="text-white font-semibold mb-1">AI Processing Cost</p>
-                                            <p className="text-sm text-purple-200">Per episode</p>
-                                        </div>
-                                        <div className="bg-gradient-to-br from-blue-500/20 to-cyan-500/20 border-2 border-blue-500/50 rounded-xl p-6">
-                                            <div className="text-4xl font-bold text-blue-400 mb-2">${traditionalCost}</div>
-                                            <p className="text-white font-semibold mb-1">Traditional Manual Cost</p>
-                                            <p className="text-sm text-blue-200">3 hours @ $15/hr</p>
-                                        </div>
-                                        <div className="bg-gradient-to-br from-green-500/20 to-emerald-500/20 border-2 border-green-500/50 rounded-xl p-6">
-                                            <div className="text-4xl font-bold text-green-400 mb-2">{savings}%</div>
-                                            <p className="text-white font-semibold mb-1">Cost Savings</p>
-                                            <p className="text-sm text-green-200">Per episode reduction</p>
-                                        </div>
-                                    </div>
-
-                                    <div className="bg-white/5 rounded-xl p-6 border border-white/20 mb-6">
-                                        <h3 className="text-xl font-semibold text-white mb-4">Cost Breakdown by Agent</h3>
-                                        <div className="space-y-3">
-                                            {agents.map((agent) => (
-                                                <div key={agent.id} className="flex items-center justify-between bg-white/5 rounded-lg p-4">
-                                                    <div className="flex items-center gap-3">
-                                                        <div className={`${agent.color} p-2 rounded-lg`}>
-                                                            {React.createElement(agent.icon)}
-                                                        </div>
-                                                        <div>
-                                                            <p className="text-white font-semibold">{agent.name}</p>
-                                                            <p className="text-sm text-purple-300">{agent.integration}</p>
-                                                        </div>
-                                                    </div>
-                                                    <span className="text-xl font-bold text-purple-300">{agent.cost}</span>
-                                                </div>
-                                            ))}
-                                        </div>
-                                    </div>
-
-                                    <div className="bg-white/5 rounded-xl p-6 border border-white/20">
-                                        <h3 className="text-xl font-semibold text-white mb-4">Competitive Pricing Strategy</h3>
-                                        <div className="grid md:grid-cols-2 gap-6">
-                                            <div>
-                                                <h4 className="text-white font-semibold mb-3">Your Old Pricing</h4>
-                                                <div className="space-y-2 text-purple-200">
-                                                    <p>• Manual editing: 3-4 hours/episode</p>
-                                                    <p>• Labor cost: $45-60</p>
-                                                    <p>• Client price: $150-200/episode</p>
-                                                    <p className="text-red-300 font-semibold mt-3">❌ Too expensive for many clients</p>
-                                                </div>
-                                            </div>
-                                            <div>
-                                                <h4 className="text-white font-semibold mb-3">AI-Assisted Pricing</h4>
-                                                <div className="space-y-2 text-purple-200">
-                                                    <p>• AI processing: ${totalAICost.toFixed(2)}</p>
-                                                    <p>• Human review: 30-45 min ($7-11)</p>
-                                                    <p>• Total cost: $8-12/episode</p>
-                                                    <p className="text-green-300 font-semibold mt-3">✓ Client price: $49-79/episode</p>
-                                                </div>
-                                            </div>
-                                        </div>
-                                        <div className="mt-6 bg-green-500/20 border border-green-500/50 rounded-lg p-4">
-                                            <p className="text-green-100 font-semibold">💰 Win more deals at $49-79 while maintaining 85%+ margins</p>
-                                        </div>
-                                    </div>
-                                </div>
-                            )}
-                        </div>
-
-                        <div className="mt-6 grid md:grid-cols-4 gap-4">
-                            <div className="bg-white/5 backdrop-blur-lg rounded-xl p-6 border border-white/10">
-                                <div className="text-3xl font-bold text-purple-400 mb-2">70%</div>
-                                <p className="text-white font-semibold mb-1">Faster Turnaround</p>
-                                <p className="text-sm text-purple-200">AI handles tedious work</p>
+                                <button
+                                    onClick={resetToUpload}
+                                    className="mt-4 text-purple-300 hover:text-white text-sm transition-all"
+                                >
+                                    Edit another episode
+                                </button>
                             </div>
-                            <div className="bg-white/5 backdrop-blur-lg rounded-xl p-6 border border-white/10">
-                                <div className="text-3xl font-bold text-green-400 mb-2">100%</div>
-                                <p className="text-white font-semibold mb-1">Human-Verified</p>
-                                <p className="text-sm text-purple-200">Every episode reviewed</p>
-                            </div>
-                            <div className="bg-white/5 backdrop-blur-lg rounded-xl p-6 border border-white/10">
-                                <div className="text-3xl font-bold text-pink-400 mb-2">{savings}%</div>
-                                <p className="text-white font-semibold mb-1">Cost Reduction</p>
-                                <p className="text-sm text-purple-200">More competitive pricing</p>
-                            </div>
-                            <div className="bg-white/5 backdrop-blur-lg rounded-xl p-6 border border-white/10">
-                                <div className="text-3xl font-bold text-blue-400 mb-2">85%+</div>
-                                <p className="text-white font-semibold mb-1">Profit Margin</p>
-                                <p className="text-sm text-purple-200">Even at lower prices</p>
-                            </div>
-                        </div>
+                        )}
                     </div>
                 </div>
             );

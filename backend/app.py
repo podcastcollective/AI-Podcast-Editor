@@ -250,13 +250,14 @@ CUSTOM INSTRUCTIONS:
 {custom_instructions if custom_instructions else "None"}
 
 INSTRUCTIONS:
-1. For EVERY filler word listed above, include a "Remove Filler" decision using the EXACT start_ms and end_ms provided. CRITICAL: Never adjust these timestamps — they are word-level boundaries from the transcription. Cutting at different timestamps WILL clip adjacent words.
+1. For EVERY filler word listed above, include a "Remove Filler" decision using the EXACT start_ms and end_ms provided. CRITICAL: Never adjust these timestamps — they are word-level boundaries from the transcription engine. Cutting at different timestamps WILL clip adjacent words.
 2. For EVERY pause listed above, include a "Trim Pause" decision: set start_ms = pause_start_ms + 800, end_ms = pause_end_ms (keeps 800ms of natural pause).
-3. Only add "Content Cut" decisions if content is clearly off-topic or the client requested removal. Content cuts MUST start and end at sentence or phrase boundaries — never cut mid-sentence. Use the start_ms of the first word and end_ms of the last word in the removed section. Prefer fewer, cleaner cuts over many small ones.
-4. Be CONSERVATIVE — when in doubt, keep the audio. A slightly longer podcast with natural flow is better than a shorter one with jarring cuts.
-5. Add at least one "Note" decision (no start_ms/end_ms) summarizing the overall edit.
-6. Use ONLY ms values from the data above — never invent values.
-7. You MUST include at least one decision. If there are fillers or pauses listed above, each one MUST appear as a decision.
+3. Look for FALSE STARTS and REPEATED PHRASES in the transcript — where a speaker starts a sentence, stops, and restarts. Remove the false start. Use the start_ms of the first word and end_ms of the last word in the false start. These are very common in conversation and sound much cleaner when removed.
+4. Look for REPEATED CONTENT — if the same point is made twice or the speaker says essentially the same thing in two different ways, remove the weaker version. Cut at sentence boundaries using word-level start_ms/end_ms.
+5. All content cuts MUST start at the beginning of a word (use the word's start_ms) and end at the end of a word (use the word's end_ms). NEVER cut mid-word.
+6. Add at least one "Note" decision (no start_ms/end_ms) summarizing the overall edit.
+7. Use ONLY ms values from the data above — never invent values.
+8. You MUST include at least one decision. If there are fillers or pauses listed above, each one MUST appear as a decision.
 
 Call the submit_edit_decisions tool with your decisions.
 
@@ -356,28 +357,6 @@ def _noise_gate(audio, threshold_db=-40, min_silence_ms=100):
     return result
 
 
-def _extract_room_tone(audio, duration_ms=500):
-    """
-    Find the quietest section of the audio and return it as a room tone sample.
-    Used to fill gaps so they sound natural instead of digitally silent.
-    """
-    from pydub import AudioSegment
-    window_ms = 500
-    best_start = 0
-    min_rms = float('inf')
-    # Scan in 250ms steps for speed
-    for start in range(0, max(1, len(audio) - window_ms), 250):
-        chunk = audio[start:start + window_ms]
-        if chunk.rms < min_rms:
-            min_rms = chunk.rms
-            best_start = start
-    tone = audio[best_start:best_start + window_ms]
-    # Loop to fill any duration we might need
-    result = tone
-    while len(result) < duration_ms:
-        result += tone
-    return result[:duration_ms]
-
 
 def _snap_to_zero_crossing(audio, ms, search_radius_ms=5):
     """
@@ -473,12 +452,10 @@ def apply_audio_edits(audio_path, cuts_ms, words=None):
         cut[0] = _snap_to_zero_crossing(audio, cut[0])
         cut[1] = _snap_to_zero_crossing(audio, cut[1])
 
-    # Extract room tone from the quietest section of the original audio
-    room_tone = _extract_room_tone(audio, duration_ms=500)
-
-    # Build segments to keep, with room-tone gaps between them
-    FADE_MS = 30       # fade at each cut boundary — eliminates pops/clicks
-    GAP_MS = 150       # room tone gap where a cut was — preserves natural speech rhythm
+    # Build segments to keep — no artificial gaps inserted.
+    # Natural silence already exists around filler words in the original audio;
+    # adding extra gaps makes transitions sound unnatural and too slow.
+    FADE_MS = 30  # short fade at cut boundaries to prevent pops
 
     segments = []
     pos = 0
@@ -490,10 +467,6 @@ def apply_audio_edits(audio_path, cuts_ms, words=None):
             if segments and len(seg) > FADE_MS:
                 seg = seg.fade_in(FADE_MS)
             segments.append(seg)
-            # Fill gap with room tone instead of digital silence
-            gap = room_tone[:GAP_MS]
-            gap = gap.fade_in(min(15, len(gap))).fade_out(min(15, len(gap)))
-            segments.append(gap)
         pos = e
     if pos < total_ms:
         seg = audio[pos:]
@@ -501,7 +474,7 @@ def apply_audio_edits(audio_path, cuts_ms, words=None):
             seg = seg.fade_in(FADE_MS)
         segments.append(seg)
 
-    # Join all segments
+    # Join all kept segments directly
     edited = AudioSegment.empty()
     for seg in segments:
         edited += seg

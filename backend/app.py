@@ -322,6 +322,77 @@ Example tool input for reference:
 
 
 
+def _spectral_noise_reduce(audio):
+    """
+    Spectral noise reduction — like Audacity's noise reduction tool.
+    1. Find the quietest 1-second section (noise profile)
+    2. Use noisereduce to subtract that noise profile from the entire audio
+    Returns a cleaned AudioSegment.
+    """
+    import numpy as np
+    import noisereduce as nr
+
+    samples = np.array(audio.get_array_of_samples(), dtype=np.float64)
+    sample_rate = audio.frame_rate
+    channels = audio.channels
+
+    # For stereo, work on channel 0 for noise profiling but reduce all channels
+    if channels > 1:
+        # Reshape to (n_samples, channels)
+        samples = samples.reshape(-1, channels)
+
+    # Find quietest 1-second window for noise profile
+    window_samples = sample_rate  # 1 second
+    mono = samples[:, 0] if channels > 1 else samples
+    best_start = 0
+    min_energy = float('inf')
+    step = sample_rate // 4  # 250ms steps
+    for start in range(0, max(1, len(mono) - window_samples), step):
+        chunk = mono[start:start + window_samples]
+        energy = np.mean(chunk ** 2)
+        if energy < min_energy:
+            min_energy = energy
+            best_start = start
+
+    noise_clip = mono[best_start:best_start + window_samples]
+    print(f"Noise profile: {best_start / sample_rate:.1f}s-{(best_start + window_samples) / sample_rate:.1f}s (RMS={np.sqrt(min_energy):.1f})")
+
+    # Apply spectral noise reduction
+    if channels > 1:
+        reduced = np.zeros_like(samples)
+        for ch in range(channels):
+            reduced[:, ch] = nr.reduce_noise(
+                y=samples[:, ch],
+                sr=sample_rate,
+                y_noise=noise_clip,
+                prop_decrease=0.8,
+                n_fft=2048,
+                stationary=True,
+            )
+        reduced = reduced.flatten()
+    else:
+        reduced = nr.reduce_noise(
+            y=samples,
+            sr=sample_rate,
+            y_noise=noise_clip,
+            prop_decrease=0.8,
+            n_fft=2048,
+            stationary=True,
+        )
+
+    # Convert back to AudioSegment
+    reduced = np.clip(reduced, -32768, 32767).astype(np.int16)
+    from pydub import AudioSegment
+    result = AudioSegment(
+        data=reduced.tobytes(),
+        sample_width=2,
+        frame_rate=sample_rate,
+        channels=channels,
+    )
+    print(f"Spectral noise reduction complete: dBFS {audio.dBFS:.1f} -> {result.dBFS:.1f}")
+    return result
+
+
 def _snap_to_zero_crossing(audio, ms, search_radius_ms=5):
     """
     Snap to the nearest zero-crossing within ±search_radius_ms.
@@ -438,15 +509,17 @@ def apply_audio_edits(audio_path, cuts_ms, words=None):
             seg = seg.fade_in(FADE_MS)
         segments.append(seg)
 
-    # Join all kept segments directly — no noise gate.
-    # Noise reduction is handled by Cleanvoice + Auphonic downstream,
-    # which do proper spectral reduction. A gate just creates pumping artifacts.
+    # Join all kept segments directly
     edited = AudioSegment.empty()
     for seg in segments:
         edited += seg
 
     removed_ms = total_ms - len(edited)
     print(f"Cuts complete: {len(merged)} cuts, removed {removed_ms}ms, {len(edited)}ms remaining")
+
+    # Spectral noise reduction — profiles noise from the quietest section
+    # and subtracts it from the entire audio. Like Audacity's noise reduction.
+    edited = _spectral_noise_reduce(edited)
 
     # Export as WAV — works without ffmpeg; Auphonic will encode to MP3
     wav_path = audio_path.rsplit('.', 1)[0] + '_edited.wav'

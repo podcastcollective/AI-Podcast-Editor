@@ -322,6 +322,92 @@ Example tool input for reference:
 
 
 
+def _voice_eq_and_compress(audio):
+    """
+    Podcast voice EQ + gentle compression to make audio sound rich and full.
+    - High-pass at 80Hz (removes rumble)
+    - +3dB low shelf at 250Hz (warmth/body)
+    - +2dB peak at 3kHz (presence/clarity)
+    - Gentle compression (3:1 ratio) to even out dynamics
+    """
+    import numpy as np
+    from scipy.signal import butter, sosfilt, sosfiltfilt, iirpeak
+
+    samples = np.array(audio.get_array_of_samples(), dtype=np.float64)
+    sample_rate = audio.frame_rate
+    channels = audio.channels
+
+    if channels > 1:
+        samples = samples.reshape(-1, channels)
+
+    def process_channel(data):
+        # High-pass at 80Hz — remove low rumble
+        hp_sos = butter(2, 80, btype='high', fs=sample_rate, output='sos')
+        data = sosfiltfilt(hp_sos, data)
+
+        # Low shelf boost at 250Hz (+3dB warmth)
+        # Approximate with a low-pass filtered version added back
+        lp_sos = butter(2, 250, btype='low', fs=sample_rate, output='sos')
+        low_content = sosfiltfilt(lp_sos, data)
+        warmth_gain = 10 ** (3 / 20) - 1  # +3dB as linear multiplier minus 1
+        data = data + low_content * warmth_gain
+
+        # Presence peak at 3kHz (+2dB clarity)
+        b_peak, a_peak = iirpeak(3000 / (sample_rate / 2), 2.0)
+        from scipy.signal import lfilter
+        presence = lfilter(b_peak, a_peak, data)
+        presence_gain = 10 ** (2 / 20) - 1  # +2dB
+        data = data + (presence - data) * presence_gain
+
+        # Gentle compression — 3:1 ratio, threshold at -20dBFS
+        # Process in blocks for smooth gain changes
+        block_size = int(sample_rate * 0.01)  # 10ms blocks
+        threshold = 10 ** (-20 / 20) * 32768  # -20dBFS
+        ratio = 3.0
+        gain = 1.0
+        attack = 0.01   # 10ms attack
+        release = 0.1   # 100ms release
+        alpha_a = 1 - np.exp(-1 / (sample_rate * attack))
+        alpha_r = 1 - np.exp(-1 / (sample_rate * release))
+
+        for i in range(0, len(data) - block_size, block_size):
+            block = data[i:i + block_size]
+            peak = np.max(np.abs(block))
+            if peak > threshold:
+                target_gain = threshold + (peak - threshold) / ratio
+                target_gain = target_gain / peak
+                alpha = alpha_a
+            else:
+                target_gain = 1.0
+                alpha = alpha_r
+            gain = gain + alpha * (target_gain - gain)
+            data[i:i + block_size] = block * gain
+
+        # Make-up gain to restore volume after compression (+4dB)
+        makeup = 10 ** (4 / 20)
+        data = data * makeup
+
+        return data
+
+    if channels > 1:
+        for ch in range(channels):
+            samples[:, ch] = process_channel(samples[:, ch])
+        samples = samples.flatten()
+    else:
+        samples = process_channel(samples)
+
+    samples = np.clip(samples, -32768, 32767).astype(np.int16)
+    from pydub import AudioSegment
+    result = AudioSegment(
+        data=samples.tobytes(),
+        sample_width=2,
+        frame_rate=sample_rate,
+        channels=channels,
+    )
+    print(f"Voice EQ + compression: dBFS {audio.dBFS:.1f} -> {result.dBFS:.1f}")
+    return result
+
+
 def _spectral_noise_reduce(audio):
     """
     Spectral noise reduction — like Audacity's noise reduction tool.
@@ -365,7 +451,7 @@ def _spectral_noise_reduce(audio):
                 y=samples[:, ch],
                 sr=sample_rate,
                 y_noise=noise_clip,
-                prop_decrease=0.8,
+                prop_decrease=0.5,
                 n_fft=2048,
                 stationary=True,
             )
@@ -375,7 +461,7 @@ def _spectral_noise_reduce(audio):
             y=samples,
             sr=sample_rate,
             y_noise=noise_clip,
-            prop_decrease=0.8,
+            prop_decrease=0.5,
             n_fft=2048,
             stationary=True,
         )
@@ -520,6 +606,9 @@ def apply_audio_edits(audio_path, cuts_ms, words=None):
     # Spectral noise reduction — profiles noise from the quietest section
     # and subtracts it from the entire audio. Like Audacity's noise reduction.
     edited = _spectral_noise_reduce(edited)
+
+    # Voice EQ + compression — adds warmth, clarity, and evens out dynamics
+    edited = _voice_eq_and_compress(edited)
 
     # Export as WAV — works without ffmpeg; Auphonic will encode to MP3
     wav_path = audio_path.rsplit('.', 1)[0] + '_edited.wav'

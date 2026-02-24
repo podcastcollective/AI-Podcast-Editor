@@ -319,42 +319,6 @@ Example tool input for reference:
     }
 
 
-def _noise_gate(audio, threshold_db=-40, min_silence_ms=100):
-    """
-    Simple noise gate: silence any segment below threshold_db that lasts at
-    least min_silence_ms. Reduces background hum/noise between speech.
-    Uses short fades at boundaries to prevent pops from hard silence transitions.
-    """
-    from pydub import AudioSegment
-    from pydub.silence import detect_nonsilent
-
-    GATE_FADE_MS = 20  # fade at speech↔silence boundaries to prevent pops
-
-    nonsilent = detect_nonsilent(audio, min_silence_len=min_silence_ms, silence_thresh=threshold_db)
-    if not nonsilent:
-        return audio
-
-    # Build output: keep non-silent ranges, replace gaps with true silence
-    result = AudioSegment.empty()
-    pos = 0
-    for start, end in nonsilent:
-        if start > pos:
-            gap_duration = start - pos
-            result += AudioSegment.silent(duration=gap_duration, frame_rate=audio.frame_rate)
-        speech = audio[start:end]
-        # Fade in/out at gate boundaries to avoid pops
-        if len(speech) > GATE_FADE_MS * 2:
-            if start > 0:
-                speech = speech.fade_in(GATE_FADE_MS)
-            if end < len(audio):
-                speech = speech.fade_out(GATE_FADE_MS)
-        result += speech
-        pos = end
-    if pos < len(audio):
-        result += AudioSegment.silent(duration=len(audio) - pos, frame_rate=audio.frame_rate)
-
-    print(f"Noise gate: {len(nonsilent)} speech segments, silenced {len(audio) - sum(e-s for s,e in nonsilent)}ms of background noise")
-    return result
 
 
 
@@ -474,13 +438,12 @@ def apply_audio_edits(audio_path, cuts_ms, words=None):
             seg = seg.fade_in(FADE_MS)
         segments.append(seg)
 
-    # Join all kept segments directly
+    # Join all kept segments directly — no noise gate.
+    # Noise reduction is handled by Cleanvoice + Auphonic downstream,
+    # which do proper spectral reduction. A gate just creates pumping artifacts.
     edited = AudioSegment.empty()
     for seg in segments:
         edited += seg
-
-    # Apply noise gate to reduce background hum between speech
-    edited = _noise_gate(edited, threshold_db=-40, min_silence_ms=150)
 
     removed_ms = total_ms - len(edited)
     print(f"Cuts complete: {len(merged)} cuts, removed {removed_ms}ms, {len(edited)}ms remaining")

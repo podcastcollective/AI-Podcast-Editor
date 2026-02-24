@@ -328,8 +328,9 @@ def _broadcast_voice_chain(audio):
     like a studio podcast. Targets the specific problems with remote
     recordings: boxy room resonance, thin low-end, harsh mids, weak dynamics.
 
-    Chain: high-pass → de-box → warmth → de-harsh → presence air →
-           de-ess → broadcast compression → limiter
+    Chain: high-pass → de-box → warmth → saturation → de-harsh → presence →
+           air → low-pass → de-ess → sub-bass enhancement → multiband compression →
+           parallel compression → saturation → studio reverb → limiter
     """
     import numpy as np
     from scipy.signal import butter, sosfiltfilt, iirpeak, iirnotch, lfilter
@@ -406,35 +407,106 @@ def _broadcast_voice_chain(audio):
                 reduction = sib_threshold / sib_peak
                 data[i:i + block_size] -= sibilance[i:i + block_size] * (1 - reduction)
 
-        # 10. Broadcast compression — 6:1 ratio, -15dBFS threshold
-        #     Aggressive enough to sound "produced" and even
-        block_size = int(sample_rate * 0.005)
-        threshold = 10 ** (-15 / 20) * 32768
-        ratio = 6.0
-        gain = 1.0
-        alpha_a = 1 - np.exp(-1 / (sample_rate * 0.003))   # 3ms attack
-        alpha_r = 1 - np.exp(-1 / (sample_rate * 0.06))    # 60ms release
+        # 10. Sub-bass harmonic enhancement — adds chest resonance
+        #     Generate a subtle harmonic below the voice fundamental (~80-150Hz)
+        #     by half-wave rectifying the low band and filtering it
+        sub_lp = butter(2, 200, btype='low', fs=sample_rate, output='sos')
+        sub_hp = butter(2, 60, btype='high', fs=sample_rate, output='sos')
+        low_content = sosfiltfilt(sub_lp, data)
+        # Half-wave rectify to generate sub-harmonics
+        sub_harmonic = np.maximum(low_content, 0)
+        # Filter to keep only the sub-bass range
+        sub_harmonic = sosfiltfilt(sub_lp, sub_harmonic)
+        sub_harmonic = sosfiltfilt(sub_hp, sub_harmonic)
+        # Blend at low level for subtle chest thump
+        data = data + sub_harmonic * 0.15
 
-        for i in range(0, len(data) - block_size, block_size):
-            block = data[i:i + block_size]
-            peak = np.max(np.abs(block))
-            if peak > threshold and peak > 0:
-                target_gain = (threshold + (peak - threshold) / ratio) / peak
-                gain = gain + alpha_a * (target_gain - gain)
-            else:
-                gain = gain + alpha_r * (1.0 - gain)
-            data[i:i + block_size] = block * gain
+        # 11. Multiband compression — compress lows/mids/highs independently
+        #     so bass stays full when mids get loud
+        def _compress_band(band_data, thresh_db, ratio, attack_s, release_s):
+            block_sz = int(sample_rate * 0.005)
+            thresh = 10 ** (thresh_db / 20) * 32768
+            g = 1.0
+            a_a = 1 - np.exp(-1 / (sample_rate * attack_s))
+            a_r = 1 - np.exp(-1 / (sample_rate * release_s))
+            out = np.copy(band_data)
+            for i in range(0, len(out) - block_sz, block_sz):
+                blk = out[i:i + block_sz]
+                pk = np.max(np.abs(blk))
+                if pk > thresh and pk > 0:
+                    tg = (thresh + (pk - thresh) / ratio) / pk
+                    g = g + a_a * (tg - g)
+                else:
+                    g = g + a_r * (1.0 - g)
+                out[i:i + block_sz] = blk * g
+            return out
 
-        # 11. Make-up gain (+8dB)
+        # Split into 3 bands
+        lo_sos = butter(3, 250, btype='low', fs=sample_rate, output='sos')
+        hi_sos = butter(3, 4000, btype='high', fs=sample_rate, output='sos')
+        lo_band = sosfiltfilt(lo_sos, data)
+        hi_band = sosfiltfilt(hi_sos, data)
+        mid_band = data - lo_band - hi_band
+
+        # Compress each band with settings tuned for voice
+        lo_band = _compress_band(lo_band, -18, 4.0, 0.010, 0.100)   # gentle on bass
+        mid_band = _compress_band(mid_band, -15, 6.0, 0.003, 0.060) # aggressive on mids
+        hi_band = _compress_band(hi_band, -20, 3.0, 0.002, 0.040)   # fast on highs
+
+        # Recombine with slight bass boost to keep fullness
+        data = lo_band * 1.2 + mid_band + hi_band * 0.9
+
+        # 12. Make-up gain (+8dB)
         data = data * 10 ** (8 / 20)
 
-        # 12. Second pass of saturation — very subtle, just warms the compressed signal
+        # 13. Parallel compression (New York style) — blend crushed with clean
+        #     Creates thick "glued" podcast sound without killing dynamics
+        clean = np.copy(data)
+        crushed = _compress_band(data, -25, 10.0, 0.001, 0.030)  # extreme compression
+        # Blend: 65% clean + 35% crushed
+        data = clean * 0.65 + crushed * 0.35
+
+        # 14. Second pass of saturation — warms the compressed signal
         normalized = data / (np.max(np.abs(data)) + 1e-10)
         saturated = np.tanh(normalized * 1.5) / np.tanh(1.5)
         saturated = saturated * np.max(np.abs(data))
         data = data * 0.85 + saturated * 0.15
 
-        # 13. Brick-wall limiter at -1dBFS
+        # 15. Subtle studio reverb — short room impulse (0.3s)
+        #     Replaces bad Zoom room sound with the impression of a treated studio
+        #     Uses FFT-based convolution with a synthetic impulse response (fast)
+        from scipy.signal import fftconvolve
+        reverb_time = 0.3  # seconds
+        wet_mix = 0.12     # 12% wet
+        dry = np.copy(data)
+
+        # Generate synthetic studio room impulse response
+        ir_len = int(sample_rate * reverb_time)
+        t = np.arange(ir_len) / sample_rate
+        # Exponential decay envelope
+        decay = np.exp(-6.0 * t / reverb_time)
+        # Diffuse reflections from random noise shaped by decay
+        np.random.seed(42)  # deterministic for consistency
+        ir = np.random.randn(ir_len) * decay
+        # Early reflections at specific delays (simulates small treated room)
+        for delay_ms, gain in [(8, 0.4), (13, 0.3), (19, 0.2), (27, 0.15)]:
+            idx = int(sample_rate * delay_ms / 1000)
+            if idx < ir_len:
+                ir[idx] += gain
+        # Band-pass the IR: 300Hz-6kHz to keep reverb warm, not muddy or hissy
+        ir_hp = butter(2, 300, btype='high', fs=sample_rate, output='sos')
+        ir_lp = butter(2, 6000, btype='low', fs=sample_rate, output='sos')
+        ir = sosfiltfilt(ir_hp, ir)
+        ir = sosfiltfilt(ir_lp, ir)
+        # Normalize IR
+        ir = ir / (np.max(np.abs(ir)) + 1e-10)
+
+        # FFT convolution — O(n log n), handles long audio fast
+        reverb_out = fftconvolve(data, ir, mode='full')[:len(data)]
+
+        data = dry * (1 - wet_mix) + reverb_out * wet_mix
+
+        # 16. Brick-wall limiter at -1dBFS
         ceiling = 10 ** (-1 / 20) * 32768
         data = np.clip(data, -ceiling, ceiling)
 

@@ -352,7 +352,7 @@ def _broadcast_voice_chain(audio):
     import numpy as np
     from scipy.signal import butter, sosfiltfilt, iirpeak, iirnotch, lfilter
 
-    samples = np.array(audio.get_array_of_samples(), dtype=np.float32)
+    samples = np.array(audio.get_array_of_samples(), dtype=np.float64)
     sample_rate = audio.frame_rate
     channels = audio.channels
 
@@ -550,7 +550,7 @@ def _spectral_noise_reduce(audio):
     import numpy as np
     import noisereduce as nr
 
-    samples = np.array(audio.get_array_of_samples(), dtype=np.float32)
+    samples = np.array(audio.get_array_of_samples(), dtype=np.float64)
     sample_rate = audio.frame_rate
     channels = audio.channels
 

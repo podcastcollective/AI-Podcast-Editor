@@ -355,44 +355,74 @@ def _noise_gate(audio, threshold_db=-40, min_silence_ms=100):
     return result
 
 
-def _snap_to_zero_crossing(audio, ms, search_radius_ms=5):
+def _extract_room_tone(audio, duration_ms=500):
     """
-    Search ±search_radius_ms around the given position for the nearest
-    zero-crossing in the waveform. Returns the snapped ms position.
-    Cutting at a zero-crossing eliminates pops from discontinuities.
+    Find the quietest section of the audio and return it as a room tone sample.
+    Used to fill gaps so they sound natural instead of digitally silent.
     """
+    from pydub import AudioSegment
+    window_ms = 500
+    best_start = 0
+    min_rms = float('inf')
+    # Scan in 250ms steps for speed
+    for start in range(0, max(1, len(audio) - window_ms), 250):
+        chunk = audio[start:start + window_ms]
+        if chunk.rms < min_rms:
+            min_rms = chunk.rms
+            best_start = start
+    tone = audio[best_start:best_start + window_ms]
+    # Loop to fill any duration we might need
+    result = tone
+    while len(result) < duration_ms:
+        result += tone
+    return result[:duration_ms]
+
+
+def _snap_to_silence(audio, ms, search_radius_ms=100, window_ms=10):
+    """
+    Find the point of minimum speech energy within ±search_radius_ms of the
+    given position. This finds where speech naturally fades — much better than
+    cutting at an arbitrary ASR timestamp.
+    After finding the low-energy region, further snaps to the nearest
+    zero-crossing within ±5ms for a click-free cut.
+    """
+    best_ms = ms
+    min_rms = float('inf')
+    lo = max(0, ms - search_radius_ms)
+    hi = min(len(audio) - window_ms, ms + search_radius_ms)
+    for pos in range(lo, hi, window_ms):
+        chunk = audio[pos:pos + window_ms]
+        rms = chunk.rms
+        dist = abs(pos - ms)
+        # Prefer low energy; break ties by proximity to original position
+        if rms < min_rms or (rms == min_rms and dist < abs(best_ms - ms)):
+            min_rms = rms
+            best_ms = pos
+
+    # Fine-tune: snap to nearest zero-crossing within ±5ms of the energy minimum
     samples = audio.get_array_of_samples()
     sample_rate = audio.frame_rate
     channels = audio.channels
-
-    # Convert ms to sample index (account for interleaved channels)
-    center_sample = int(ms * sample_rate / 1000) * channels
-    radius_samples = int(search_radius_ms * sample_rate / 1000) * channels
-    lo = max(0, center_sample - radius_samples)
-    hi = min(len(samples) - channels, center_sample + radius_samples)
-
+    center_sample = int(best_ms * sample_rate / 1000) * channels
+    radius_samples = int(5 * sample_rate / 1000) * channels
+    s_lo = max(0, center_sample - radius_samples)
+    s_hi = min(len(samples) - channels, center_sample + radius_samples)
     best_idx = center_sample
-    best_dist = abs(center_sample - center_sample)  # 0
     best_val = abs(samples[min(center_sample, len(samples) - 1)])
-
-    # Walk through samples (step by channels to stay on frame boundaries)
-    for i in range(lo, hi, channels):
+    for i in range(s_lo, s_hi, channels):
         val = abs(samples[i])
-        dist = abs(i - center_sample)
-        # Prefer zero (or near-zero) crossings, breaking ties by proximity
-        if val < best_val or (val == best_val and dist < best_dist):
+        if val < best_val:
             best_val = val
-            best_dist = dist
             best_idx = i
-
-    # Convert back to ms
     return int(best_idx / channels * 1000 / sample_rate)
 
 
-def apply_audio_edits(audio_path, cuts_ms):
+def apply_audio_edits(audio_path, cuts_ms, words=None):
     """
     Remove segments from audio using pydub, apply noise gate, export as WAV.
     cuts_ms: list of (start_ms, end_ms) tuples to remove.
+    words: optional list of word dicts with 'start' and 'end' ms from transcript.
+           Used to snap cut boundaries to word edges so we never clip mid-word.
     Returns path to the edited WAV file.
     """
     from pydub import AudioSegment
@@ -400,44 +430,78 @@ def apply_audio_edits(audio_path, cuts_ms):
     audio = AudioSegment.from_file(audio_path)
     total_ms = len(audio)
 
-    CUT_PAD_MS = 20  # small pad to catch mouth noise at filler edges without eating words
+    # Build sorted word boundary list for snapping
+    word_starts = sorted(set(w.get('start', 0) for w in (words or [])))
+    word_ends = sorted(set(w.get('end', 0) for w in (words or [])))
 
-    # Clamp, pad, sort, and merge overlapping cuts
-    cuts = sorted(
-        [(max(0, int(s) - CUT_PAD_MS), min(total_ms, int(e) + CUT_PAD_MS)) for s, e in cuts_ms if e > s],
-        key=lambda x: x[0]
-    )
+    def _snap_cut_start_to_word_edge(ms):
+        """Snap a cut start backward to the nearest word-end so we keep the
+        full previous word. Only snaps if a word end is within 150ms."""
+        import bisect
+        if not word_ends:
+            return ms
+        idx = bisect.bisect_right(word_ends, ms)
+        if idx > 0 and abs(word_ends[idx - 1] - ms) <= 150:
+            return word_ends[idx - 1]
+        return ms
+
+    def _snap_cut_end_to_word_edge(ms):
+        """Snap a cut end forward to the nearest word-start so we keep the
+        full next word. Only snaps if a word start is within 150ms."""
+        import bisect
+        if not word_starts:
+            return ms
+        idx = bisect.bisect_left(word_starts, ms)
+        if idx < len(word_starts) and abs(word_starts[idx] - ms) <= 150:
+            return word_starts[idx]
+        return ms
+
+    # Step 1: Snap to word boundaries first (coarse — prevents clipping words)
+    adjusted = []
+    for s, e in cuts_ms:
+        s, e = int(s), int(e)
+        if e <= s:
+            continue
+        if words:
+            s = _snap_cut_start_to_word_edge(s)
+            e = _snap_cut_end_to_word_edge(e)
+        adjusted.append((max(0, s), min(total_ms, e)))
+
+    # Step 2: Sort, merge overlapping cuts
+    adjusted.sort(key=lambda x: x[0])
     merged = []
-    for s, e in cuts:
+    for s, e in adjusted:
         if merged and s <= merged[-1][1]:
             merged[-1][1] = max(merged[-1][1], e)
         else:
             merged.append([s, e])
 
-    # Snap cut boundaries to nearest zero-crossing to eliminate waveform pops
+    # Step 3: Snap boundaries to silence + zero-crossing (fine — finds natural gaps)
     for cut in merged:
-        cut[0] = _snap_to_zero_crossing(audio, cut[0])
-        cut[1] = _snap_to_zero_crossing(audio, cut[1])
+        cut[0] = _snap_to_silence(audio, cut[0])
+        cut[1] = _snap_to_silence(audio, cut[1])
 
-    # Build segments to keep (inverse of cuts), with silence gaps between them
-    # so speech doesn't rush together after filler removal.
+    # Extract room tone from the quietest section of the original audio
+    room_tone = _extract_room_tone(audio, duration_ms=500)
+
+    # Build segments to keep, with room-tone gaps between them
     FADE_MS = 30       # fade at each cut boundary — eliminates pops/clicks
-    GAP_MS = 150       # silence inserted where a cut was — preserves natural speech rhythm
+    GAP_MS = 150       # room tone gap where a cut was — preserves natural speech rhythm
 
     segments = []
     pos = 0
     for s, e in merged:
         if s > pos:
             seg = audio[pos:s]
-            # Fade-out at end of segment (leading into a cut)
             if len(seg) > FADE_MS:
                 seg = seg.fade_out(FADE_MS)
-            # Fade-in at start of segment (coming out of a previous cut)
             if segments and len(seg) > FADE_MS:
                 seg = seg.fade_in(FADE_MS)
             segments.append(seg)
-            # Insert a short silence gap to replace the removed audio
-            segments.append(AudioSegment.silent(duration=GAP_MS, frame_rate=audio.frame_rate))
+            # Fill gap with room tone instead of digital silence
+            gap = room_tone[:GAP_MS]
+            gap = gap.fade_in(min(15, len(gap))).fade_out(min(15, len(gap)))
+            segments.append(gap)
         pos = e
     if pos < total_ms:
         seg = audio[pos:]
@@ -445,7 +509,7 @@ def apply_audio_edits(audio_path, cuts_ms):
             seg = seg.fade_in(FADE_MS)
         segments.append(seg)
 
-    # Join all segments (kept audio + silence gaps)
+    # Join all segments
     edited = AudioSegment.empty()
     for seg in segments:
         edited += seg
@@ -654,7 +718,7 @@ def process_with_cleanvoice(audio_path):
     raise Exception("Cleanvoice timed out after 10 minutes")
 
 
-def _run_edit_job(job_id, audio_path, cuts_ms, use_auphonic):
+def _run_edit_job(job_id, audio_path, cuts_ms, use_auphonic, transcript_id=None):
     """
     Background thread: cutting → cleanvoice → auphonic → completed.
     Every stage is mandatory if its API key is configured — any failure stops
@@ -662,11 +726,21 @@ def _run_edit_job(job_id, audio_path, cuts_ms, use_auphonic):
     """
     active_stage = 'init'
     try:
+        # Fetch word-level timestamps from AssemblyAI for smart cut snapping
+        words = None
+        if transcript_id:
+            try:
+                transcript_data = get_transcription(transcript_id)
+                words = transcript_data.get('words', [])
+                print(f"Fetched {len(words)} word timestamps for cut snapping")
+            except Exception as e:
+                print(f"Warning: could not fetch word timestamps: {e}")
+
         # Stage 1: apply timestamp cuts with pydub
         active_stage = 'cutting'
         with _edit_jobs_lock:
             _edit_jobs[job_id]['status'] = 'cutting'
-        wav_path = apply_audio_edits(audio_path, cuts_ms)
+        wav_path = apply_audio_edits(audio_path, cuts_ms, words=words)
 
         # Stage 2: Cleanvoice — AI audio-level cleaning (hard failure — stops pipeline)
         if CLEANVOICE_API_KEY:
@@ -1014,7 +1088,7 @@ def edit_audio():
 
         thread = threading.Thread(
             target=_run_edit_job,
-            args=(job_id, audio_path, cuts_ms, bool(AUPHONIC_API_KEY)),
+            args=(job_id, audio_path, cuts_ms, bool(AUPHONIC_API_KEY), transcript_id),
             daemon=True,
         )
         thread.start()

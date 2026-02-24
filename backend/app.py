@@ -322,16 +322,17 @@ Example tool input for reference:
 
 
 
-def _voice_eq_and_compress(audio):
+def _broadcast_voice_chain(audio):
     """
-    Podcast voice EQ + gentle compression to make audio sound rich and full.
-    - High-pass at 80Hz (removes rumble)
-    - +3dB low shelf at 250Hz (warmth/body)
-    - +2dB peak at 3kHz (presence/clarity)
-    - Gentle compression (3:1 ratio) to even out dynamics
+    Aggressive broadcast voice processing to make a Zoom recording sound
+    like a studio podcast. Targets the specific problems with remote
+    recordings: boxy room resonance, thin low-end, harsh mids, weak dynamics.
+
+    Chain: high-pass → de-box → warmth → de-harsh → presence air →
+           de-ess → broadcast compression → limiter
     """
     import numpy as np
-    from scipy.signal import butter, sosfilt, sosfiltfilt, iirpeak
+    from scipy.signal import butter, sosfiltfilt, iirpeak, iirnotch, lfilter
 
     samples = np.array(audio.get_array_of_samples(), dtype=np.float64)
     sample_rate = audio.frame_rate
@@ -341,51 +342,76 @@ def _voice_eq_and_compress(audio):
         samples = samples.reshape(-1, channels)
 
     def process_channel(data):
-        # High-pass at 80Hz — remove low rumble
-        hp_sos = butter(2, 80, btype='high', fs=sample_rate, output='sos')
-        data = sosfiltfilt(hp_sos, data)
+        nyq = sample_rate / 2
 
-        # Low shelf boost at 250Hz (+3dB warmth)
-        # Approximate with a low-pass filtered version added back
-        lp_sos = butter(2, 250, btype='low', fs=sample_rate, output='sos')
-        low_content = sosfiltfilt(lp_sos, data)
-        warmth_gain = 10 ** (3 / 20) - 1  # +3dB as linear multiplier minus 1
-        data = data + low_content * warmth_gain
+        # 1. High-pass at 80Hz — remove rumble and DC offset
+        hp = butter(3, 80, btype='high', fs=sample_rate, output='sos')
+        data = sosfiltfilt(hp, data)
 
-        # Presence peak at 3kHz (+2dB clarity)
-        b_peak, a_peak = iirpeak(3000 / (sample_rate / 2), 2.0)
-        from scipy.signal import lfilter
-        presence = lfilter(b_peak, a_peak, data)
-        presence_gain = 10 ** (2 / 20) - 1  # +2dB
-        data = data + (presence - data) * presence_gain
+        # 2. De-box: CUT 400-800Hz by -5dB — this is the "Zoom room" frequency
+        #    Use a notch-style cut centered at 550Hz
+        b_box, a_box = iirnotch(550 / nyq, 1.5)
+        boxed = lfilter(b_box, a_box, data)
+        cut_amount = 1.0 - 10 ** (-5 / 20)  # how much to blend toward notched
+        data = data * (1 - cut_amount) + boxed * cut_amount
 
-        # Gentle compression — 3:1 ratio, threshold at -20dBFS
-        # Process in blocks for smooth gain changes
-        block_size = int(sample_rate * 0.01)  # 10ms blocks
-        threshold = 10 ** (-20 / 20) * 32768  # -20dBFS
-        ratio = 3.0
+        # 3. Warmth: boost everything below 200Hz by +6dB
+        lp = butter(2, 200, btype='low', fs=sample_rate, output='sos')
+        low = sosfiltfilt(lp, data)
+        data = data + low * (10 ** (6 / 20) - 1)
+
+        # 4. De-harsh: cut 2.5-4kHz by -3dB — reduces tinny/piercing quality
+        b_harsh, a_harsh = iirnotch(3000 / nyq, 2.0)
+        deharsh = lfilter(b_harsh, a_harsh, data)
+        cut_harsh = 1.0 - 10 ** (-3 / 20)
+        data = data * (1 - cut_harsh) + deharsh * cut_harsh
+
+        # 5. Air: boost 6-10kHz by +3dB — adds openness and breath
+        hp_air = butter(2, 6000, btype='high', fs=sample_rate, output='sos')
+        air = sosfiltfilt(hp_air, data)
+        data = data + air * (10 ** (3 / 20) - 1)
+
+        # 6. Low-pass at 14kHz — remove hiss and harsh sibilance
+        lp_cut = butter(3, 14000, btype='low', fs=sample_rate, output='sos')
+        data = sosfiltfilt(lp_cut, data)
+
+        # 7. De-ess: compress sibilance at 6-8kHz dynamically
+        bp_sos = butter(2, [5500, 8500], btype='band', fs=sample_rate, output='sos')
+        sibilance = sosfiltfilt(bp_sos, data)
+        block_size = int(sample_rate * 0.005)  # 5ms blocks
+        sib_threshold = np.percentile(np.abs(sibilance), 90)
+        for i in range(0, len(data) - block_size, block_size):
+            sib_peak = np.max(np.abs(sibilance[i:i + block_size]))
+            if sib_peak > sib_threshold:
+                reduction = sib_threshold / sib_peak
+                # Only reduce the sibilant frequencies, not the whole signal
+                data[i:i + block_size] -= sibilance[i:i + block_size] * (1 - reduction)
+
+        # 8. Broadcast compression — 5:1 ratio, -18dBFS threshold
+        #    This is what makes podcast audio sound "produced"
+        block_size = int(sample_rate * 0.005)  # 5ms blocks
+        threshold = 10 ** (-18 / 20) * 32768
+        ratio = 5.0
         gain = 1.0
-        attack = 0.01   # 10ms attack
-        release = 0.1   # 100ms release
-        alpha_a = 1 - np.exp(-1 / (sample_rate * attack))
-        alpha_r = 1 - np.exp(-1 / (sample_rate * release))
+        alpha_a = 1 - np.exp(-1 / (sample_rate * 0.005))   # 5ms attack
+        alpha_r = 1 - np.exp(-1 / (sample_rate * 0.08))    # 80ms release
 
         for i in range(0, len(data) - block_size, block_size):
             block = data[i:i + block_size]
             peak = np.max(np.abs(block))
-            if peak > threshold:
-                target_gain = threshold + (peak - threshold) / ratio
-                target_gain = target_gain / peak
-                alpha = alpha_a
+            if peak > threshold and peak > 0:
+                target_gain = (threshold + (peak - threshold) / ratio) / peak
+                gain = gain + alpha_a * (target_gain - gain)
             else:
-                target_gain = 1.0
-                alpha = alpha_r
-            gain = gain + alpha * (target_gain - gain)
+                gain = gain + alpha_r * (1.0 - gain)
             data[i:i + block_size] = block * gain
 
-        # Make-up gain to restore volume after compression (+4dB)
-        makeup = 10 ** (4 / 20)
-        data = data * makeup
+        # 9. Make-up gain (+6dB) to restore perceived loudness after compression
+        data = data * 10 ** (6 / 20)
+
+        # 10. Brick-wall limiter at -1dBFS — prevents clipping
+        ceiling = 10 ** (-1 / 20) * 32768
+        data = np.clip(data, -ceiling, ceiling)
 
         return data
 
@@ -404,7 +430,7 @@ def _voice_eq_and_compress(audio):
         frame_rate=sample_rate,
         channels=channels,
     )
-    print(f"Voice EQ + compression: dBFS {audio.dBFS:.1f} -> {result.dBFS:.1f}")
+    print(f"Broadcast voice chain: dBFS {audio.dBFS:.1f} -> {result.dBFS:.1f}")
     return result
 
 
@@ -607,8 +633,8 @@ def apply_audio_edits(audio_path, cuts_ms, words=None):
     # and subtracts it from the entire audio. Like Audacity's noise reduction.
     edited = _spectral_noise_reduce(edited)
 
-    # Voice EQ + compression — adds warmth, clarity, and evens out dynamics
-    edited = _voice_eq_and_compress(edited)
+    # Broadcast voice chain — de-box, warmth, de-harsh, compress, limit
+    edited = _broadcast_voice_chain(edited)
 
     # Export as WAV — works without ffmpeg; Auphonic will encode to MP3
     wav_path = audio_path.rsplit('.', 1)[0] + '_edited.wav'

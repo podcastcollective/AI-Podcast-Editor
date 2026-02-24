@@ -719,6 +719,102 @@ def process_with_elevenlabs(wav_path):
     return output_path
 
 
+def _voice_warmth(audio):
+    """
+    Add warmth and body to an already-clean voice signal.
+    Designed to run AFTER ML noise removal (ElevenLabs) which leaves the
+    voice clean but thin/dry. Adds back the tonal richness of a studio mic.
+
+    Chain: high-pass → warmth → saturation → de-harsh → presence →
+           compression → limiter
+    """
+    import numpy as np
+    from scipy.signal import butter, sosfiltfilt, iirnotch, iirpeak, lfilter
+
+    samples = np.array(audio.get_array_of_samples(), dtype=np.float64)
+    sample_rate = audio.frame_rate
+    channels = audio.channels
+
+    if channels > 1:
+        samples = samples.reshape(-1, channels)
+
+    def process_channel(data):
+        nyq = sample_rate / 2
+
+        # 1. High-pass at 80Hz — remove rumble
+        hp = butter(3, 80, btype='high', fs=sample_rate, output='sos')
+        data = sosfiltfilt(hp, data)
+
+        # 2. Warmth: boost below 200Hz (+6dB) — adds chest and body
+        lp = butter(2, 200, btype='low', fs=sample_rate, output='sos')
+        low = sosfiltfilt(lp, data)
+        data = data + low * (10 ** (6 / 20) - 1)
+
+        # 3. Harmonic saturation — adds analog warmth (tanh, 25% wet)
+        drive = 2.0
+        normalized = data / (np.max(np.abs(data)) + 1e-10)
+        saturated = np.tanh(normalized * drive) / np.tanh(drive)
+        saturated = saturated * np.max(np.abs(data))
+        data = data * 0.75 + saturated * 0.25
+
+        # 4. De-harsh: gentle cut at 2.8kHz (-3dB)
+        b_harsh, a_harsh = iirnotch(2800 / nyq, 2.0)
+        deharsh = lfilter(b_harsh, a_harsh, data)
+        cut_harsh = 1.0 - 10 ** (-3 / 20)
+        data = data * (1 - cut_harsh) + deharsh * cut_harsh
+
+        # 5. Presence: +2dB at 4.8kHz — clarity
+        b_pres, a_pres = iirpeak(4800 / nyq, 3.0)
+        pres = lfilter(b_pres, a_pres, data)
+        pres_gain = 10 ** (2 / 20) - 1
+        data = data + (pres - data) * pres_gain
+
+        # 6. Light compression — 4:1 at -18dBFS, just enough to sound "produced"
+        block_size = int(sample_rate * 0.005)
+        threshold = 10 ** (-18 / 20) * 32768
+        ratio = 4.0
+        gain = 1.0
+        alpha_a = 1 - np.exp(-1 / (sample_rate * 0.005))
+        alpha_r = 1 - np.exp(-1 / (sample_rate * 0.08))
+
+        for i in range(0, len(data) - block_size, block_size):
+            block = data[i:i + block_size]
+            peak = np.max(np.abs(block))
+            if peak > threshold and peak > 0:
+                target_gain = (threshold + (peak - threshold) / ratio) / peak
+                gain = gain + alpha_a * (target_gain - gain)
+            else:
+                gain = gain + alpha_r * (1.0 - gain)
+            data[i:i + block_size] = block * gain
+
+        # 7. Make-up gain (+5dB)
+        data = data * 10 ** (5 / 20)
+
+        # 8. Brick-wall limiter at -1dBFS
+        ceiling = 10 ** (-1 / 20) * 32768
+        data = np.clip(data, -ceiling, ceiling)
+
+        return data
+
+    if channels > 1:
+        for ch in range(channels):
+            samples[:, ch] = process_channel(samples[:, ch])
+        samples = samples.flatten()
+    else:
+        samples = process_channel(samples)
+
+    samples = np.clip(samples, -32768, 32767).astype(np.int16)
+    from pydub import AudioSegment
+    result = AudioSegment(
+        data=samples.tobytes(),
+        sample_width=2,
+        frame_rate=sample_rate,
+        channels=channels,
+    )
+    print(f"Voice warmth chain: dBFS {audio.dBFS:.1f} -> {result.dBFS:.1f}")
+    return result
+
+
 def process_with_auphonic(wav_path):
     """
     Send a WAV file to Auphonic for professional audio post-production:
@@ -940,6 +1036,15 @@ def _run_edit_job(job_id, audio_path, cuts_ms, use_auphonic, transcript_id=None)
             with _edit_jobs_lock:
                 _edit_jobs[job_id]['status'] = 'elevenlabs'
             wav_path = process_with_elevenlabs(wav_path)
+
+            # Stage 2b: Add warmth/body back — ElevenLabs leaves voice clean but dry
+            from pydub import AudioSegment as _AS
+            clean_audio = _AS.from_file(wav_path)
+            warm_audio = _voice_warmth(clean_audio)
+            warm_path = wav_path.rsplit('.', 1)[0] + '_warm.wav'
+            warm_audio.export(warm_path, format='wav')
+            wav_path = warm_path
+            print(f"Voice warmth applied: {warm_path}")
 
         # Stage 3: Cleanvoice — AI voice cleaning (filler sounds, mouth clicks)
         if CLEANVOICE_API_KEY:

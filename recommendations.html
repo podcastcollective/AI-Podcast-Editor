@@ -1,0 +1,421 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Recommended Podcast Tools & Gear</title>
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        @keyframes fadeInUp {
+            from { opacity: 0; transform: translateY(24px); }
+            to   { opacity: 1; transform: translateY(0); }
+        }
+        .fade-in-up { animation: fadeInUp 0.5s ease-out both; }
+        .card-hover { transition: transform 0.25s ease, box-shadow 0.25s ease; }
+        .card-hover:hover { transform: translateY(-4px); box-shadow: 0 20px 40px rgba(0,0,0,0.3); }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState } = React;
+
+        /* ───────────────────────── Product Data ───────────────────────── */
+
+        const CATEGORIES = [
+            'All',
+            'Microphones',
+            'Recording & Editing',
+            'Hosting & Distribution',
+            'Hardware',
+            'Post-Production',
+            'Growth & Marketing',
+        ];
+
+        const PRODUCTS = [
+            /* ── Microphones ── */
+            {
+                name: 'Shure SM7B',
+                category: 'Microphones',
+                url: 'https://www.shure.com/en-US/products/microphones/sm/sm7b',
+                tagline: 'The industry-standard podcasting mic',
+                blurb: 'This is the mic you hear on every top-tier podcast from Joe Rogan to Conan O\'Brien. Its cardioid dynamic capsule rejects room noise beautifully, so you don\'t need an acoustically treated studio to sound professional. We use it on every in-person session we produce.',
+                usps: [
+                    'Best-in-class off-axis rejection — forgives untreated rooms',
+                    'Built-in air suspension shock isolation eliminates rumble',
+                    'Flat, wide-range frequency response needs zero EQ for most voices',
+                    'Virtually indestructible — a genuine buy-it-for-life mic',
+                ],
+                color: 'from-amber-500 to-orange-600',
+                icon: '🎙️',
+            },
+            {
+                name: 'Rode PodMic USB',
+                category: 'Microphones',
+                url: 'https://www.rode.com/microphones/studio-condenser/podmic-usb',
+                tagline: 'Broadcast quality without the complexity',
+                blurb: 'If you\'re starting out or want a dead-simple setup, this is the one we hand to every new client. Plug in via USB-C and you\'re recording broadcast-quality audio in seconds — no interface needed. It also has an XLR output for when you\'re ready to upgrade your chain.',
+                usps: [
+                    'Dual USB-C / XLR connectivity — grows with your setup',
+                    'Built-in headphone amp with zero-latency monitoring',
+                    'Internal pop filter and shock mount included',
+                    'Half the price of an SM7B with 90% of the sound quality',
+                ],
+                color: 'from-red-500 to-rose-600',
+                icon: '🎤',
+            },
+
+            /* ── Recording & Editing ── */
+            {
+                name: 'Riverside.fm',
+                category: 'Recording & Editing',
+                url: 'https://riverside.fm',
+                tagline: 'Studio-quality remote recording in the browser',
+                blurb: 'This changed remote podcasting for us. Riverside records each participant locally at full quality and uploads the tracks separately — so a guest\'s bad Wi-Fi doesn\'t ruin the audio. We use it for every remote episode and the quality difference vs Zoom is night and day.',
+                usps: [
+                    'Local recording up to 48kHz WAV — not compressed over the network',
+                    'Separate audio + video tracks per guest for full post control',
+                    'AI transcription & clip generation built in',
+                    'Browser-based — zero software install for guests',
+                ],
+                color: 'from-blue-500 to-cyan-600',
+                icon: '🌊',
+            },
+            {
+                name: 'Descript',
+                category: 'Recording & Editing',
+                url: 'https://www.descript.com',
+                tagline: 'Edit audio like you\'re editing a document',
+                blurb: 'Descript lets you edit your podcast by editing the transcript — delete a sentence of text and the audio cut happens automatically. For clients who want to do light self-edits before sending to us, it\'s the most intuitive tool we\'ve found. The filler word removal alone saves hours.',
+                usps: [
+                    'Text-based editing — delete words from transcript to cut audio',
+                    'One-click filler word & silence removal',
+                    'AI voice cloning (Overdub) to fix misspoken words',
+                    'Screen recording + video editing in the same tool',
+                ],
+                color: 'from-green-500 to-emerald-600',
+                icon: '✂️',
+            },
+
+            /* ── Hosting & Distribution ── */
+            {
+                name: 'Buzzsprout',
+                category: 'Hosting & Distribution',
+                url: 'https://www.buzzsprout.com',
+                tagline: 'The easiest way to host and distribute your podcast',
+                blurb: 'We recommend Buzzsprout to most of our clients because it genuinely makes podcast hosting painless. Upload an episode, fill in the details, and it pushes to Apple, Spotify, and every other directory automatically. Their stats dashboard is clean and honest — no vanity metrics.',
+                usps: [
+                    'Automatic distribution to all major directories',
+                    'Built-in magic mastering that levels and optimises audio',
+                    'Transparent, IAB-certified analytics you can trust',
+                    'Free plan available — generous for new shows',
+                ],
+                color: 'from-yellow-500 to-amber-500',
+                icon: '🐝',
+            },
+            {
+                name: 'Transistor.fm',
+                category: 'Hosting & Distribution',
+                url: 'https://transistor.fm',
+                tagline: 'Pro-grade hosting for serious podcasters',
+                blurb: 'For clients running multiple shows or a branded podcast network, Transistor is our go-to. Unlimited shows on every plan, private podcast support for internal comms, and the analytics are top-notch. If you\'re treating your podcast as a business, this is the host that scales with you.',
+                usps: [
+                    'Unlimited podcasts on a single plan — ideal for networks',
+                    'Private podcast feeds for gated or internal content',
+                    'Advanced analytics with listener trends and geographic data',
+                    'Beautiful customisable website for each show',
+                ],
+                color: 'from-violet-500 to-purple-600',
+                icon: '📡',
+            },
+
+            /* ── Hardware ── */
+            {
+                name: 'Focusrite Scarlett 2i2',
+                category: 'Hardware',
+                url: 'https://focusrite.com/en/audio-interface/scarlett/scarlett-2i2',
+                tagline: 'The gold-standard entry-level audio interface',
+                blurb: 'When clients ask us "what interface should I get?", this is always the answer. The Scarlett 2i2 has enough clean gain for dynamic mics (yes, even the SM7B), ultra-low latency, and rock-solid drivers on both Mac and Windows. It just works, every time.',
+                usps: [
+                    'Enough gain (+69dB) for dynamic mics without a Cloudlifter',
+                    'Best-in-class AD/DA conversion at this price point',
+                    'Air mode adds a subtle high-end presence boost',
+                    'Bus-powered via USB-C — no power brick needed',
+                ],
+                color: 'from-red-600 to-red-700',
+                icon: '🔌',
+            },
+            {
+                name: 'RØDECaster Pro II',
+                category: 'Hardware',
+                url: 'https://www.rode.com/interfaces-mixers/rodecaster-pro-ii',
+                tagline: 'The all-in-one production studio',
+                blurb: 'For clients recording in-person with multiple hosts or guests, this replaces an entire rack of gear. Four XLR inputs with individually configurable processing, sound pads, Bluetooth phone-in, USB multitrack recording — it\'s a complete podcast studio in one box.',
+                usps: [
+                    'Built-in compressor, de-esser, noise gate & EQ per channel',
+                    '4 XLR + USB + Bluetooth — handle any guest setup',
+                    'Programmable sound pads for intros, stingers, SFX',
+                    'Multitrack USB recording to your computer or microSD',
+                ],
+                color: 'from-slate-600 to-slate-800',
+                icon: '🎛️',
+            },
+
+            /* ── Post-Production ── */
+            {
+                name: 'Auphonic',
+                category: 'Post-Production',
+                url: 'https://auphonic.com',
+                tagline: 'Automated audio mastering powered by AI',
+                blurb: 'We run every finished episode through Auphonic as the final step. It handles loudness normalisation to podcast standards (-16 LUFS), intelligent levelling between speakers, and noise reduction — all automatically. It\'s the secret weapon that makes amateur recordings sound polished.',
+                usps: [
+                    'Auto-levels to broadcast standards (-16 LUFS / -19 LUFS)',
+                    'Adaptive noise & hum reduction that doesn\'t kill the voice',
+                    'Multi-track levelling — balances loud and quiet speakers',
+                    '2 hours/month free — enough for most weekly podcasters',
+                ],
+                color: 'from-teal-500 to-cyan-600',
+                icon: '🔊',
+            },
+            {
+                name: 'Cleanvoice AI',
+                category: 'Post-Production',
+                url: 'https://cleanvoice.ai',
+                tagline: 'AI-powered filler word and mouth sound removal',
+                blurb: 'Cleanvoice is laser-focused on one thing: cleaning up speech. It detects and removes filler words ("um", "uh", "you know"), mouth clicks, and long pauses across multiple languages. We use it as a pre-processing step before our editors even touch the file — it cuts editing time dramatically.',
+                usps: [
+                    'Multilingual filler word detection (35+ languages)',
+                    'Removes mouth clicks and lip smacks automatically',
+                    'Dead air & stutter removal with natural-sounding cuts',
+                    'Timeline export for Descript, DaVinci, and Adobe Premiere',
+                ],
+                color: 'from-sky-500 to-blue-600',
+                icon: '🧹',
+            },
+
+            /* ── Growth & Marketing ── */
+            {
+                name: 'Headliner',
+                category: 'Growth & Marketing',
+                url: 'https://www.headliner.app',
+                tagline: 'Turn podcast clips into scroll-stopping social videos',
+                blurb: 'Getting ears on your podcast means being where the audience is — social media. Headliner automatically generates audiograms and video clips with animated waveforms, captions, and your branding. We create all our client social assets here and it\'s dramatically faster than doing it in Premiere.',
+                usps: [
+                    'Auto-generated captions with customisable styles',
+                    'Animated waveform and progress bar overlays',
+                    'Direct publish to YouTube, Instagram, TikTok, LinkedIn',
+                    'Full-length video podcast to short-form clip workflow',
+                ],
+                color: 'from-pink-500 to-rose-600',
+                icon: '🎬',
+            },
+            {
+                name: 'Canva',
+                category: 'Growth & Marketing',
+                url: 'https://www.canva.com',
+                tagline: 'Professional podcast artwork without a designer',
+                blurb: 'Every podcast needs cover art, episode graphics, and social cards. Canva has thousands of podcast-specific templates that look genuinely professional. We use it for quick-turn assets and client mood boards. The brand kit feature keeps fonts, colours, and logos consistent across everything.',
+                usps: [
+                    'Podcast cover art templates sized to Apple/Spotify specs',
+                    'Brand kit locks in your colours, fonts, and logos',
+                    'Collaborate with clients in real-time on designs',
+                    'Free tier is surprisingly capable for most needs',
+                ],
+                color: 'from-indigo-500 to-blue-600',
+                icon: '🎨',
+            },
+            {
+                name: 'Chartable',
+                category: 'Growth & Marketing',
+                url: 'https://chartable.com',
+                tagline: 'Podcast analytics and attribution that actually work',
+                blurb: 'If you run ads or cross-promos for your show, Chartable is how you measure what\'s actually working. Their SmartLinks and SmartPromos give you real attribution data — not just "downloads went up". We set this up for every client who\'s spending money on growth.',
+                usps: [
+                    'SmartLinks track which platforms listeners come from',
+                    'SmartPromos measure cross-promotion ROI precisely',
+                    'Unified chart tracking across Apple, Spotify, and more',
+                    'Free tier available for indie podcasters',
+                ],
+                color: 'from-orange-500 to-red-500',
+                icon: '📊',
+            },
+        ];
+
+        /* ───────────────────────── Components ───────────────────────── */
+
+        function CategoryPill({ label, active, onClick }) {
+            return (
+                <button
+                    onClick={onClick}
+                    className={`px-4 py-2 rounded-full text-sm font-medium transition-all whitespace-nowrap ${
+                        active
+                            ? 'bg-gradient-to-r from-purple-500 to-pink-500 text-white shadow-lg shadow-purple-500/25'
+                            : 'bg-white/10 text-purple-200 hover:bg-white/20 hover:text-white'
+                    }`}
+                >
+                    {label}
+                </button>
+            );
+        }
+
+        function ProductCard({ product, index }) {
+            const [expanded, setExpanded] = useState(false);
+
+            return (
+                <div
+                    className="fade-in-up card-hover bg-white/10 backdrop-blur-lg rounded-2xl border border-white/20 overflow-hidden flex flex-col"
+                    style={{ animationDelay: `${index * 0.06}s` }}
+                >
+                    {/* Gradient header strip */}
+                    <div className={`h-2 bg-gradient-to-r ${product.color}`} />
+
+                    <div className="p-6 flex flex-col flex-1">
+                        {/* Top row: icon + name + category */}
+                        <div className="flex items-start gap-3 mb-3">
+                            <span className="text-3xl leading-none mt-0.5">{product.icon}</span>
+                            <div className="flex-1 min-w-0">
+                                <h3 className="text-lg font-bold text-white truncate">{product.name}</h3>
+                                <span className="inline-block text-[11px] font-semibold uppercase tracking-wider text-purple-300 bg-purple-500/20 rounded-full px-2.5 py-0.5 mt-1">
+                                    {product.category}
+                                </span>
+                            </div>
+                        </div>
+
+                        {/* Tagline */}
+                        <p className="text-purple-200 text-sm font-medium mb-3 italic">
+                            {product.tagline}
+                        </p>
+
+                        {/* Blurb */}
+                        <p className="text-purple-100/80 text-sm leading-relaxed mb-4">
+                            {product.blurb}
+                        </p>
+
+                        {/* USPs (expandable) */}
+                        <button
+                            onClick={() => setExpanded(!expanded)}
+                            className="text-left text-xs font-semibold text-purple-300 hover:text-white transition-colors mb-2 flex items-center gap-1"
+                        >
+                            <svg
+                                className={`w-3.5 h-3.5 transition-transform ${expanded ? 'rotate-90' : ''}`}
+                                fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24"
+                            >
+                                <path d="M9 5l7 7-7 7" />
+                            </svg>
+                            {expanded ? 'Hide' : 'Show'} key advantages
+                        </button>
+
+                        {expanded && (
+                            <ul className="space-y-2 mb-4">
+                                {product.usps.map((usp, i) => (
+                                    <li key={i} className="flex items-start gap-2 text-sm text-purple-100/80">
+                                        <svg className="w-4 h-4 mt-0.5 text-green-400 shrink-0" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24">
+                                            <path d="M5 13l4 4L19 7" />
+                                        </svg>
+                                        {usp}
+                                    </li>
+                                ))}
+                            </ul>
+                        )}
+
+                        {/* Spacer to push CTA to bottom */}
+                        <div className="flex-1" />
+
+                        {/* CTA */}
+                        <a
+                            href={product.url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className={`block text-center bg-gradient-to-r ${product.color} text-white font-semibold py-3 rounded-xl hover:opacity-90 transition-opacity text-sm`}
+                        >
+                            Learn more &rarr;
+                        </a>
+                    </div>
+                </div>
+            );
+        }
+
+        /* ───────────────────────── App ───────────────────────── */
+
+        function RecommendationsApp() {
+            const [activeCategory, setActiveCategory] = useState('All');
+
+            const filtered = activeCategory === 'All'
+                ? PRODUCTS
+                : PRODUCTS.filter(p => p.category === activeCategory);
+
+            return (
+                <div className="min-h-screen bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900">
+                    {/* Hero / Header */}
+                    <header className="pt-16 pb-12 px-6 text-center max-w-3xl mx-auto">
+                        <p className="text-purple-300 text-sm font-semibold uppercase tracking-widest mb-3">
+                            Curated by our production team
+                        </p>
+                        <h1 className="text-4xl md:text-5xl font-extrabold text-white mb-4 leading-tight">
+                            Our Recommended<br />
+                            <span className="bg-gradient-to-r from-purple-400 via-pink-400 to-orange-400 text-transparent bg-clip-text">
+                                Podcast Tools & Gear
+                            </span>
+                        </h1>
+                        <p className="text-purple-200/80 text-lg max-w-xl mx-auto leading-relaxed">
+                            Every product on this page is something we use in-house or have battle-tested
+                            with clients. No fluff, no paid placements — just the tools that make a real
+                            difference to your podcast.
+                        </p>
+                    </header>
+
+                    {/* Category filters */}
+                    <nav className="sticky top-0 z-30 bg-slate-900/80 backdrop-blur-md border-b border-white/10">
+                        <div className="max-w-7xl mx-auto px-6 py-4 flex gap-2 overflow-x-auto scrollbar-hide">
+                            {CATEGORIES.map(cat => (
+                                <CategoryPill
+                                    key={cat}
+                                    label={cat}
+                                    active={activeCategory === cat}
+                                    onClick={() => setActiveCategory(cat)}
+                                />
+                            ))}
+                        </div>
+                    </nav>
+
+                    {/* Product grid */}
+                    <main className="max-w-7xl mx-auto px-6 py-12">
+                        <div className="grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
+                            {filtered.map((product, i) => (
+                                <ProductCard key={product.name} product={product} index={i} />
+                            ))}
+                        </div>
+
+                        {filtered.length === 0 && (
+                            <p className="text-center text-purple-300/60 py-20 text-lg">
+                                No products in this category yet.
+                            </p>
+                        )}
+                    </main>
+
+                    {/* Footer */}
+                    <footer className="border-t border-white/10 py-10 px-6 text-center">
+                        <p className="text-purple-300/50 text-sm max-w-lg mx-auto">
+                            Some links on this page may be affiliate links. We only recommend products
+                            we genuinely use and trust — affiliate relationships never influence our recommendations.
+                        </p>
+                        <a
+                            href="index.html"
+                            className="inline-block mt-6 text-purple-300 hover:text-white text-sm font-medium transition-colors"
+                        >
+                            &larr; Back to AI Podcast Editor
+                        </a>
+                    </footer>
+                </div>
+            );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<RecommendationsApp />);
+    </script>
+</body>
+</html>

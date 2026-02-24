@@ -348,53 +348,72 @@ def _broadcast_voice_chain(audio):
         hp = butter(3, 80, btype='high', fs=sample_rate, output='sos')
         data = sosfiltfilt(hp, data)
 
-        # 2. De-box: CUT 400-800Hz by -5dB — this is the "Zoom room" frequency
-        #    Use a notch-style cut centered at 550Hz
-        b_box, a_box = iirnotch(550 / nyq, 1.5)
+        # 2. De-box: CUT 300-900Hz by -7dB — kills the Zoom room resonance hard
+        b_box, a_box = iirnotch(500 / nyq, 1.0)  # wider Q = broader cut
         boxed = lfilter(b_box, a_box, data)
-        cut_amount = 1.0 - 10 ** (-5 / 20)  # how much to blend toward notched
+        cut_amount = 1.0 - 10 ** (-7 / 20)
         data = data * (1 - cut_amount) + boxed * cut_amount
+        # Second notch at 700Hz to widen the de-boxing
+        b_box2, a_box2 = iirnotch(700 / nyq, 1.5)
+        boxed2 = lfilter(b_box2, a_box2, data)
+        cut_amount2 = 1.0 - 10 ** (-4 / 20)
+        data = data * (1 - cut_amount2) + boxed2 * cut_amount2
 
-        # 3. Warmth: boost everything below 200Hz by +6dB
+        # 3. Warmth: massive boost below 200Hz (+9dB) — adds chest and body
         lp = butter(2, 200, btype='low', fs=sample_rate, output='sos')
         low = sosfiltfilt(lp, data)
-        data = data + low * (10 ** (6 / 20) - 1)
+        data = data + low * (10 ** (9 / 20) - 1)
 
-        # 4. De-harsh: cut 2.5-4kHz by -3dB — reduces tinny/piercing quality
-        b_harsh, a_harsh = iirnotch(3000 / nyq, 2.0)
+        # 4. Harmonic saturation — adds even harmonics like a tube preamp
+        #    This is the key to "warm analog" sound vs "clean digital"
+        #    Soft-clip using tanh, blended with dry signal
+        drive = 2.5  # how hard we push into saturation
+        normalized = data / (np.max(np.abs(data)) + 1e-10)
+        saturated = np.tanh(normalized * drive) / np.tanh(drive)
+        saturated = saturated * np.max(np.abs(data))
+        saturation_mix = 0.35  # 35% saturated, 65% clean
+        data = data * (1 - saturation_mix) + saturated * saturation_mix
+
+        # 5. De-harsh: cut 2-4kHz by -4dB — removes tinny/piercing quality
+        b_harsh, a_harsh = iirnotch(2800 / nyq, 1.5)
         deharsh = lfilter(b_harsh, a_harsh, data)
-        cut_harsh = 1.0 - 10 ** (-3 / 20)
+        cut_harsh = 1.0 - 10 ** (-4 / 20)
         data = data * (1 - cut_harsh) + deharsh * cut_harsh
 
-        # 5. Air: boost 6-10kHz by +3dB — adds openness and breath
-        hp_air = butter(2, 6000, btype='high', fs=sample_rate, output='sos')
-        air = sosfiltfilt(hp_air, data)
-        data = data + air * (10 ** (3 / 20) - 1)
+        # 6. Presence: subtle boost at 4.5-5kHz (+2dB) — clarity without harshness
+        b_pres, a_pres = iirpeak(4800 / nyq, 3.0)
+        pres = lfilter(b_pres, a_pres, data)
+        pres_gain = 10 ** (2 / 20) - 1
+        data = data + (pres - data) * pres_gain
 
-        # 6. Low-pass at 14kHz — remove hiss and harsh sibilance
+        # 7. Air: boost above 8kHz by +4dB — openness and "expensive mic" feel
+        hp_air = butter(2, 8000, btype='high', fs=sample_rate, output='sos')
+        air = sosfiltfilt(hp_air, data)
+        data = data + air * (10 ** (4 / 20) - 1)
+
+        # 8. Low-pass at 14kHz — remove hiss
         lp_cut = butter(3, 14000, btype='low', fs=sample_rate, output='sos')
         data = sosfiltfilt(lp_cut, data)
 
-        # 7. De-ess: compress sibilance at 6-8kHz dynamically
+        # 9. De-ess: dynamic sibilance reduction at 5.5-8.5kHz
         bp_sos = butter(2, [5500, 8500], btype='band', fs=sample_rate, output='sos')
         sibilance = sosfiltfilt(bp_sos, data)
-        block_size = int(sample_rate * 0.005)  # 5ms blocks
-        sib_threshold = np.percentile(np.abs(sibilance), 90)
+        block_size = int(sample_rate * 0.005)
+        sib_threshold = np.percentile(np.abs(sibilance), 85)
         for i in range(0, len(data) - block_size, block_size):
             sib_peak = np.max(np.abs(sibilance[i:i + block_size]))
             if sib_peak > sib_threshold:
                 reduction = sib_threshold / sib_peak
-                # Only reduce the sibilant frequencies, not the whole signal
                 data[i:i + block_size] -= sibilance[i:i + block_size] * (1 - reduction)
 
-        # 8. Broadcast compression — 5:1 ratio, -18dBFS threshold
-        #    This is what makes podcast audio sound "produced"
-        block_size = int(sample_rate * 0.005)  # 5ms blocks
-        threshold = 10 ** (-18 / 20) * 32768
-        ratio = 5.0
+        # 10. Broadcast compression — 6:1 ratio, -15dBFS threshold
+        #     Aggressive enough to sound "produced" and even
+        block_size = int(sample_rate * 0.005)
+        threshold = 10 ** (-15 / 20) * 32768
+        ratio = 6.0
         gain = 1.0
-        alpha_a = 1 - np.exp(-1 / (sample_rate * 0.005))   # 5ms attack
-        alpha_r = 1 - np.exp(-1 / (sample_rate * 0.08))    # 80ms release
+        alpha_a = 1 - np.exp(-1 / (sample_rate * 0.003))   # 3ms attack
+        alpha_r = 1 - np.exp(-1 / (sample_rate * 0.06))    # 60ms release
 
         for i in range(0, len(data) - block_size, block_size):
             block = data[i:i + block_size]
@@ -406,10 +425,16 @@ def _broadcast_voice_chain(audio):
                 gain = gain + alpha_r * (1.0 - gain)
             data[i:i + block_size] = block * gain
 
-        # 9. Make-up gain (+6dB) to restore perceived loudness after compression
-        data = data * 10 ** (6 / 20)
+        # 11. Make-up gain (+8dB)
+        data = data * 10 ** (8 / 20)
 
-        # 10. Brick-wall limiter at -1dBFS — prevents clipping
+        # 12. Second pass of saturation — very subtle, just warms the compressed signal
+        normalized = data / (np.max(np.abs(data)) + 1e-10)
+        saturated = np.tanh(normalized * 1.5) / np.tanh(1.5)
+        saturated = saturated * np.max(np.abs(data))
+        data = data * 0.85 + saturated * 0.15
+
+        # 13. Brick-wall limiter at -1dBFS
         ceiling = 10 ** (-1 / 20) * 32768
         data = np.clip(data, -ceiling, ceiling)
 

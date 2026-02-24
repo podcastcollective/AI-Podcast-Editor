@@ -400,7 +400,7 @@ def apply_audio_edits(audio_path, cuts_ms):
     audio = AudioSegment.from_file(audio_path)
     total_ms = len(audio)
 
-    CUT_PAD_MS = 50  # expand each cut boundary to catch breath/noise around fillers
+    CUT_PAD_MS = 20  # small pad to catch mouth noise at filler edges without eating words
 
     # Clamp, pad, sort, and merge overlapping cuts
     cuts = sorted(
@@ -419,11 +419,12 @@ def apply_audio_edits(audio_path, cuts_ms):
         cut[0] = _snap_to_zero_crossing(audio, cut[0])
         cut[1] = _snap_to_zero_crossing(audio, cut[1])
 
-    # Build segments to keep (inverse of cuts)
-    FADE_MS = 30       # fade at each cut boundary — long enough to eliminate pops/clicks
-    CROSSFADE_MS = 100  # crossfade overlap to blend segments smoothly across cuts
+    # Build segments to keep (inverse of cuts), with silence gaps between them
+    # so speech doesn't rush together after filler removal.
+    FADE_MS = 30       # fade at each cut boundary — eliminates pops/clicks
+    GAP_MS = 150       # silence inserted where a cut was — preserves natural speech rhythm
+
     segments = []
-    prev_was_cut = False
     pos = 0
     for s, e in merged:
         if s > pos:
@@ -432,25 +433,22 @@ def apply_audio_edits(audio_path, cuts_ms):
             if len(seg) > FADE_MS:
                 seg = seg.fade_out(FADE_MS)
             # Fade-in at start of segment (coming out of a previous cut)
-            if prev_was_cut and len(seg) > FADE_MS:
+            if segments and len(seg) > FADE_MS:
                 seg = seg.fade_in(FADE_MS)
             segments.append(seg)
-        prev_was_cut = True
+            # Insert a short silence gap to replace the removed audio
+            segments.append(AudioSegment.silent(duration=GAP_MS, frame_rate=audio.frame_rate))
         pos = e
     if pos < total_ms:
         seg = audio[pos:]
-        # Fade-in at start — this segment follows the last cut
-        if prev_was_cut and len(seg) > FADE_MS:
+        if segments and len(seg) > FADE_MS:
             seg = seg.fade_in(FADE_MS)
         segments.append(seg)
 
-    # Join segments with crossfades for smooth transitions
-    edited = segments[0] if segments else audio
-    for seg in segments[1:]:
-        if len(edited) > CROSSFADE_MS and len(seg) > CROSSFADE_MS:
-            edited = edited.append(seg, crossfade=CROSSFADE_MS)
-        else:
-            edited += seg
+    # Join all segments (kept audio + silence gaps)
+    edited = AudioSegment.empty()
+    for seg in segments:
+        edited += seg
 
     # Apply noise gate to reduce background hum between speech
     edited = _noise_gate(edited, threshold_db=-40, min_silence_ms=150)

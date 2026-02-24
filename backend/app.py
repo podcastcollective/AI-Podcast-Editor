@@ -291,15 +291,30 @@ Example tool input for reference:
         }
     }]
 
-    message = client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=4000,
-        tools=tools,
-        tool_choice={"type": "tool", "name": "submit_edit_decisions"},
-        messages=[
-            {"role": "user", "content": prompt},
-        ]
-    )
+    # Retry with exponential backoff for transient API errors (overloaded, rate limit)
+    import time as _time
+    message = None
+    for attempt in range(4):
+        try:
+            message = client.messages.create(
+                model="claude-sonnet-4-6",
+                max_tokens=4000,
+                tools=tools,
+                tool_choice={"type": "tool", "name": "submit_edit_decisions"},
+                messages=[
+                    {"role": "user", "content": prompt},
+                ]
+            )
+            break
+        except anthropic.APIStatusError as e:
+            if e.status_code in (429, 529) and attempt < 3:
+                wait = (2 ** attempt) * 2  # 2s, 4s, 8s
+                print(f"Claude API {e.status_code}, retrying in {wait}s (attempt {attempt + 1}/4)")
+                _time.sleep(wait)
+            else:
+                raise
+    if message is None:
+        raise Exception("Claude API failed after 4 attempts")
 
     # Extract structured data from the tool call — guaranteed valid JSON.
     edit_decisions = None

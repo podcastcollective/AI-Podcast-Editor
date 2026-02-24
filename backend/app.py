@@ -321,24 +321,32 @@ def _noise_gate(audio, threshold_db=-40, min_silence_ms=100):
     """
     Simple noise gate: silence any segment below threshold_db that lasts at
     least min_silence_ms. Reduces background hum/noise between speech.
+    Uses short fades at boundaries to prevent pops from hard silence transitions.
     """
     from pydub import AudioSegment
     from pydub.silence import detect_nonsilent
+
+    GATE_FADE_MS = 10  # fade at speech↔silence boundaries to prevent pops
 
     nonsilent = detect_nonsilent(audio, min_silence_len=min_silence_ms, silence_thresh=threshold_db)
     if not nonsilent:
         return audio
 
     # Build output: keep non-silent ranges, replace gaps with true silence
-    silence = AudioSegment.silent(duration=0, frame_rate=audio.frame_rate)
     result = AudioSegment.empty()
     pos = 0
     for start, end in nonsilent:
         if start > pos:
-            # Replace the quiet gap with actual silence (removes hum/noise)
             gap_duration = start - pos
             result += AudioSegment.silent(duration=gap_duration, frame_rate=audio.frame_rate)
-        result += audio[start:end]
+        speech = audio[start:end]
+        # Fade in/out at gate boundaries to avoid pops
+        if len(speech) > GATE_FADE_MS * 2:
+            if start > 0:
+                speech = speech.fade_in(GATE_FADE_MS)
+            if end < len(audio):
+                speech = speech.fade_out(GATE_FADE_MS)
+        result += speech
         pos = end
     if pos < len(audio):
         result += AudioSegment.silent(duration=len(audio) - pos, frame_rate=audio.frame_rate)
@@ -371,29 +379,29 @@ def apply_audio_edits(audio_path, cuts_ms):
             merged.append([s, e])
 
     # Build segments to keep (inverse of cuts)
-    FADE_MS = 5       # tiny fade at each boundary to eliminate mid-waveform clicks
-    CROSSFADE_MS = 50  # crossfade overlap to blend segments smoothly
+    FADE_MS = 20       # fade at each cut boundary — long enough to eliminate pops/clicks
+    CROSSFADE_MS = 100  # crossfade overlap to blend segments smoothly across cuts
     segments = []
+    prev_was_cut = False
     pos = 0
     for s, e in merged:
         if s > pos:
             seg = audio[pos:s]
-            # Apply fade-out at the end (where the cut starts)
+            # Fade-out at end of segment (leading into a cut)
             if len(seg) > FADE_MS:
                 seg = seg.fade_out(FADE_MS)
+            # Fade-in at start of segment (coming out of a previous cut)
+            if prev_was_cut and len(seg) > FADE_MS:
+                seg = seg.fade_in(FADE_MS)
             segments.append(seg)
+        prev_was_cut = True
         pos = e
     if pos < total_ms:
         seg = audio[pos:]
-        # Apply fade-in at the start (where the cut ended)
-        if len(seg) > FADE_MS:
+        # Fade-in at start — this segment follows the last cut
+        if prev_was_cut and len(seg) > FADE_MS:
             seg = seg.fade_in(FADE_MS)
         segments.append(seg)
-
-    # Also fade-in the very first segment's start after a cut
-    if merged and merged[0][0] == 0 and segments:
-        if len(segments[0]) > FADE_MS:
-            segments[0] = segments[0].fade_in(FADE_MS)
 
     # Join segments with crossfades for smooth transitions
     edited = segments[0] if segments else audio

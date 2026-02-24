@@ -292,9 +292,11 @@ Example tool input for reference:
     }]
 
     # Retry with exponential backoff for transient API errors (overloaded, rate limit)
+    # Overload can persist for minutes — retry aggressively with long waits
     import time as _time
+    max_retries = 8
     message = None
-    for attempt in range(4):
+    for attempt in range(max_retries):
         try:
             message = client.messages.create(
                 model="claude-sonnet-4-6",
@@ -307,14 +309,14 @@ Example tool input for reference:
             )
             break
         except anthropic.APIStatusError as e:
-            if e.status_code in (429, 529) and attempt < 3:
-                wait = (2 ** attempt) * 2  # 2s, 4s, 8s
-                print(f"Claude API {e.status_code}, retrying in {wait}s (attempt {attempt + 1}/4)")
+            if e.status_code in (429, 529) and attempt < max_retries - 1:
+                wait = min(10 * (2 ** attempt), 120)  # 10s, 20s, 40s, 80s, 120s, 120s, 120s
+                print(f"Claude API {e.status_code}, retrying in {wait}s (attempt {attempt + 1}/{max_retries})")
                 _time.sleep(wait)
             else:
                 raise
     if message is None:
-        raise Exception("Claude API failed after 4 attempts")
+        raise Exception(f"Claude API failed after {max_retries} attempts")
 
     # Extract structured data from the tool call — guaranteed valid JSON.
     edit_decisions = None

@@ -134,44 +134,55 @@
                         }
                     }
 
-                    // Stage 3: Claude analysis
+                    // Stage 3: Claude analysis (with frontend-level retry on overload)
                     setPipelineStage('analyzing');
-                    const processRes = await fetch(`${API_URL}/api/process`, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({
-                            transcript_id,
-                            filename,
-                            requirements: {
-                                removeFillerWords: requirements.removeFillerWords,
-                                removeLongPauses: requirements.removeLongPauses,
-                                normalizeAudio: requirements.normalizeAudio,
-                                removeBackgroundNoise: requirements.removeBackgroundNoise,
-                                targetLength: requirements.targetLength
-                            },
-                            customInstructions: requirements.customInstructions
-                        })
-                    });
-                    const processData = await processRes.json();
-                    if (!processRes.ok) throw { stage: 'analyzing', message: processData.error || 'Analysis failed to start' };
-                    const analysisJobId = processData.job_id;
-                    if (!analysisJobId) throw { stage: 'analyzing', message: 'No job_id returned' };
-
                     let editDecisions = [];
-                    while (true) {
-                        await new Promise(r => setTimeout(r, 3000));
-                        let pollRes;
-                        try { pollRes = await fetch(`${API_URL}/api/process-status/${analysisJobId}`); }
-                        catch { throw { stage: 'analyzing', message: 'Server unreachable — it may be restarting. Please retry.' }; }
-                        if (pollRes.status === 404) throw { stage: 'analyzing', message: 'Server restarted during processing. Please retry.' };
-                        const pollData = await pollRes.json();
-                        if (pollData.retryable) throw { stage: 'analyzing', message: 'Claude API overloaded. Please try again.' };
-                        if (!pollRes.ok) throw { stage: 'analyzing', message: pollData.error || 'Analysis failed' };
-                        if (pollData.success) {
-                            editDecisions = pollData.edit_decisions || [];
-                            break;
+                    const analysisBody = JSON.stringify({
+                        transcript_id,
+                        filename,
+                        requirements: {
+                            removeFillerWords: requirements.removeFillerWords,
+                            removeLongPauses: requirements.removeLongPauses,
+                            normalizeAudio: requirements.normalizeAudio,
+                            removeBackgroundNoise: requirements.removeBackgroundNoise,
+                            targetLength: requirements.targetLength
+                        },
+                        customInstructions: requirements.customInstructions
+                    });
+
+                    for (let analysisAttempt = 0; analysisAttempt < 3; analysisAttempt++) {
+                        const processRes = await fetch(`${API_URL}/api/process`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: analysisBody
+                        });
+                        const processData = await processRes.json();
+                        if (!processRes.ok) throw { stage: 'analyzing', message: processData.error || 'Analysis failed to start' };
+                        const analysisJobId = processData.job_id;
+                        if (!analysisJobId) throw { stage: 'analyzing', message: 'No job_id returned' };
+
+                        let retryable = false;
+                        while (true) {
+                            await new Promise(r => setTimeout(r, 3000));
+                            let pollRes;
+                            try { pollRes = await fetch(`${API_URL}/api/process-status/${analysisJobId}`); }
+                            catch { throw { stage: 'analyzing', message: 'Server unreachable — it may be restarting. Please retry.' }; }
+                            if (pollRes.status === 404) throw { stage: 'analyzing', message: 'Server restarted during processing. Please retry.' };
+                            const pollData = await pollRes.json();
+                            if (pollData.retryable) { retryable = true; break; }
+                            if (!pollRes.ok) throw { stage: 'analyzing', message: pollData.error || 'Analysis failed' };
+                            if (pollData.success) {
+                                editDecisions = pollData.edit_decisions || [];
+                                break;
+                            }
+                        }
+                        if (editDecisions.length > 0 || !retryable) break;
+                        if (analysisAttempt < 2) {
+                            console.log(`Claude API overloaded, frontend retry ${analysisAttempt + 1}/3 in 30s...`);
+                            await new Promise(r => setTimeout(r, 30000));
                         }
                     }
+                    if (editDecisions.length === 0) throw { stage: 'analyzing', message: 'Claude API overloaded after multiple retries. Please try again later.' };
 
                     // Stage 4-6: Edit audio pipeline (cutting + cleanvoice + auphonic)
                     setPipelineStage('cutting');

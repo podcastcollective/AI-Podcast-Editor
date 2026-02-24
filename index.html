@@ -73,7 +73,8 @@
             { key: 'uploading',    label: 'Uploading audio' },
             { key: 'transcribing', label: 'Transcribing with AssemblyAI' },
             { key: 'analyzing',    label: 'Analysing with Claude AI' },
-            { key: 'cutting',      label: 'Editing, noise reduction & studio processing' },
+            { key: 'cutting',      label: 'Applying edits' },
+            { key: 'dolby',        label: 'Enhancing speech with Dolby.io' },
             { key: 'cleanvoice',   label: 'Voice cleaning with Cleanvoice AI' },
             { key: 'auphonic',     label: 'Loudness mastering with Auphonic' },
             { key: 'done',         label: 'Complete' },
@@ -205,6 +206,7 @@
                         if (statusRes.status === 404) throw { stage: 'cutting', message: 'Server restarted during processing. Please retry.' };
                         const statusData = await statusRes.json();
                         if (statusData.status === 'cutting')    setPipelineStage('cutting');
+                        if (statusData.status === 'dolby')      setPipelineStage('dolby');
                         if (statusData.status === 'cleanvoice') setPipelineStage('cleanvoice');
                         if (statusData.status === 'auphonic')   setPipelineStage('auphonic');
                         if (statusData.status === 'completed')  break;

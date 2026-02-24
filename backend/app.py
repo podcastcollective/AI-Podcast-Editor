@@ -28,6 +28,7 @@ ASSEMBLYAI_API_KEY = os.environ.get('ASSEMBLYAI_API_KEY')
 CLAUDE_API_KEY = os.environ.get('CLAUDE_API_KEY')
 AUPHONIC_API_KEY = os.environ.get('AUPHONIC_API_KEY')    # Bearer token from auphonic.com/accounts/api-access/
 CLEANVOICE_API_KEY = os.environ.get('CLEANVOICE_API_KEY')  # API key from cleanvoice.ai/dashboard
+DOLBY_API_KEY = os.environ.get('DOLBY_API_KEY')            # API key from dolby.io dashboard
 
 if not ASSEMBLYAI_API_KEY or not CLAUDE_API_KEY:
     print("WARNING: API keys not set. Please set ASSEMBLYAI_API_KEY and CLAUDE_API_KEY environment variables")
@@ -682,18 +683,131 @@ def apply_audio_edits(audio_path, cuts_ms, words=None):
     removed_ms = total_ms - len(edited)
     print(f"Cuts complete: {len(merged)} cuts, removed {removed_ms}ms, {len(edited)}ms remaining")
 
-    # Spectral noise reduction — profiles noise from the quietest section
-    # and subtracts it from the entire audio. Like Audacity's noise reduction.
-    edited = _spectral_noise_reduce(edited)
-
-    # Broadcast voice chain — de-box, warmth, de-harsh, compress, limit
-    edited = _broadcast_voice_chain(edited)
-
-    # Export as WAV — works without ffmpeg; Auphonic will encode to MP3
+    # Export as WAV — Dolby.io Enhance will handle noise reduction and voice processing
     wav_path = audio_path.rsplit('.', 1)[0] + '_edited.wav'
     edited.export(wav_path, format='wav')
     print(f"Exported edited audio: {wav_path} ({len(edited)}ms, {os.path.getsize(wav_path) // 1024}KB)")
     return wav_path
+
+
+def process_with_dolby(wav_path):
+    """
+    Send audio to Dolby.io Enhance API for ML-based speech enhancement.
+    Does noise reduction, dereverberation, speech isolation, dynamic EQ,
+    loudness correction — similar to Adobe Enhanced Speech.
+    Returns path to the enhanced WAV file.
+    """
+    headers = {
+        'x-api-key': DOLBY_API_KEY,
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+    }
+
+    basename = os.path.basename(wav_path)
+    dlb_input = f'dlb://in/{basename}'
+    dlb_output = f'dlb://out/{basename}'
+
+    # Step 1: Get presigned upload URL
+    print(f"Dolby.io: requesting upload URL for {basename}")
+    resp = requests.post(
+        'https://api.dolby.com/media/input',
+        headers=headers,
+        json={'url': dlb_input},
+        timeout=30,
+    )
+    if resp.status_code != 200:
+        raise Exception(f"Dolby.io input URL failed: {resp.status_code} {resp.text[:300]}")
+    upload_url = resp.json()['url']
+
+    # Step 2: Upload the audio file
+    file_size = os.path.getsize(wav_path)
+    print(f"Dolby.io: uploading {file_size // 1024 // 1024}MB")
+    with open(wav_path, 'rb') as f:
+        put_resp = requests.put(
+            upload_url,
+            data=f,
+            headers={'Content-Type': 'audio/wav'},
+            timeout=300,
+        )
+    if put_resp.status_code not in (200, 201):
+        raise Exception(f"Dolby.io upload failed: {put_resp.status_code}")
+
+    # Step 3: Start enhancement job — podcast preset with speech optimization
+    print("Dolby.io: starting enhance job")
+    enhance_resp = requests.post(
+        'https://api.dolby.com/media/enhance',
+        headers=headers,
+        json={
+            'input': dlb_input,
+            'output': dlb_output,
+            'content': {'type': 'podcast'},
+            'audio': {
+                'noise': {
+                    'reduction': {'enable': True, 'amount': 'auto'}
+                },
+                'speech': {
+                    'isolation': {'enable': True, 'amount': 80},
+                    'sibilance': {'reduction': {'enable': True}},
+                    'click': {'reduction': {'enable': True}},
+                },
+                'loudness': {'enable': True},
+                'dynamics': {
+                    'range_control': {'enable': True}
+                },
+                'filter': {
+                    'high_pass': {'enable': True}
+                },
+            },
+        },
+        timeout=30,
+    )
+    if enhance_resp.status_code not in (200, 201):
+        raise Exception(f"Dolby.io enhance failed to start: {enhance_resp.status_code} {enhance_resp.text[:300]}")
+    job_id = enhance_resp.json()['job_id']
+    print(f"Dolby.io: job started: {job_id}")
+
+    # Step 4: Poll until complete (up to 15 minutes)
+    for _ in range(180):
+        time.sleep(5)
+        poll_resp = requests.get(
+            f'https://api.dolby.com/media/enhance?job_id={job_id}',
+            headers=headers,
+            timeout=30,
+        )
+        if poll_resp.status_code != 200:
+            raise Exception(f"Dolby.io poll failed: {poll_resp.status_code} {poll_resp.text[:300]}")
+        status_data = poll_resp.json()
+        status = status_data.get('status', '')
+        progress = status_data.get('progress', 0)
+        print(f"Dolby.io: {status} ({progress}%)")
+
+        if status == 'Success':
+            break
+        if status in ('Failed', 'Error'):
+            raise Exception(f"Dolby.io enhance failed: {json.dumps(status_data)[:500]}")
+    else:
+        raise Exception("Dolby.io enhance timed out after 15 minutes")
+
+    # Step 5: Get presigned download URL
+    dl_resp = requests.post(
+        'https://api.dolby.com/media/output',
+        headers=headers,
+        json={'url': dlb_output},
+        timeout=30,
+    )
+    if dl_resp.status_code != 200:
+        raise Exception(f"Dolby.io output URL failed: {dl_resp.status_code} {dl_resp.text[:300]}")
+    download_url = dl_resp.json()['url']
+
+    # Step 6: Download enhanced audio
+    dl = requests.get(download_url, timeout=300)
+    if dl.status_code != 200:
+        raise Exception(f"Dolby.io download failed: {dl.status_code}")
+    output_path = wav_path.rsplit('.', 1)[0] + '_dolby.wav'
+    with open(output_path, 'wb') as out:
+        out.write(dl.content)
+    print(f"Dolby.io: enhanced audio saved: {output_path} ({len(dl.content) // 1024}KB)")
+    return output_path
 
 
 def process_with_auphonic(wav_path):
@@ -889,7 +1003,7 @@ def process_with_cleanvoice(audio_path):
 
 def _run_edit_job(job_id, audio_path, cuts_ms, use_auphonic, transcript_id=None):
     """
-    Background thread: cutting → cleanvoice → auphonic → completed.
+    Background thread: cutting → dolby enhance → cleanvoice → auphonic → completed.
     Every stage is mandatory if its API key is configured — any failure stops
     the pipeline and reports the error so nothing incomplete reaches the client.
     """
@@ -905,25 +1019,27 @@ def _run_edit_job(job_id, audio_path, cuts_ms, use_auphonic, transcript_id=None)
             except Exception as e:
                 print(f"Warning: could not fetch word timestamps: {e}")
 
-        # Stage 1: apply timestamp cuts + noise reduction + studio processing
+        # Stage 1: apply timestamp cuts
         active_stage = 'cutting'
         with _edit_jobs_lock:
             _edit_jobs[job_id]['status'] = 'cutting'
-        import resource
-        mem_before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024 / 1024  # MB on macOS, approx on Linux
-        print(f"Memory before audio processing: ~{mem_before:.0f}MB")
         wav_path = apply_audio_edits(audio_path, cuts_ms, words=words)
-        mem_after = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024 / 1024
-        print(f"Memory after audio processing: ~{mem_after:.0f}MB")
 
-        # Stage 2: Cleanvoice — AI audio-level cleaning (hard failure — stops pipeline)
+        # Stage 2: Dolby.io Enhance — ML-based noise removal, dereverberation, speech enhancement
+        if DOLBY_API_KEY:
+            active_stage = 'dolby'
+            with _edit_jobs_lock:
+                _edit_jobs[job_id]['status'] = 'dolby'
+            wav_path = process_with_dolby(wav_path)
+
+        # Stage 3: Cleanvoice — AI voice cleaning (filler sounds, mouth clicks)
         if CLEANVOICE_API_KEY:
             active_stage = 'cleanvoice'
             with _edit_jobs_lock:
                 _edit_jobs[job_id]['status'] = 'cleanvoice'
             wav_path = process_with_cleanvoice(wav_path)
 
-        # Stage 3: Auphonic — loudness normalisation + noise reduction (hard failure — stops pipeline)
+        # Stage 4: Auphonic — loudness normalisation + final mastering
         if use_auphonic and AUPHONIC_API_KEY:
             active_stage = 'auphonic'
             with _edit_jobs_lock:

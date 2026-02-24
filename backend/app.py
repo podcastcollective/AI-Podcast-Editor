@@ -250,12 +250,13 @@ CUSTOM INSTRUCTIONS:
 {custom_instructions if custom_instructions else "None"}
 
 INSTRUCTIONS:
-1. For EVERY filler word listed above, include a "Remove Filler" decision using the EXACT start_ms and end_ms provided.
+1. For EVERY filler word listed above, include a "Remove Filler" decision using the EXACT start_ms and end_ms provided. CRITICAL: Never adjust these timestamps — they are word-level boundaries from the transcription. Cutting at different timestamps WILL clip adjacent words.
 2. For EVERY pause listed above, include a "Trim Pause" decision: set start_ms = pause_start_ms + 800, end_ms = pause_end_ms (keeps 800ms of natural pause).
-3. Add "Content Cut" decisions for any sections in the transcript that should be removed for editorial reasons (use ms values matching utterance start/end times).
-4. Add at least one "Note" decision (no start_ms/end_ms) summarizing the overall edit.
-5. Use ONLY ms values from the data above — never invent values.
-6. You MUST include at least one decision. If there are fillers or pauses listed above, each one MUST appear as a decision.
+3. Only add "Content Cut" decisions if content is clearly off-topic or the client requested removal. Content cuts MUST start and end at sentence or phrase boundaries — never cut mid-sentence. Use the start_ms of the first word and end_ms of the last word in the removed section. Prefer fewer, cleaner cuts over many small ones.
+4. Be CONSERVATIVE — when in doubt, keep the audio. A slightly longer podcast with natural flow is better than a shorter one with jarring cuts.
+5. Add at least one "Note" decision (no start_ms/end_ms) summarizing the overall edit.
+6. Use ONLY ms values from the data above — never invent values.
+7. You MUST include at least one decision. If there are fillers or pauses listed above, each one MUST appear as a decision.
 
 Call the submit_edit_decisions tool with your decisions.
 
@@ -378,33 +379,17 @@ def _extract_room_tone(audio, duration_ms=500):
     return result[:duration_ms]
 
 
-def _snap_to_silence(audio, ms, search_radius_ms=100, window_ms=10):
+def _snap_to_zero_crossing(audio, ms, search_radius_ms=5):
     """
-    Find the point of minimum speech energy within ±search_radius_ms of the
-    given position. This finds where speech naturally fades — much better than
-    cutting at an arbitrary ASR timestamp.
-    After finding the low-energy region, further snaps to the nearest
-    zero-crossing within ±5ms for a click-free cut.
+    Snap to the nearest zero-crossing within ±search_radius_ms.
+    Tiny radius — just eliminates waveform pops, never moves far enough
+    to clip into adjacent words.
     """
-    best_ms = ms
-    min_rms = float('inf')
-    lo = max(0, ms - search_radius_ms)
-    hi = min(len(audio) - window_ms, ms + search_radius_ms)
-    for pos in range(lo, hi, window_ms):
-        chunk = audio[pos:pos + window_ms]
-        rms = chunk.rms
-        dist = abs(pos - ms)
-        # Prefer low energy; break ties by proximity to original position
-        if rms < min_rms or (rms == min_rms and dist < abs(best_ms - ms)):
-            min_rms = rms
-            best_ms = pos
-
-    # Fine-tune: snap to nearest zero-crossing within ±5ms of the energy minimum
     samples = audio.get_array_of_samples()
     sample_rate = audio.frame_rate
     channels = audio.channels
-    center_sample = int(best_ms * sample_rate / 1000) * channels
-    radius_samples = int(5 * sample_rate / 1000) * channels
+    center_sample = int(ms * sample_rate / 1000) * channels
+    radius_samples = int(search_radius_ms * sample_rate / 1000) * channels
     s_lo = max(0, center_sample - radius_samples)
     s_hi = min(len(samples) - channels, center_sample + radius_samples)
     best_idx = center_sample
@@ -430,41 +415,42 @@ def apply_audio_edits(audio_path, cuts_ms, words=None):
     audio = AudioSegment.from_file(audio_path)
     total_ms = len(audio)
 
-    # Build sorted word boundary list for snapping
-    word_starts = sorted(set(w.get('start', 0) for w in (words or [])))
-    word_ends = sorted(set(w.get('end', 0) for w in (words or [])))
+    # Build word intervals for safety checking: [(start, end), ...]
+    word_intervals = [(w.get('start', 0), w.get('end', 0)) for w in (words or []) if w.get('end', 0) > w.get('start', 0)]
 
-    def _snap_cut_start_to_word_edge(ms):
-        """Snap a cut start backward to the nearest word-end so we keep the
-        full previous word. Only snaps if a word end is within 150ms."""
-        import bisect
-        if not word_ends:
-            return ms
-        idx = bisect.bisect_right(word_ends, ms)
-        if idx > 0 and abs(word_ends[idx - 1] - ms) <= 150:
-            return word_ends[idx - 1]
+    def _lands_inside_word(ms):
+        """Check if a timestamp falls inside any word's audio."""
+        for ws, we in word_intervals:
+            if ws < ms < we:
+                return (ws, we)
+        return None
+
+    def _safe_cut_start(ms):
+        """Ensure cut start doesn't land inside a word.
+        If it does, move it backward to that word's start (removing the
+        whole word rather than clipping it)."""
+        hit = _lands_inside_word(ms)
+        if hit:
+            print(f"  Cut start {ms}ms was inside word [{hit[0]}-{hit[1]}], moved to {hit[0]}ms")
+            return hit[0]
         return ms
 
-    def _snap_cut_end_to_word_edge(ms):
-        """Snap a cut end forward to the nearest word-start so we keep the
-        full next word. Only snaps if a word start is within 150ms."""
-        import bisect
-        if not word_starts:
-            return ms
-        idx = bisect.bisect_left(word_starts, ms)
-        if idx < len(word_starts) and abs(word_starts[idx] - ms) <= 150:
-            return word_starts[idx]
+    def _safe_cut_end(ms):
+        """Ensure cut end doesn't land inside a word.
+        If it does, move it forward to that word's end (removing the
+        whole word rather than clipping it)."""
+        hit = _lands_inside_word(ms)
+        if hit:
+            print(f"  Cut end {ms}ms was inside word [{hit[0]}-{hit[1]}], moved to {hit[1]}ms")
+            return hit[1]
         return ms
 
-    # Step 1: Snap to word boundaries first (coarse — prevents clipping words)
+    # Step 1: Clamp and sort cuts
     adjusted = []
     for s, e in cuts_ms:
         s, e = int(s), int(e)
         if e <= s:
             continue
-        if words:
-            s = _snap_cut_start_to_word_edge(s)
-            e = _snap_cut_end_to_word_edge(e)
         adjusted.append((max(0, s), min(total_ms, e)))
 
     # Step 2: Sort, merge overlapping cuts
@@ -476,10 +462,16 @@ def apply_audio_edits(audio_path, cuts_ms, words=None):
         else:
             merged.append([s, e])
 
-    # Step 3: Snap boundaries to silence + zero-crossing (fine — finds natural gaps)
+    # Step 3: Safety check — if a boundary lands mid-word, push it out
+    if word_intervals:
+        for cut in merged:
+            cut[0] = _safe_cut_start(cut[0])
+            cut[1] = _safe_cut_end(cut[1])
+
+    # Step 4: Snap to zero-crossing (±5ms only — prevents pops, can't clip words)
     for cut in merged:
-        cut[0] = _snap_to_silence(audio, cut[0])
-        cut[1] = _snap_to_silence(audio, cut[1])
+        cut[0] = _snap_to_zero_crossing(audio, cut[0])
+        cut[1] = _snap_to_zero_crossing(audio, cut[1])
 
     # Extract room tone from the quietest section of the original audio
     room_tone = _extract_room_tone(audio, duration_ms=500)

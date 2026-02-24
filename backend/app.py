@@ -326,7 +326,7 @@ def _noise_gate(audio, threshold_db=-40, min_silence_ms=100):
     from pydub import AudioSegment
     from pydub.silence import detect_nonsilent
 
-    GATE_FADE_MS = 10  # fade at speech↔silence boundaries to prevent pops
+    GATE_FADE_MS = 20  # fade at speech↔silence boundaries to prevent pops
 
     nonsilent = detect_nonsilent(audio, min_silence_len=min_silence_ms, silence_thresh=threshold_db)
     if not nonsilent:
@@ -355,6 +355,40 @@ def _noise_gate(audio, threshold_db=-40, min_silence_ms=100):
     return result
 
 
+def _snap_to_zero_crossing(audio, ms, search_radius_ms=5):
+    """
+    Search ±search_radius_ms around the given position for the nearest
+    zero-crossing in the waveform. Returns the snapped ms position.
+    Cutting at a zero-crossing eliminates pops from discontinuities.
+    """
+    samples = audio.get_array_of_samples()
+    sample_rate = audio.frame_rate
+    channels = audio.channels
+
+    # Convert ms to sample index (account for interleaved channels)
+    center_sample = int(ms * sample_rate / 1000) * channels
+    radius_samples = int(search_radius_ms * sample_rate / 1000) * channels
+    lo = max(0, center_sample - radius_samples)
+    hi = min(len(samples) - channels, center_sample + radius_samples)
+
+    best_idx = center_sample
+    best_dist = abs(center_sample - center_sample)  # 0
+    best_val = abs(samples[min(center_sample, len(samples) - 1)])
+
+    # Walk through samples (step by channels to stay on frame boundaries)
+    for i in range(lo, hi, channels):
+        val = abs(samples[i])
+        dist = abs(i - center_sample)
+        # Prefer zero (or near-zero) crossings, breaking ties by proximity
+        if val < best_val or (val == best_val and dist < best_dist):
+            best_val = val
+            best_dist = dist
+            best_idx = i
+
+    # Convert back to ms
+    return int(best_idx / channels * 1000 / sample_rate)
+
+
 def apply_audio_edits(audio_path, cuts_ms):
     """
     Remove segments from audio using pydub, apply noise gate, export as WAV.
@@ -366,9 +400,11 @@ def apply_audio_edits(audio_path, cuts_ms):
     audio = AudioSegment.from_file(audio_path)
     total_ms = len(audio)
 
-    # Clamp, sort, and merge overlapping cuts
+    CUT_PAD_MS = 50  # expand each cut boundary to catch breath/noise around fillers
+
+    # Clamp, pad, sort, and merge overlapping cuts
     cuts = sorted(
-        [(max(0, int(s)), min(total_ms, int(e))) for s, e in cuts_ms if e > s],
+        [(max(0, int(s) - CUT_PAD_MS), min(total_ms, int(e) + CUT_PAD_MS)) for s, e in cuts_ms if e > s],
         key=lambda x: x[0]
     )
     merged = []
@@ -378,8 +414,13 @@ def apply_audio_edits(audio_path, cuts_ms):
         else:
             merged.append([s, e])
 
+    # Snap cut boundaries to nearest zero-crossing to eliminate waveform pops
+    for cut in merged:
+        cut[0] = _snap_to_zero_crossing(audio, cut[0])
+        cut[1] = _snap_to_zero_crossing(audio, cut[1])
+
     # Build segments to keep (inverse of cuts)
-    FADE_MS = 20       # fade at each cut boundary — long enough to eliminate pops/clicks
+    FADE_MS = 30       # fade at each cut boundary — long enough to eliminate pops/clicks
     CROSSFADE_MS = 100  # crossfade overlap to blend segments smoothly across cuts
     segments = []
     prev_was_cut = False

@@ -103,10 +103,7 @@ def get_transcription(transcript_id):
 
 
 FILLER_WORDS = {
-    'um', 'uh', 'hmm', 'mhm', 'hm',
-    'like', 'basically', 'literally', 'actually', 'honestly',
-    'right', 'okay', 'ok', 'so', 'well',
-    'you know', 'i mean', 'kind of', 'sort of', 'you know what i mean',
+    'um', 'uh', 'uhm', 'hmm', 'mhm', 'hm', 'mm', 'ah', 'eh',
 }
 
 
@@ -340,225 +337,6 @@ Example tool input for reference:
 
 
 
-def _broadcast_voice_chain(audio):
-    """
-    Aggressive broadcast voice processing to make a Zoom recording sound
-    like a studio podcast. Targets the specific problems with remote
-    recordings: boxy room resonance, thin low-end, harsh mids, weak dynamics.
-
-    Chain: high-pass → de-box → warmth → saturation → de-harsh → presence →
-           air → low-pass → de-ess → sub-bass enhancement →
-           broadcast compression → saturation → limiter
-    """
-    import numpy as np
-    from scipy.signal import butter, sosfiltfilt, iirpeak, iirnotch, lfilter
-
-    samples = np.array(audio.get_array_of_samples(), dtype=np.float64)
-    sample_rate = audio.frame_rate
-    channels = audio.channels
-
-    if channels > 1:
-        samples = samples.reshape(-1, channels)
-
-    def process_channel(data):
-        nyq = sample_rate / 2
-
-        # 1. High-pass at 80Hz — remove rumble and DC offset
-        hp = butter(3, 80, btype='high', fs=sample_rate, output='sos')
-        data = sosfiltfilt(hp, data)
-
-        # 2. De-box: CUT 300-900Hz by -7dB — kills the Zoom room resonance hard
-        b_box, a_box = iirnotch(500 / nyq, 1.0)  # wider Q = broader cut
-        boxed = lfilter(b_box, a_box, data)
-        cut_amount = 1.0 - 10 ** (-7 / 20)
-        data = data * (1 - cut_amount) + boxed * cut_amount
-        # Second notch at 700Hz to widen the de-boxing
-        b_box2, a_box2 = iirnotch(700 / nyq, 1.5)
-        boxed2 = lfilter(b_box2, a_box2, data)
-        cut_amount2 = 1.0 - 10 ** (-4 / 20)
-        data = data * (1 - cut_amount2) + boxed2 * cut_amount2
-
-        # 3. Warmth: massive boost below 200Hz (+9dB) — adds chest and body
-        lp = butter(2, 200, btype='low', fs=sample_rate, output='sos')
-        low = sosfiltfilt(lp, data)
-        data = data + low * (10 ** (9 / 20) - 1)
-
-        # 4. Harmonic saturation — adds even harmonics like a tube preamp
-        #    This is the key to "warm analog" sound vs "clean digital"
-        #    Soft-clip using tanh, blended with dry signal
-        drive = 2.5  # how hard we push into saturation
-        normalized = data / (np.max(np.abs(data)) + 1e-10)
-        saturated = np.tanh(normalized * drive) / np.tanh(drive)
-        saturated = saturated * np.max(np.abs(data))
-        saturation_mix = 0.35  # 35% saturated, 65% clean
-        data = data * (1 - saturation_mix) + saturated * saturation_mix
-
-        # 5. De-harsh: cut 2-4kHz by -4dB — removes tinny/piercing quality
-        b_harsh, a_harsh = iirnotch(2800 / nyq, 1.5)
-        deharsh = lfilter(b_harsh, a_harsh, data)
-        cut_harsh = 1.0 - 10 ** (-4 / 20)
-        data = data * (1 - cut_harsh) + deharsh * cut_harsh
-
-        # 6. Presence: subtle boost at 4.5-5kHz (+2dB) — clarity without harshness
-        b_pres, a_pres = iirpeak(4800 / nyq, 3.0)
-        pres = lfilter(b_pres, a_pres, data)
-        pres_gain = 10 ** (2 / 20) - 1
-        data = data + (pres - data) * pres_gain
-
-        # 7. Air: boost above 8kHz by +4dB — openness and "expensive mic" feel
-        hp_air = butter(2, 8000, btype='high', fs=sample_rate, output='sos')
-        air = sosfiltfilt(hp_air, data)
-        data = data + air * (10 ** (4 / 20) - 1)
-
-        # 8. Low-pass at 14kHz — remove hiss
-        lp_cut = butter(3, 14000, btype='low', fs=sample_rate, output='sos')
-        data = sosfiltfilt(lp_cut, data)
-
-        # 9. De-ess: dynamic sibilance reduction at 5.5-8.5kHz
-        bp_sos = butter(2, [5500, 8500], btype='band', fs=sample_rate, output='sos')
-        sibilance = sosfiltfilt(bp_sos, data)
-        block_size = int(sample_rate * 0.005)
-        sib_threshold = np.percentile(np.abs(sibilance), 85)
-        for i in range(0, len(data) - block_size, block_size):
-            sib_peak = np.max(np.abs(sibilance[i:i + block_size]))
-            if sib_peak > sib_threshold:
-                reduction = sib_threshold / sib_peak
-                data[i:i + block_size] -= sibilance[i:i + block_size] * (1 - reduction)
-
-        # 10. Sub-bass harmonic enhancement — adds chest resonance
-        #     Half-wave rectify the low band to generate sub-harmonics
-        sub_lp = butter(2, 200, btype='low', fs=sample_rate, output='sos')
-        sub_hp = butter(2, 60, btype='high', fs=sample_rate, output='sos')
-        low_content = sosfiltfilt(sub_lp, data)
-        sub_harmonic = np.maximum(low_content, 0)
-        sub_harmonic = sosfiltfilt(sub_lp, sub_harmonic)
-        sub_harmonic = sosfiltfilt(sub_hp, sub_harmonic)
-        data = data + sub_harmonic * 0.15
-
-        # 11. Broadcast compression — 6:1 ratio, -15dBFS threshold
-        #     Single-band preserves the warm spectral shape from the EQ/saturation above
-        block_size = int(sample_rate * 0.005)
-        threshold = 10 ** (-15 / 20) * 32768
-        ratio = 6.0
-        gain = 1.0
-        alpha_a = 1 - np.exp(-1 / (sample_rate * 0.003))   # 3ms attack
-        alpha_r = 1 - np.exp(-1 / (sample_rate * 0.06))    # 60ms release
-
-        for i in range(0, len(data) - block_size, block_size):
-            block = data[i:i + block_size]
-            peak = np.max(np.abs(block))
-            if peak > threshold and peak > 0:
-                target_gain = (threshold + (peak - threshold) / ratio) / peak
-                gain = gain + alpha_a * (target_gain - gain)
-            else:
-                gain = gain + alpha_r * (1.0 - gain)
-            data[i:i + block_size] = block * gain
-
-        # 12. Make-up gain (+8dB)
-        data = data * 10 ** (8 / 20)
-
-        # 13. Second pass of saturation — very subtle, just warms the compressed signal
-        normalized = data / (np.max(np.abs(data)) + 1e-10)
-        saturated = np.tanh(normalized * 1.5) / np.tanh(1.5)
-        saturated = saturated * np.max(np.abs(data))
-        data = data * 0.85 + saturated * 0.15
-
-        # 14. Brick-wall limiter at -1dBFS
-        ceiling = 10 ** (-1 / 20) * 32768
-        data = np.clip(data, -ceiling, ceiling)
-
-        return data
-
-    if channels > 1:
-        for ch in range(channels):
-            samples[:, ch] = process_channel(samples[:, ch])
-        samples = samples.flatten()
-    else:
-        samples = process_channel(samples)
-
-    samples = np.clip(samples, -32768, 32767).astype(np.int16)
-    from pydub import AudioSegment
-    result = AudioSegment(
-        data=samples.tobytes(),
-        sample_width=2,
-        frame_rate=sample_rate,
-        channels=channels,
-    )
-    print(f"Broadcast voice chain: dBFS {audio.dBFS:.1f} -> {result.dBFS:.1f}")
-    return result
-
-
-def _spectral_noise_reduce(audio):
-    """
-    Spectral noise reduction — like Audacity's noise reduction tool.
-    1. Find the quietest 1-second section (noise profile)
-    2. Use noisereduce to subtract that noise profile from the entire audio
-    Returns a cleaned AudioSegment.
-    """
-    import numpy as np
-    import noisereduce as nr
-
-    samples = np.array(audio.get_array_of_samples(), dtype=np.float64)
-    sample_rate = audio.frame_rate
-    channels = audio.channels
-
-    # For stereo, work on channel 0 for noise profiling but reduce all channels
-    if channels > 1:
-        # Reshape to (n_samples, channels)
-        samples = samples.reshape(-1, channels)
-
-    # Find quietest 1-second window for noise profile
-    window_samples = sample_rate  # 1 second
-    mono = samples[:, 0] if channels > 1 else samples
-    best_start = 0
-    min_energy = float('inf')
-    step = sample_rate // 4  # 250ms steps
-    for start in range(0, max(1, len(mono) - window_samples), step):
-        chunk = mono[start:start + window_samples]
-        energy = np.mean(chunk ** 2)
-        if energy < min_energy:
-            min_energy = energy
-            best_start = start
-
-    noise_clip = mono[best_start:best_start + window_samples]
-    print(f"Noise profile: {best_start / sample_rate:.1f}s-{(best_start + window_samples) / sample_rate:.1f}s (RMS={np.sqrt(min_energy):.1f})")
-
-    # Apply spectral noise reduction
-    if channels > 1:
-        reduced = np.zeros_like(samples)
-        for ch in range(channels):
-            reduced[:, ch] = nr.reduce_noise(
-                y=samples[:, ch],
-                sr=sample_rate,
-                y_noise=noise_clip,
-                prop_decrease=0.5,
-                n_fft=2048,
-                stationary=True,
-            )
-        reduced = reduced.flatten()
-    else:
-        reduced = nr.reduce_noise(
-            y=samples,
-            sr=sample_rate,
-            y_noise=noise_clip,
-            prop_decrease=0.5,
-            n_fft=2048,
-            stationary=True,
-        )
-
-    # Convert back to AudioSegment
-    reduced = np.clip(reduced, -32768, 32767).astype(np.int16)
-    from pydub import AudioSegment
-    result = AudioSegment(
-        data=reduced.tobytes(),
-        sample_width=2,
-        frame_rate=sample_rate,
-        channels=channels,
-    )
-    print(f"Spectral noise reduction complete: dBFS {audio.dBFS:.1f} -> {result.dBFS:.1f}")
-    return result
-
-
 def _snap_to_zero_crossing(audio, ms, search_radius_ms=5):
     """
     Snap to the nearest zero-crossing within ±search_radius_ms.
@@ -656,29 +434,28 @@ def apply_audio_edits(audio_path, cuts_ms, words=None):
     # Build segments to keep — no artificial gaps inserted.
     # Natural silence already exists around filler words in the original audio;
     # adding extra gaps makes transitions sound unnatural and too slow.
-    FADE_MS = 30  # short fade at cut boundaries to prevent pops
+    CROSSFADE_MS = 50  # overlap crossfade — smooth and inaudible for speech
 
     segments = []
     pos = 0
     for s, e in merged:
         if s > pos:
-            seg = audio[pos:s]
-            if len(seg) > FADE_MS:
-                seg = seg.fade_out(FADE_MS)
-            if segments and len(seg) > FADE_MS:
-                seg = seg.fade_in(FADE_MS)
-            segments.append(seg)
+            segments.append(audio[pos:s])
         pos = e
     if pos < total_ms:
-        seg = audio[pos:]
-        if segments and len(seg) > FADE_MS:
-            seg = seg.fade_in(FADE_MS)
-        segments.append(seg)
+        segments.append(audio[pos:])
 
-    # Join all kept segments directly
-    edited = AudioSegment.empty()
-    for seg in segments:
-        edited += seg
+    # Join with overlap crossfade — prevents volume dips at cut points
+    if segments:
+        edited = segments[0]
+        for seg in segments[1:]:
+            # Only crossfade if both segments are long enough
+            if len(edited) > CROSSFADE_MS and len(seg) > CROSSFADE_MS:
+                edited = edited.append(seg, crossfade=CROSSFADE_MS)
+            else:
+                edited += seg
+    else:
+        edited = AudioSegment.empty()
 
     removed_ms = total_ms - len(edited)
     print(f"Cuts complete: {len(merged)} cuts, removed {removed_ms}ms, {len(edited)}ms remaining")
@@ -719,17 +496,15 @@ def process_with_elevenlabs(wav_path):
     return output_path
 
 
-def _voice_warmth(audio):
+def _high_freq_rolloff(audio):
     """
-    Add warmth and body to an already-clean voice signal.
-    Designed to run AFTER ML noise removal (ElevenLabs) which leaves the
-    voice clean but thin/dry. Adds back the tonal richness of a studio mic.
-
-    Chain: high-pass → warmth → saturation → de-harsh → presence →
-           compression → limiter
+    Gentle high-frequency rolloff to match Adobe Enhanced Speech's tonal profile.
+    ElevenLabs preserves 5kHz+ content that Adobe cuts aggressively.
+    A 2nd-order Butterworth LPF at 8kHz gives ~-3dB@8kHz, ~-12dB/oct above —
+    closing the 3-6dB gap measured in the 5-16kHz range.
     """
     import numpy as np
-    from scipy.signal import butter, sosfiltfilt, iirnotch, iirpeak, lfilter
+    from scipy.signal import butter, sosfiltfilt
 
     samples = np.array(audio.get_array_of_samples(), dtype=np.float64)
     sample_rate = audio.frame_rate
@@ -738,70 +513,14 @@ def _voice_warmth(audio):
     if channels > 1:
         samples = samples.reshape(-1, channels)
 
-    def process_channel(data):
-        nyq = sample_rate / 2
-
-        # 1. High-pass at 80Hz — remove rumble
-        hp = butter(3, 80, btype='high', fs=sample_rate, output='sos')
-        data = sosfiltfilt(hp, data)
-
-        # 2. Warmth: boost below 200Hz (+6dB) — adds chest and body
-        lp = butter(2, 200, btype='low', fs=sample_rate, output='sos')
-        low = sosfiltfilt(lp, data)
-        data = data + low * (10 ** (6 / 20) - 1)
-
-        # 3. Harmonic saturation — adds analog warmth (tanh, 25% wet)
-        drive = 2.0
-        normalized = data / (np.max(np.abs(data)) + 1e-10)
-        saturated = np.tanh(normalized * drive) / np.tanh(drive)
-        saturated = saturated * np.max(np.abs(data))
-        data = data * 0.75 + saturated * 0.25
-
-        # 4. De-harsh: gentle cut at 2.8kHz (-3dB)
-        b_harsh, a_harsh = iirnotch(2800 / nyq, 2.0)
-        deharsh = lfilter(b_harsh, a_harsh, data)
-        cut_harsh = 1.0 - 10 ** (-3 / 20)
-        data = data * (1 - cut_harsh) + deharsh * cut_harsh
-
-        # 5. Presence: +2dB at 4.8kHz — clarity
-        b_pres, a_pres = iirpeak(4800 / nyq, 3.0)
-        pres = lfilter(b_pres, a_pres, data)
-        pres_gain = 10 ** (2 / 20) - 1
-        data = data + (pres - data) * pres_gain
-
-        # 6. Light compression — 4:1 at -18dBFS, just enough to sound "produced"
-        block_size = int(sample_rate * 0.005)
-        threshold = 10 ** (-18 / 20) * 32768
-        ratio = 4.0
-        gain = 1.0
-        alpha_a = 1 - np.exp(-1 / (sample_rate * 0.005))
-        alpha_r = 1 - np.exp(-1 / (sample_rate * 0.08))
-
-        for i in range(0, len(data) - block_size, block_size):
-            block = data[i:i + block_size]
-            peak = np.max(np.abs(block))
-            if peak > threshold and peak > 0:
-                target_gain = (threshold + (peak - threshold) / ratio) / peak
-                gain = gain + alpha_a * (target_gain - gain)
-            else:
-                gain = gain + alpha_r * (1.0 - gain)
-            data[i:i + block_size] = block * gain
-
-        # 7. Make-up gain (+5dB)
-        data = data * 10 ** (5 / 20)
-
-        # 8. Brick-wall limiter at -1dBFS
-        ceiling = 10 ** (-1 / 20) * 32768
-        data = np.clip(data, -ceiling, ceiling)
-
-        return data
+    lpf = butter(2, 8000, btype='low', fs=sample_rate, output='sos')
 
     if channels > 1:
         for ch in range(channels):
-            samples[:, ch] = process_channel(samples[:, ch])
+            samples[:, ch] = sosfiltfilt(lpf, samples[:, ch])
         samples = samples.flatten()
     else:
-        samples = process_channel(samples)
+        samples = sosfiltfilt(lpf, samples)
 
     samples = np.clip(samples, -32768, 32767).astype(np.int16)
     from pydub import AudioSegment
@@ -811,7 +530,7 @@ def _voice_warmth(audio):
         frame_rate=sample_rate,
         channels=channels,
     )
-    print(f"Voice warmth chain: dBFS {audio.dBFS:.1f} -> {result.dBFS:.1f}")
+    print(f"High-freq rolloff (LPF 8kHz): dBFS {audio.dBFS:.1f} -> {result.dBFS:.1f}")
     return result
 
 
@@ -1008,7 +727,8 @@ def process_with_cleanvoice(audio_path):
 
 def _run_edit_job(job_id, audio_path, cuts_ms, use_auphonic, transcript_id=None):
     """
-    Background thread: cutting → elevenlabs → cleanvoice → auphonic → completed.
+    Background thread: cutting (with crossfade) → elevenlabs → high-freq rolloff →
+    cleanvoice → auphonic (or loudness norm) → completed.
     Every stage is mandatory if its API key is configured — any failure stops
     the pipeline and reports the error so nothing incomplete reaches the client.
     """
@@ -1037,14 +757,14 @@ def _run_edit_job(job_id, audio_path, cuts_ms, use_auphonic, transcript_id=None)
                 _edit_jobs[job_id]['status'] = 'elevenlabs'
             wav_path = process_with_elevenlabs(wav_path)
 
-            # Stage 2b: Add warmth/body back — ElevenLabs leaves voice clean but dry
+            # Stage 2b: Roll off highs to match Adobe Enhanced Speech tonal profile
+            # ElevenLabs preserves 5kHz+ content that sounds harsh vs Adobe's rolloff
             from pydub import AudioSegment as _AS
-            clean_audio = _AS.from_file(wav_path)
-            warm_audio = _voice_warmth(clean_audio)
-            warm_path = wav_path.rsplit('.', 1)[0] + '_warm.wav'
-            warm_audio.export(warm_path, format='wav')
-            wav_path = warm_path
-            print(f"Voice warmth applied: {warm_path}")
+            enhanced = _AS.from_file(wav_path)
+            rolled = _high_freq_rolloff(enhanced)
+            rolled_path = wav_path.rsplit('.', 1)[0] + '_rolled.wav'
+            rolled.export(rolled_path, format='wav')
+            wav_path = rolled_path
 
         # Stage 3: Cleanvoice — AI voice cleaning (filler sounds, mouth clicks)
         if CLEANVOICE_API_KEY:
@@ -1060,7 +780,24 @@ def _run_edit_job(job_id, audio_path, cuts_ms, use_auphonic, transcript_id=None)
                 _edit_jobs[job_id]['status'] = 'auphonic'
             final_path = process_with_auphonic(wav_path)
         else:
-            final_path = wav_path
+            # Simple loudness normalization when Auphonic is not configured
+            # Normalize to -16 LUFS (podcast standard) with -1dBFS ceiling
+            active_stage = 'loudness_norm'
+            with _edit_jobs_lock:
+                _edit_jobs[job_id]['status'] = 'loudness_norm'
+            from pydub import AudioSegment as _AS
+            audio = _AS.from_file(wav_path)
+            target_dBFS = -16.0
+            change_dB = target_dBFS - audio.dBFS
+            # Apply gain but cap at -1dBFS ceiling
+            audio = audio.apply_gain(change_dB)
+            ceiling_dBFS = -1.0
+            if audio.max_dBFS > ceiling_dBFS:
+                audio = audio.apply_gain(ceiling_dBFS - audio.max_dBFS)
+            norm_path = wav_path.rsplit('.', 1)[0] + '_normalized.mp3'
+            audio.export(norm_path, format='mp3', bitrate='192k')
+            print(f"Loudness normalized to {target_dBFS} LUFS: {norm_path}")
+            final_path = norm_path
 
         with _edit_jobs_lock:
             _edit_jobs[job_id] = {

@@ -519,12 +519,19 @@ def process_with_elevenlabs(wav_path):
     return output_path
 
 
-def _high_freq_rolloff(audio):
+def _post_elevenlabs_eq(audio):
     """
-    High-frequency rolloff to match Adobe Enhanced Speech's tonal profile.
-    Spectrogram comparison shows ElevenLabs has +5dB at 2-5kHz and +6dB at
-    10-16kHz vs Adobe. A 3rd-order Butterworth LPF at 5kHz gives:
-      ~-1dB at 3kHz, -3dB at 5kHz, -12dB at 10kHz, -20dB at 16kHz
+    EQ to match Adobe Enhanced Speech tonal profile after ElevenLabs.
+    Measured gaps (level-matched spectrogram comparison):
+      80-200Hz:  AI is -3.9dB (thin — ElevenLabs strips warmth)
+      2-5kHz:    AI is +4.5dB (harsh presence — ElevenLabs boosts clarity)
+      5-10kHz:   matched after previous LPF work
+      10-16kHz:  AI is +6dB (residual air/noise)
+
+    Chain:
+      1. Low-shelf boost +4dB below 150Hz (restore warmth)
+      2. Cut 2-5kHz by -4.5dB (tame harsh presence)
+      3. LPF at 6kHz, 3rd-order (steep rolloff for air/hiss)
     """
     import numpy as np
     from scipy.signal import butter, sosfiltfilt
@@ -536,14 +543,30 @@ def _high_freq_rolloff(audio):
     if channels > 1:
         samples = samples.reshape(-1, channels)
 
-    lpf = butter(3, 5000, btype='low', fs=sample_rate, output='sos')
+    def process_channel(data):
+        # 1. Warmth: boost below 150Hz by +4dB
+        lo = butter(2, 150, btype='low', fs=sample_rate, output='sos')
+        low_band = sosfiltfilt(lo, data)
+        data = data + low_band * (10 ** (4 / 20) - 1)
+
+        # 2. Presence cut: extract 2-5kHz band and subtract to reduce by ~4.5dB
+        bp = butter(2, [2000, 5000], btype='band', fs=sample_rate, output='sos')
+        presence = sosfiltfilt(bp, data)
+        cut = 1.0 - 10 ** (-4.5 / 20)
+        data = data - presence * cut
+
+        # 3. LPF at 6kHz — steep rolloff for remaining air/hiss
+        lpf = butter(3, 6000, btype='low', fs=sample_rate, output='sos')
+        data = sosfiltfilt(lpf, data)
+
+        return data
 
     if channels > 1:
         for ch in range(channels):
-            samples[:, ch] = sosfiltfilt(lpf, samples[:, ch])
+            samples[:, ch] = process_channel(samples[:, ch])
         samples = samples.flatten()
     else:
-        samples = sosfiltfilt(lpf, samples)
+        samples = process_channel(samples)
 
     samples = np.clip(samples, -32768, 32767).astype(np.int16)
     from pydub import AudioSegment
@@ -553,7 +576,7 @@ def _high_freq_rolloff(audio):
         frame_rate=sample_rate,
         channels=channels,
     )
-    print(f"High-freq rolloff (LPF 8kHz): dBFS {audio.dBFS:.1f} -> {result.dBFS:.1f}")
+    print(f"Post-ElevenLabs EQ: dBFS {audio.dBFS:.1f} -> {result.dBFS:.1f}")
     return result
 
 
@@ -780,14 +803,14 @@ def _run_edit_job(job_id, audio_path, cuts_ms, use_auphonic, transcript_id=None)
                 _edit_jobs[job_id]['status'] = 'elevenlabs'
             wav_path = process_with_elevenlabs(wav_path)
 
-            # Stage 2b: Roll off highs to match Adobe Enhanced Speech tonal profile
-            # ElevenLabs preserves 5kHz+ content that sounds harsh vs Adobe's rolloff
+            # Stage 2b: EQ to match Adobe Enhanced Speech tonal profile
+            # Restores warmth, tames harsh presence, rolls off highs
             from pydub import AudioSegment as _AS
             enhanced = _AS.from_file(wav_path)
-            rolled = _high_freq_rolloff(enhanced)
-            rolled_path = wav_path.rsplit('.', 1)[0] + '_rolled.wav'
-            rolled.export(rolled_path, format='wav')
-            wav_path = rolled_path
+            eqd = _post_elevenlabs_eq(enhanced)
+            eq_path = wav_path.rsplit('.', 1)[0] + '_eq.wav'
+            eqd.export(eq_path, format='wav')
+            wav_path = eq_path
 
         # Stage 3: Cleanvoice — AI voice cleaning (filler sounds, mouth clicks)
         if CLEANVOICE_API_KEY:

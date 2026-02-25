@@ -521,10 +521,10 @@ def process_with_elevenlabs(wav_path):
 
 def _high_freq_rolloff(audio):
     """
-    Gentle high-frequency rolloff to match Adobe Enhanced Speech's tonal profile.
-    ElevenLabs preserves 5kHz+ content that Adobe cuts aggressively.
-    A 2nd-order Butterworth LPF at 8kHz gives ~-3dB@8kHz, ~-12dB/oct above —
-    closing the 3-6dB gap measured in the 5-16kHz range.
+    High-frequency rolloff to match Adobe Enhanced Speech's tonal profile.
+    Spectrogram comparison shows ElevenLabs has +5dB at 2-5kHz and +6dB at
+    10-16kHz vs Adobe. A 3rd-order Butterworth LPF at 5kHz gives:
+      ~-1dB at 3kHz, -3dB at 5kHz, -12dB at 10kHz, -20dB at 16kHz
     """
     import numpy as np
     from scipy.signal import butter, sosfiltfilt
@@ -536,7 +536,7 @@ def _high_freq_rolloff(audio):
     if channels > 1:
         samples = samples.reshape(-1, channels)
 
-    lpf = butter(2, 8000, btype='low', fs=sample_rate, output='sos')
+    lpf = butter(3, 5000, btype='low', fs=sample_rate, output='sos')
 
     if channels > 1:
         for ch in range(channels):

@@ -219,7 +219,7 @@ def analyze_transcript_with_claude(transcript_data, requirements, custom_instruc
 
     # --- Pre-detect long pauses ---
     remove_pauses = requirements.get('removeLongPauses', True)
-    pauses = _find_pauses(words, min_ms=1500) if remove_pauses else []
+    pauses = _find_pauses(words, min_ms=2000) if remove_pauses else []
     pause_lines = [
         f'{p["start_ms"]} {p["end_ms"]} {p["duration_ms"]}ms  ("{p["before"]}" → "{p["after"]}")'
         for p in pauses[:100]
@@ -228,7 +228,7 @@ def analyze_transcript_with_claude(transcript_data, requirements, custom_instruc
 
     print(f"Pre-detected {len(fillers)} fillers, {len(pauses)} pauses")
 
-    prompt = f"""You are an expert podcast editor. Review the pre-detected issues and transcript below, then return a final edit decision list with precise millisecond timestamps.
+    prompt = f"""You are an experienced podcast editor. Your task is to clean and polish this podcast episode while keeping a natural, human flow. The goal is clean, confident, and human — NOT over-edited.
 
 UTTERANCE TRANSCRIPT (for context):
 {utt_text}
@@ -236,31 +236,54 @@ UTTERANCE TRANSCRIPT (for context):
 PRE-DETECTED FILLER WORDS (format: start_ms end_ms "word" speaker):
 {filler_text}
 
-PRE-DETECTED PAUSES >1500ms (format: start_ms end_ms duration before→after):
+PRE-DETECTED PAUSES >2s (format: start_ms end_ms duration before→after):
 {pause_text}
 
 CLIENT REQUIREMENTS:
 - Remove filler words: {remove_fillers}
-- Trim long pauses to 800ms: {remove_pauses}
+- Trim long pauses: {remove_pauses}
 - Target length: {requirements.get('targetLength', 'Not specified')}
 
 CUSTOM INSTRUCTIONS:
 {custom_instructions if custom_instructions else "None"}
 
-INSTRUCTIONS:
-1. For EVERY filler word listed above, include a "Remove Filler" decision using the EXACT start_ms and end_ms provided. CRITICAL: Never adjust these timestamps — they are word-level boundaries from the transcription engine. Cutting at different timestamps WILL clip adjacent words.
-2. For EVERY pause listed above, include a "Trim Pause" decision: set start_ms = pause_start_ms + 800, end_ms = pause_end_ms (keeps 800ms of natural pause).
-3. Look for FALSE STARTS and REPEATED PHRASES in the transcript — where a speaker starts a sentence, stops, and restarts. Remove the false start. Use the start_ms of the first word and end_ms of the last word in the false start. These are very common in conversation and sound much cleaner when removed.
-4. Look for REPEATED CONTENT — if the same point is made twice or the speaker says essentially the same thing in two different ways, remove the weaker version. Cut at sentence boundaries using word-level start_ms/end_ms.
-5. All content cuts MUST start at the beginning of a word (use the word's start_ms) and end at the end of a word (use the word's end_ms). NEVER cut mid-word.
-6. Add at least one "Note" decision (no start_ms/end_ms) summarizing the overall edit.
-7. Use ONLY ms values from the data above — never invent values.
-8. You MUST include at least one decision. If there are fillers or pauses listed above, each one MUST appear as a decision.
+EDITING PHILOSOPHY:
+- Preserve personality, rhythm, and emotion. The episode should sound human, not robotic.
+- Avoid abrupt or robotic cuts — edits must sound conversational and smooth.
+- Do NOT over-edit. When in doubt, leave it in.
+
+FILLER WORD RULES:
+- Remove approximately 50% of the filler words listed above — NOT all of them.
+- Keep fillers that serve as natural transitions or thinking pauses.
+- Remove fillers that cluster together or interrupt the flow of a clear thought.
+- Use the EXACT start_ms and end_ms provided. CRITICAL: Never adjust these timestamps — they are word-level boundaries from the transcription engine.
+- Preserve ALL acronyms and industry-specific terms exactly as spoken — they are key terminology, not mistakes.
+
+PAUSE RULES:
+- For pauses listed above, trim so that any pause longer than 2 seconds becomes about 1 second.
+- Set start_ms = pause_start_ms + 1000, end_ms = pause_end_ms (keeps ~1s of natural pause).
+- Do NOT remove short, intentional pauses used for emphasis — only trim the clearly excessive ones.
+
+CONTENT RULES:
+- Look for FALSE STARTS where a speaker starts a sentence, stops, and restarts. Keep the best full version, remove the false start. Only fix stumbles and restarts that reduce clarity — leave minor ones that sound natural.
+- If the same point is made twice in nearly identical ways, remove the weaker version. Cut at sentence boundaries.
+- Do NOT rewrite or paraphrase content. Do NOT change the meaning or tone of the speaker.
+- All content cuts MUST start at the beginning of a word (use the word's start_ms) and end at the end of a word (use the word's end_ms). NEVER cut mid-word.
+
+STRUCTURAL RULES:
+- If there is pre-interview chat before the official episode begins, mark it for removal.
+- If there is post-interview chat after the episode has clearly concluded, mark it for removal.
+- Preserve the full interview content itself.
+
+OUTPUT RULES:
+- Add at least one "Note" decision (no start_ms/end_ms) summarizing the overall edit.
+- Use ONLY ms values from the data above — never invent values.
+- You MUST include at least one decision.
 
 Call the submit_edit_decisions tool with your decisions.
 
 Example tool input for reference:
-{{"decisions": [{{"type": "Remove Filler", "description": "Remove 'um'", "start_ms": 12680, "end_ms": 12900, "confidence": 95, "rationale": "Filler word"}}, {{"type": "Trim Pause", "description": "Trim 2500ms pause to 800ms", "start_ms": 15800, "end_ms": 17500, "confidence": 90, "rationale": "Excessive pause"}}, {{"type": "Note", "description": "Clean episode overall", "confidence": 100, "rationale": "Summary"}}]}}"""
+{{"decisions": [{{"type": "Remove Filler", "description": "Remove 'um'", "start_ms": 12680, "end_ms": 12900, "confidence": 95, "rationale": "Filler word — interrupts flow"}}, {{"type": "Trim Pause", "description": "Trim 3200ms pause to ~1s", "start_ms": 15000, "end_ms": 17200, "confidence": 90, "rationale": "Excessive pause"}}, {{"type": "Content Cut", "description": "Remove false start", "start_ms": 22000, "end_ms": 23500, "confidence": 85, "rationale": "Speaker restarts sentence more clearly"}}, {{"type": "Note", "description": "Light edit — preserved natural conversational flow", "confidence": 100, "rationale": "Summary"}}]}}"""
 
     # Use tool_use to force structured JSON output — no text parsing needed.
     tools = [{

@@ -5,6 +5,3 @@ requests>=2.31.0
 gunicorn==21.2.0
 python-dotenv==1.0.0
 pydub==0.25.1
-noisereduce>=3.0.0
-numpy>=1.24.0
-scipy>=1.10.0

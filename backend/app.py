@@ -29,6 +29,7 @@ CLAUDE_API_KEY = os.environ.get('CLAUDE_API_KEY')
 AUPHONIC_API_KEY = os.environ.get('AUPHONIC_API_KEY')    # Bearer token from auphonic.com/accounts/api-access/
 CLEANVOICE_API_KEY = os.environ.get('CLEANVOICE_API_KEY')  # API key from cleanvoice.ai/dashboard
 ELEVENLABS_API_KEY = os.environ.get('ELEVENLABS_API_KEY')    # API key from elevenlabs.io/developers
+AI_COUSTICS_API_KEY = os.environ.get('AI_COUSTICS_API_KEY')  # API key from developers.ai-coustics.io
 
 if not ASSEMBLYAI_API_KEY or not CLAUDE_API_KEY:
     print("WARNING: API keys not set. Please set ASSEMBLYAI_API_KEY and CLAUDE_API_KEY environment variables")
@@ -519,144 +520,80 @@ def process_with_elevenlabs(wav_path):
     return output_path
 
 
-def _studio_polish(audio):
+def process_with_aicoustics(wav_path):
     """
-    Post-ElevenLabs restoration. No frequency-domain EQ — just time-domain
-    processing that measured well on v6:
-      1. Subtle saturation (THD 0.6% → 19.8%, target ~45%)
-      2. Gentle expansion (restore dynamics ElevenLabs flattened)
-      3. Transient smoothing (14ms → 20ms attack, matched manual)
+    Send audio to ai|coustics for ML-based speech enhancement.
+    Uses Lark 2 (reconstructive model) — rebuilds audio to studio quality.
+    Handles: dereverb, noise removal, voice enhancement, loudness normalization.
+    Replaces: ElevenLabs + Auphonic + all custom DSP.
     """
-    import numpy as np
-    from scipy.signal import butter, sosfiltfilt, lfilter
+    file_size = os.path.getsize(wav_path)
+    print(f"ai|coustics: uploading {file_size // 1024 // 1024}MB for Lark 2 enhancement")
 
-    samples = np.array(audio.get_array_of_samples(), dtype=np.float64)
-    sample_rate = audio.frame_rate
-    channels = audio.channels
-    peak = np.max(np.abs(samples)) or 1.0
-    samples = samples / peak
+    headers = {'X-API-Key': AI_COUSTICS_API_KEY}
 
-    if channels > 1:
-        samples = samples.reshape(-1, channels)
+    enhancement_params = json.dumps({
+        'enhancement_model': 'LARK_V2',
+        'enhancement_level': 80,    # 0-100, 80 = aggressive but natural
+        'loudness_target': -16,     # LUFS podcast standard
+        'true_peak': -1,            # dBTP ceiling
+        'transcode': 'WAV',
+    })
 
-    def _rolling_rms(data, window_samples):
-        n = len(data)
-        w = min(window_samples, n)
-        sq = data ** 2
-        cs = np.concatenate(([0.0], np.cumsum(sq)))
-        half = w // 2
-        lo = np.clip(np.arange(n) - half, 0, n)
-        hi = np.clip(np.arange(n) - half + w, 0, n)
-        counts = np.maximum(hi - lo, 1)
-        return np.sqrt((cs[hi] - cs[lo]) / counts)
+    with open(wav_path, 'rb') as f:
+        resp = requests.post(
+            'https://api.ai-coustics.io/v2/medias',
+            headers=headers,
+            files={'file': (os.path.basename(wav_path), f, 'application/octet-stream')},
+            data={'media_enhancement': enhancement_params},
+            timeout=120,
+        )
 
-    def process_channel(data):
-        n = len(data)
+    if resp.status_code not in (200, 201):
+        raise Exception(f"ai|coustics upload failed: {resp.status_code} {resp.text[:300]}")
 
-        # 1. SATURATION — adds harmonic richness ElevenLabs strips
-        drive = 1.5
-        data = np.tanh(data * drive) / np.tanh(drive)
+    media_uid = resp.json().get('uid')
+    if not media_uid:
+        raise Exception(f"No uid in ai|coustics response: {resp.text[:300]}")
+    print(f"ai|coustics: enhancement started, uid={media_uid}")
 
-        # 2. EXPANSION — restore natural volume variation
-        env_samples = max(1, int(sample_rate * 50 / 1000))
-        envelope = _rolling_rms(data, env_samples)
-        exp_threshold = 10 ** (-35 / 20)
-        below_mask = envelope < exp_threshold
-        gain = np.ones(n)
-        safe_env = np.maximum(envelope[below_mask], 1e-10)
-        db_below = 20 * np.log10(safe_env / exp_threshold)
-        gain[below_mask] = 10 ** (db_below * 0.3 / 20)
-        smooth_lpf = butter(1, 20, btype='low', fs=sample_rate, output='sos')
-        gain = np.clip(sosfiltfilt(smooth_lpf, gain), 0.15, 1.0)
-        data = data * gain
+    # Poll for completion (max 15 minutes)
+    deadline = time.time() + 900
+    while time.time() < deadline:
+        time.sleep(5)
+        status_resp = requests.get(
+            f'https://api.ai-coustics.io/v2/medias/{media_uid}/metadata',
+            headers=headers,
+            timeout=30,
+        )
+        if status_resp.status_code != 200:
+            raise Exception(f"ai|coustics status check failed: {status_resp.status_code}")
+        status_data = status_resp.json()
+        enhancement_status = status_data.get('enhancement_status', '')
+        print(f"ai|coustics: status = {enhancement_status}")
 
-        # 3. TRANSIENT SMOOTHING — natural attack timing
-        attack_tc = sample_rate * 8 / 1000
-        alpha = 1.0 / max(attack_tc, 1.0)
-        abs_data = np.abs(data)
-        smoothed_env = lfilter([alpha], [1, -(1 - alpha)], abs_data)
-        safe_abs = np.maximum(abs_data, 1e-10)
-        data = data * np.minimum(smoothed_env / safe_abs, 1.0)
+        if enhancement_status == 'COMPLETED':
+            # Download enhanced file
+            dl = requests.get(
+                f'https://api.ai-coustics.io/v2/medias/{media_uid}/file',
+                headers=headers,
+                params={'step': 'ENHANCED'},
+                timeout=300,
+            )
+            if dl.status_code != 200:
+                raise Exception(f"ai|coustics download failed: {dl.status_code}")
 
-        return data
+            output_path = wav_path.rsplit('.', 1)[0] + '_aicoustics.wav'
+            with open(output_path, 'wb') as out:
+                out.write(dl.content)
+            print(f"ai|coustics: enhanced audio saved: {output_path} ({len(dl.content) // 1024}KB)")
+            return output_path
 
-    if channels > 1:
-        for ch in range(channels):
-            samples[:, ch] = process_channel(samples[:, ch])
-        samples = samples.flatten()
-    else:
-        samples = process_channel(samples)
+        if enhancement_status in ('FAILED', 'ERROR'):
+            error_msg = status_data.get('error', 'Unknown error')
+            raise Exception(f"ai|coustics enhancement failed: {error_msg}")
 
-    samples = np.clip(samples * peak, -32768, 32767).astype(np.int16)
-    from pydub import AudioSegment
-    result = AudioSegment(
-        data=samples.tobytes(), sample_width=2,
-        frame_rate=sample_rate, channels=channels,
-    )
-    print(f"Studio polish: saturation + expansion + transients (no EQ)")
-    print(f"  dBFS {audio.dBFS:.1f} -> {result.dBFS:.1f}")
-    return result
-
-
-def _add_room_tone(audio):
-    """
-    Add subtle shaped noise floor to fill ElevenLabs' digital silence.
-    Must run as the LAST step — after Cleanvoice/Auphonic which would strip it.
-    Target: ~-78dBFS noise floor (manual reference is -83dBFS).
-    Gated so noise only fills quiet gaps, not on top of speech.
-    """
-    import numpy as np
-    from scipy.signal import butter, sosfiltfilt
-
-    samples = np.array(audio.get_array_of_samples(), dtype=np.float64)
-    sample_rate = audio.frame_rate
-    channels = audio.channels
-
-    if channels > 1:
-        samples = samples.reshape(-1, channels)
-
-    def process_channel(data):
-        n = len(data)
-        # Generate brown-ish noise shaped like room tone
-        noise = np.random.randn(n)
-        room_lpf = butter(2, 500, btype='low', fs=sample_rate, output='sos')
-        noise = sosfiltfilt(room_lpf, noise)
-        # Normalize and set level to -72dBFS (slightly louder to survive MP3 encoding)
-        noise_rms = np.sqrt(np.mean(noise ** 2)) or 1.0
-        target_rms = 10 ** (-72 / 20) * 32768.0  # in int16 scale
-        noise = noise / noise_rms * target_rms
-
-        # Gate: only add noise where signal is quiet (below -35dBFS)
-        window_samples = max(1, int(sample_rate * 30 / 1000))
-        sq = data ** 2
-        cs = np.concatenate(([0.0], np.cumsum(sq)))
-        half = window_samples // 2
-        lo_idx = np.clip(np.arange(n) - half, 0, n)
-        hi_idx = np.clip(np.arange(n) - half + window_samples, 0, n)
-        counts = np.maximum(hi_idx - lo_idx, 1)
-        local_rms = np.sqrt((cs[hi_idx] - cs[lo_idx]) / counts)
-
-        gate_lo = 10 ** (-50 / 20) * 32768.0  # quiet — full noise
-        gate_hi = 10 ** (-35 / 20) * 32768.0  # speech — no noise
-        gate = np.clip((gate_hi - local_rms) / (gate_hi - gate_lo + 1e-10), 0, 1)
-        data = data + noise * gate
-        return data
-
-    if channels > 1:
-        for ch in range(channels):
-            samples[:, ch] = process_channel(samples[:, ch])
-        samples = samples.flatten()
-    else:
-        samples = process_channel(samples)
-
-    samples = np.clip(samples, -32768, 32767).astype(np.int16)
-    from pydub import AudioSegment
-    result = AudioSegment(
-        data=samples.tobytes(), sample_width=2,
-        frame_rate=sample_rate, channels=channels,
-    )
-    print(f"Room tone added: dBFS {audio.dBFS:.1f} -> {result.dBFS:.1f}")
-    return result
+    raise Exception("ai|coustics timed out after 15 minutes")
 
 
 def process_with_auphonic(wav_path):
@@ -852,10 +789,16 @@ def process_with_cleanvoice(audio_path):
 
 def _run_edit_job(job_id, audio_path, cuts_ms, use_auphonic, transcript_id=None):
     """
-    Background thread: cutting (with crossfade) → elevenlabs → high-freq rolloff →
-    cleanvoice → auphonic (or loudness norm) → completed.
-    Every stage is mandatory if its API key is configured — any failure stops
-    the pipeline and reports the error so nothing incomplete reaches the client.
+    Background thread for audio editing pipeline.
+
+    Pipeline (ai|coustics available):
+      cuts → ai|coustics Lark 2 (dereverb + enhance + loudness) → Cleanvoice → done
+
+    Fallback pipeline (ElevenLabs only):
+      cuts → ElevenLabs → Cleanvoice → Auphonic/loudness norm → done
+
+    Minimal pipeline (no enhancement keys):
+      cuts → Cleanvoice → Auphonic/loudness norm → done
     """
     active_stage = 'init'
     try:
@@ -875,31 +818,37 @@ def _run_edit_job(job_id, audio_path, cuts_ms, use_auphonic, transcript_id=None)
             _edit_jobs[job_id]['status'] = 'cutting'
         wav_path = apply_audio_edits(audio_path, cuts_ms, words=words)
 
-        # Stage 2: ElevenLabs Voice Isolator — ML-based noise removal, speech isolation
-        if ELEVENLABS_API_KEY:
+        # Stage 2: Speech enhancement — ai|coustics preferred, ElevenLabs fallback
+        used_aicoustics = False
+        if AI_COUSTICS_API_KEY:
+            active_stage = 'enhancing'
+            with _edit_jobs_lock:
+                _edit_jobs[job_id]['status'] = 'enhancing'
+            wav_path = process_with_aicoustics(wav_path)
+            used_aicoustics = True
+        elif ELEVENLABS_API_KEY:
             active_stage = 'elevenlabs'
             with _edit_jobs_lock:
                 _edit_jobs[job_id]['status'] = 'elevenlabs'
             wav_path = process_with_elevenlabs(wav_path)
 
-            # No custom DSP — let the ML processors handle audio quality
-
-        # Stage 3: Cleanvoice — AI voice cleaning (filler sounds, mouth clicks)
+        # Stage 3: Cleanvoice — AI voice cleaning (mouth sounds, breathing)
         if CLEANVOICE_API_KEY:
             active_stage = 'cleanvoice'
             with _edit_jobs_lock:
                 _edit_jobs[job_id]['status'] = 'cleanvoice'
             wav_path = process_with_cleanvoice(wav_path)
 
-        # Stage 4: Auphonic — loudness normalisation + final mastering
-        if use_auphonic and AUPHONIC_API_KEY:
+        # Stage 4: Loudness normalization
+        # ai|coustics already handles loudness (-16 LUFS) — skip if used
+        if used_aicoustics:
+            final_path = wav_path
+        elif use_auphonic and AUPHONIC_API_KEY:
             active_stage = 'auphonic'
             with _edit_jobs_lock:
                 _edit_jobs[job_id]['status'] = 'auphonic'
             final_path = process_with_auphonic(wav_path)
         else:
-            # Simple loudness normalization when Auphonic is not configured
-            # Normalize to -16 LUFS (podcast standard) with -1dBFS ceiling
             active_stage = 'loudness_norm'
             with _edit_jobs_lock:
                 _edit_jobs[job_id]['status'] = 'loudness_norm'
@@ -907,7 +856,6 @@ def _run_edit_job(job_id, audio_path, cuts_ms, use_auphonic, transcript_id=None)
             audio = _AS.from_file(wav_path)
             target_dBFS = -16.0
             change_dB = target_dBFS - audio.dBFS
-            # Apply gain but cap at -1dBFS ceiling
             audio = audio.apply_gain(change_dB)
             ceiling_dBFS = -1.0
             if audio.max_dBFS > ceiling_dBFS:
@@ -917,16 +865,13 @@ def _run_edit_job(job_id, audio_path, cuts_ms, use_auphonic, transcript_id=None)
             print(f"Loudness normalized to {target_dBFS} LUFS: {norm_path}")
             final_path = norm_path
 
-        # Final stage: add room tone AFTER all processing
-        # Must be last — Cleanvoice/Auphonic would strip it if applied earlier
-        if ELEVENLABS_API_KEY:
-            active_stage = 'room_tone'
+        # Final: export as MP3 if not already
+        if not final_path.endswith('.mp3'):
             from pydub import AudioSegment as _AS
-            final_audio = _AS.from_file(final_path)
-            final_audio = _add_room_tone(final_audio)
-            room_path = final_path.rsplit('.', 1)[0] + '_final.mp3'
-            final_audio.export(room_path, format='mp3', bitrate='192k')
-            final_path = room_path
+            audio = _AS.from_file(final_path)
+            mp3_path = final_path.rsplit('.', 1)[0] + '_final.mp3'
+            audio.export(mp3_path, format='mp3', bitrate='192k')
+            final_path = mp3_path
 
         with _edit_jobs_lock:
             _edit_jobs[job_id] = {
@@ -1313,6 +1258,8 @@ def status():
         "status": "online",
         "assemblyai_configured": bool(ASSEMBLYAI_API_KEY),
         "claude_configured": bool(CLAUDE_API_KEY),
+        "aicoustics_configured": bool(AI_COUSTICS_API_KEY),
+        "elevenlabs_configured": bool(ELEVENLABS_API_KEY),
         "cleanvoice_configured": bool(CLEANVOICE_API_KEY),
         "auphonic_configured": bool(AUPHONIC_API_KEY),
     })

@@ -717,9 +717,12 @@ def _run_edit_job(job_id, audio_path, cuts_ms, transcript_id=None):
             _edit_jobs[job_id]['status'] = 'finalizing'
         wav_path = _add_room_tone(wav_path)
 
-        # Export as MP3
+        # De-tinnify: gentle rolloff above 14kHz to tame enhancement harshness
         from pydub import AudioSegment as _AS
         audio = _AS.from_file(wav_path)
+        audio = audio.low_pass_filter(14000)
+
+        # Export as MP3
         mp3_path = wav_path.rsplit('.', 1)[0] + '_final.mp3'
         audio.export(mp3_path, format='mp3', bitrate='192k')
         final_path = mp3_path

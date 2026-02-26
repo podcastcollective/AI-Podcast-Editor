@@ -552,19 +552,21 @@ def _post_elevenlabs_eq(audio):
         low_band = sosfiltfilt(lo, data)
         data = data + low_band * (10 ** (2 / 20) - 1)
 
-        # 2. Low-mid body: boost 500-1kHz by +3dB (fills measured -4.6dB deficit)
+        # 2. Low-mid body: boost 500-1kHz by +3dB
         bp_mid = butter(2, [500, 1000], btype='band', fs=sample_rate, output='sos')
         mid_band = sosfiltfilt(bp_mid, data)
         data = data + mid_band * (10 ** (3 / 20) - 1)
 
-        # 3. Presence cut: extract 2-6kHz and reduce by -8dB
+        # 3. Presence cut: extract 2-6kHz and reduce by -4dB
+        #    (was -8dB — too aggressive, caused muffled sound)
         bp = butter(2, [2000, 6000], btype='band', fs=sample_rate, output='sos')
         presence = sosfiltfilt(bp, data)
-        cut = 1.0 - 10 ** (-8 / 20)
+        cut = 1.0 - 10 ** (-4 / 20)
         data = data - presence * cut
 
-        # 4. LPF at 4.5kHz, 4th-order — steep rolloff to kill air excess
-        lpf = butter(4, 4500, btype='low', fs=sample_rate, output='sos')
+        # 4. Gentle LPF at 8kHz, 2nd-order — just tames air/hiss
+        #    (was 4.5kHz 4th-order — way too aggressive, killed clarity)
+        lpf = butter(2, 8000, btype='low', fs=sample_rate, output='sos')
         data = sosfiltfilt(lpf, data)
 
         return data

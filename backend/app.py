@@ -522,17 +522,19 @@ def process_with_elevenlabs(wav_path):
 def _post_elevenlabs_eq(audio):
     """
     EQ to match Adobe Enhanced Speech tonal profile after ElevenLabs.
-    Measured gaps (level-matched spectrogram, v4 iteration):
-      80-200Hz:  -2.2dB (still thin)
-      200-500Hz: +0.7dB (matched)
-      2-3.5kHz:  +1.8dB (improved)
-      3.5-5kHz:  +3.1dB (still harsh — main remaining problem)
-      8-16kHz:   +6.1dB (noise floor)
+    Measured gaps (v6 iteration, post-restore):
+      Sub-bass 20-80Hz:  +7.7dB (over-boosted — reduce low shelf)
+      Warmth 80-200Hz:   -0.7dB (matched)
+      Low-mid 500-1kHz:  -4.6dB (deficit — needs boost)
+      Presence 2-3.5kHz: +5.6dB (still harsh)
+      Upper pres 3.5-5k: +7.7dB (still harsh)
+      Air 8-16kHz:       +13.1dB (LPF not steep enough)
 
     Chain:
-      1. Low-shelf boost +5dB below 200Hz (restore warmth + richness)
-      2. Cut 2-6kHz by -5dB (tame harsh presence across full range)
-      3. LPF at 5.5kHz, 3rd-order (steep rolloff, no gap after presence cut)
+      1. Low-shelf boost +2dB below 200Hz (subtle warmth, reduced from +5)
+      2. Low-mid boost +3dB at 500-1kHz (restore body)
+      3. Cut 2-6kHz by -8dB (stronger presence taming)
+      4. LPF at 4.5kHz, 4th-order (steep rolloff for air)
     """
     import numpy as np
     from scipy.signal import butter, sosfiltfilt
@@ -545,20 +547,24 @@ def _post_elevenlabs_eq(audio):
         samples = samples.reshape(-1, channels)
 
     def process_channel(data):
-        # 1. Warmth: boost below 200Hz by +5dB (chest, body, richness)
+        # 1. Warmth: subtle boost below 200Hz by +2dB
         lo = butter(2, 200, btype='low', fs=sample_rate, output='sos')
         low_band = sosfiltfilt(lo, data)
-        data = data + low_band * (10 ** (5 / 20) - 1)
+        data = data + low_band * (10 ** (2 / 20) - 1)
 
-        # 2. Presence cut: extract 2-6kHz and reduce by -5dB
-        #    Wider than before to catch the 3.5-5kHz upper presence excess
+        # 2. Low-mid body: boost 500-1kHz by +3dB (fills measured -4.6dB deficit)
+        bp_mid = butter(2, [500, 1000], btype='band', fs=sample_rate, output='sos')
+        mid_band = sosfiltfilt(bp_mid, data)
+        data = data + mid_band * (10 ** (3 / 20) - 1)
+
+        # 3. Presence cut: extract 2-6kHz and reduce by -8dB
         bp = butter(2, [2000, 6000], btype='band', fs=sample_rate, output='sos')
         presence = sosfiltfilt(bp, data)
-        cut = 1.0 - 10 ** (-5 / 20)
+        cut = 1.0 - 10 ** (-8 / 20)
         data = data - presence * cut
 
-        # 3. LPF at 5.5kHz — no gap between presence cut and LPF
-        lpf = butter(3, 5500, btype='low', fs=sample_rate, output='sos')
+        # 4. LPF at 4.5kHz, 4th-order — steep rolloff to kill air excess
+        lpf = butter(4, 4500, btype='low', fs=sample_rate, output='sos')
         data = sosfiltfilt(lpf, data)
 
         return data
@@ -585,29 +591,19 @@ def _post_elevenlabs_eq(audio):
 def _post_elevenlabs_restore(audio):
     """
     Restore natural audio characteristics that ElevenLabs strips out.
-    Addresses four measured deficits vs manually-edited reference:
+    Runs BEFORE Cleanvoice/Auphonic (which would strip room tone).
 
-    1. Room tone: AI has -200dBFS digital silence vs Manual -83dBFS natural noise floor.
-       Adds shaped noise floor so gaps between words don't sound dead/digital.
-
-    2. Harmonics: AI THD 0.6% vs Manual 70.2%. ElevenLabs strips natural voice harmonics.
-       Adds mild soft-clip saturation to restore richness without distortion.
-
-    3. Dynamics: AI median RMS -19.4 vs Manual -28.1 dBFS. AI is over-compressed.
-       Applies gentle downward expansion to restore natural volume variation.
-
-    4. Transients: AI 14.3ms vs Manual 19.3ms median attack, 50% more onsets.
-       Smooths attack transients with envelope follower to reduce aggressive quality.
+    1. Harmonics: tanh soft-clip saturation restores natural voice richness
+    2. Dynamics: downward expansion restores natural volume variation
+    3. Transients: envelope follower smooths aggressive attack onsets
     """
     import numpy as np
-    from scipy.signal import butter, sosfiltfilt
+    from scipy.signal import butter, sosfiltfilt, lfilter
 
     samples = np.array(audio.get_array_of_samples(), dtype=np.float64)
     sample_rate = audio.frame_rate
     channels = audio.channels
     peak = np.max(np.abs(samples)) or 1.0
-
-    # Normalize to [-1, 1] for processing
     samples = samples / peak
 
     if channels > 1:
@@ -619,44 +615,20 @@ def _post_elevenlabs_restore(audio):
         w = min(window_samples, n)
         sq = data ** 2
         cs = np.concatenate(([0.0], np.cumsum(sq)))
-        # Centered rolling mean using cumsum — fast vectorized
         half = w // 2
         lo = np.clip(np.arange(n) - half, 0, n)
         hi = np.clip(np.arange(n) - half + w, 0, n)
-        counts = hi - lo
-        counts = np.maximum(counts, 1)
-        rms = np.sqrt((cs[hi] - cs[lo]) / counts)
-        return rms
+        counts = np.maximum(hi - lo, 1)
+        return np.sqrt((cs[hi] - cs[lo]) / counts)
 
     def process_channel(data):
         n = len(data)
 
-        # ----------------------------------------------------------------
-        # 1. ROOM TONE — add shaped noise floor at ~-78dBFS
-        # ----------------------------------------------------------------
-        noise = np.random.randn(n)
-        room_lpf = butter(2, 500, btype='low', fs=sample_rate, output='sos')
-        noise = sosfiltfilt(room_lpf, noise)
-        noise_rms = np.sqrt(np.mean(noise ** 2)) or 1.0
-        target_noise_rms = 10 ** (-78 / 20)
-        noise = noise / noise_rms * target_noise_rms
-        # Gate: only add noise where signal is quiet
-        window_samples = max(1, int(sample_rate * 20 / 1000))
-        local_rms = _rolling_rms(data, window_samples)
-        gate_lo = 10 ** (-50 / 20)
-        gate_hi = 10 ** (-30 / 20)
-        gate = np.clip((gate_hi - local_rms) / (gate_hi - gate_lo), 0, 1)
-        data = data + noise * gate
-
-        # ----------------------------------------------------------------
-        # 2. HARMONIC SATURATION — soft-clip waveshaper
-        # ----------------------------------------------------------------
+        # 1. HARMONIC SATURATION — soft-clip waveshaper
         drive = 1.5
         data = np.tanh(data * drive) / np.tanh(drive)
 
-        # ----------------------------------------------------------------
-        # 3. DYNAMICS EXPANSION — restore natural volume variation
-        # ----------------------------------------------------------------
+        # 2. DYNAMICS EXPANSION — restore natural volume variation
         env_samples = max(1, int(sample_rate * 50 / 1000))
         envelope = _rolling_rms(data, env_samples)
         exp_threshold = 10 ** (-30 / 20)
@@ -665,27 +637,18 @@ def _post_elevenlabs_restore(audio):
         gain = np.ones(n)
         safe_env = np.maximum(envelope[below_mask], 1e-10)
         db_below = 20 * np.log10(safe_env / exp_threshold)
-        gain_reduction_db = db_below * (ratio - 1)
-        gain[below_mask] = 10 ** (gain_reduction_db / 20)
+        gain[below_mask] = 10 ** (db_below * (ratio - 1) / 20)
         smooth_lpf = butter(1, 20, btype='low', fs=sample_rate, output='sos')
-        gain = sosfiltfilt(smooth_lpf, gain)
-        gain = np.clip(gain, 0.1, 1.0)
+        gain = np.clip(sosfiltfilt(smooth_lpf, gain), 0.1, 1.0)
         data = data * gain
 
-        # ----------------------------------------------------------------
-        # 4. TRANSIENT SOFTENER — smooth aggressive attack onsets
-        # ----------------------------------------------------------------
-        # Use a simple one-pole LPF on the absolute signal as envelope follower
-        # Time constant ~8ms smooths fast transients without killing dynamics
-        from scipy.signal import lfilter
-        attack_tc = sample_rate * 8 / 1000  # 8ms in samples
+        # 3. TRANSIENT SOFTENER — smooth aggressive attack onsets
+        attack_tc = sample_rate * 8 / 1000
         alpha = 1.0 / max(attack_tc, 1.0)
         abs_data = np.abs(data)
-        # One-pole IIR: y[n] = alpha * x[n] + (1-alpha) * y[n-1]
         smoothed_env = lfilter([alpha], [1, -(1 - alpha)], abs_data)
         safe_abs = np.maximum(abs_data, 1e-10)
-        trans_gain = np.minimum(smoothed_env / safe_abs, 1.0)
-        data = data * trans_gain
+        data = data * np.minimum(smoothed_env / safe_abs, 1.0)
 
         return data
 
@@ -696,18 +659,75 @@ def _post_elevenlabs_restore(audio):
     else:
         samples = process_channel(samples)
 
-    # Scale back to int16 range
-    samples = samples * peak
+    samples = np.clip(samples * peak, -32768, 32767).astype(np.int16)
+    from pydub import AudioSegment
+    result = AudioSegment(
+        data=samples.tobytes(), sample_width=2,
+        frame_rate=sample_rate, channels=channels,
+    )
+    print(f"Post-ElevenLabs restore: harmonics + dynamics + transients applied")
+    print(f"  dBFS {audio.dBFS:.1f} -> {result.dBFS:.1f}")
+    return result
+
+
+def _add_room_tone(audio):
+    """
+    Add subtle shaped noise floor to fill ElevenLabs' digital silence.
+    Must run as the LAST step — after Cleanvoice/Auphonic which would strip it.
+    Target: ~-78dBFS noise floor (manual reference is -83dBFS).
+    Gated so noise only fills quiet gaps, not on top of speech.
+    """
+    import numpy as np
+    from scipy.signal import butter, sosfiltfilt
+
+    samples = np.array(audio.get_array_of_samples(), dtype=np.float64)
+    sample_rate = audio.frame_rate
+    channels = audio.channels
+
+    if channels > 1:
+        samples = samples.reshape(-1, channels)
+
+    def process_channel(data):
+        n = len(data)
+        # Generate brown-ish noise shaped like room tone
+        noise = np.random.randn(n)
+        room_lpf = butter(2, 500, btype='low', fs=sample_rate, output='sos')
+        noise = sosfiltfilt(room_lpf, noise)
+        # Normalize and set level to -72dBFS (slightly louder to survive MP3 encoding)
+        noise_rms = np.sqrt(np.mean(noise ** 2)) or 1.0
+        target_rms = 10 ** (-72 / 20) * 32768.0  # in int16 scale
+        noise = noise / noise_rms * target_rms
+
+        # Gate: only add noise where signal is quiet (below -35dBFS)
+        window_samples = max(1, int(sample_rate * 30 / 1000))
+        sq = data ** 2
+        cs = np.concatenate(([0.0], np.cumsum(sq)))
+        half = window_samples // 2
+        lo_idx = np.clip(np.arange(n) - half, 0, n)
+        hi_idx = np.clip(np.arange(n) - half + window_samples, 0, n)
+        counts = np.maximum(hi_idx - lo_idx, 1)
+        local_rms = np.sqrt((cs[hi_idx] - cs[lo_idx]) / counts)
+
+        gate_lo = 10 ** (-50 / 20) * 32768.0  # quiet — full noise
+        gate_hi = 10 ** (-35 / 20) * 32768.0  # speech — no noise
+        gate = np.clip((gate_hi - local_rms) / (gate_hi - gate_lo + 1e-10), 0, 1)
+        data = data + noise * gate
+        return data
+
+    if channels > 1:
+        for ch in range(channels):
+            samples[:, ch] = process_channel(samples[:, ch])
+        samples = samples.flatten()
+    else:
+        samples = process_channel(samples)
+
     samples = np.clip(samples, -32768, 32767).astype(np.int16)
     from pydub import AudioSegment
     result = AudioSegment(
-        data=samples.tobytes(),
-        sample_width=2,
-        frame_rate=sample_rate,
-        channels=channels,
+        data=samples.tobytes(), sample_width=2,
+        frame_rate=sample_rate, channels=channels,
     )
-    print(f"Post-ElevenLabs restore: room tone + harmonics + dynamics + transients applied")
-    print(f"  dBFS {audio.dBFS:.1f} -> {result.dBFS:.1f}")
+    print(f"Room tone added: dBFS {audio.dBFS:.1f} -> {result.dBFS:.1f}")
     return result
 
 
@@ -941,7 +961,7 @@ def _run_edit_job(job_id, audio_path, cuts_ms, use_auphonic, transcript_id=None)
             eqd = _post_elevenlabs_eq(enhanced)
 
             # Stage 2c: Restore natural audio characteristics
-            # Adds room tone, harmonics, dynamics expansion, transient smoothing
+            # Harmonics, dynamics expansion, transient smoothing (NOT room tone — added last)
             restored = _post_elevenlabs_restore(eqd)
             eq_path = wav_path.rsplit('.', 1)[0] + '_eq.wav'
             restored.export(eq_path, format='wav')
@@ -979,6 +999,17 @@ def _run_edit_job(job_id, audio_path, cuts_ms, use_auphonic, transcript_id=None)
             audio.export(norm_path, format='mp3', bitrate='192k')
             print(f"Loudness normalized to {target_dBFS} LUFS: {norm_path}")
             final_path = norm_path
+
+        # Final stage: add room tone AFTER all processing
+        # Must be last — Cleanvoice/Auphonic would strip it if applied earlier
+        if ELEVENLABS_API_KEY:
+            active_stage = 'room_tone'
+            from pydub import AudioSegment as _AS
+            final_audio = _AS.from_file(final_path)
+            final_audio = _add_room_tone(final_audio)
+            room_path = final_path.rsplit('.', 1)[0] + '_final.mp3'
+            final_audio.export(room_path, format='mp3', bitrate='192k')
+            final_path = room_path
 
         with _edit_jobs_lock:
             _edit_jobs[job_id] = {

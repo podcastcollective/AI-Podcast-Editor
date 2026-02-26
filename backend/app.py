@@ -441,7 +441,7 @@ def process_with_aicoustics(wav_path):
     headers = {'X-API-Key': AI_COUSTICS_API_KEY}
     enhancement_params = json.dumps({
         'enhancement_model': 'LARK',
-        'enhancement_level': 85,
+        'enhancement_level': 100,
         'loudness_target': -19,
         'true_peak': -1,
         'transcode': 'WAV',

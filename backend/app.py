@@ -882,14 +882,7 @@ def _run_edit_job(job_id, audio_path, cuts_ms, use_auphonic, transcript_id=None)
                 _edit_jobs[job_id]['status'] = 'elevenlabs'
             wav_path = process_with_elevenlabs(wav_path)
 
-            # Stage 2b: Studio polish — professional broadcast mastering chain
-            # HPF → tube warmth → de-esser → expansion → transient shaping → high shelf
-            from pydub import AudioSegment as _AS
-            enhanced = _AS.from_file(wav_path)
-            polished = _studio_polish(enhanced)
-            polish_path = wav_path.rsplit('.', 1)[0] + '_polished.wav'
-            polished.export(polish_path, format='wav')
-            wav_path = polish_path
+            # No custom DSP — let the ML processors handle audio quality
 
         # Stage 3: Cleanvoice — AI voice cleaning (filler sounds, mouth clicks)
         if CLEANVOICE_API_KEY:

@@ -613,29 +613,36 @@ def _post_elevenlabs_restore(audio):
     if channels > 1:
         samples = samples.reshape(-1, channels)
 
+    def _rolling_rms(data, window_samples):
+        """Compute rolling RMS with guaranteed output length == len(data)."""
+        n = len(data)
+        w = min(window_samples, n)
+        sq = data ** 2
+        cs = np.concatenate(([0.0], np.cumsum(sq)))
+        # Centered rolling mean using cumsum — fast vectorized
+        half = w // 2
+        lo = np.clip(np.arange(n) - half, 0, n)
+        hi = np.clip(np.arange(n) - half + w, 0, n)
+        counts = hi - lo
+        counts = np.maximum(counts, 1)
+        rms = np.sqrt((cs[hi] - cs[lo]) / counts)
+        return rms
+
     def process_channel(data):
+        n = len(data)
+
         # ----------------------------------------------------------------
         # 1. ROOM TONE — add shaped noise floor at ~-78dBFS
         # ----------------------------------------------------------------
-        # Generate pink-ish noise (brown noise filtered to match room tone spectrum)
-        noise = np.random.randn(len(data))
-        # Shape: LPF at 500Hz to sound like room tone, not hiss
+        noise = np.random.randn(n)
         room_lpf = butter(2, 500, btype='low', fs=sample_rate, output='sos')
         noise = sosfiltfilt(room_lpf, noise)
-        # Normalize noise, then set level to ~-78dBFS (slightly above manual's -83dBFS)
         noise_rms = np.sqrt(np.mean(noise ** 2)) or 1.0
-        target_noise_rms = 10 ** (-78 / 20)  # ~-78dBFS
+        target_noise_rms = 10 ** (-78 / 20)
         noise = noise / noise_rms * target_noise_rms
-        # Gate: only add noise where signal is quiet (below -40dBFS)
-        # This avoids adding noise on top of speech
-        window_ms = 20
-        window_samples = max(1, int(sample_rate * window_ms / 1000))
-        # Compute local RMS envelope
-        padded = np.pad(data ** 2, (window_samples // 2, window_samples // 2), mode='edge')
-        cumsum = np.cumsum(padded)
-        local_rms = np.sqrt((cumsum[window_samples:] - cumsum[:-window_samples]) / window_samples)
-        local_rms = local_rms[:len(data)]
-        # Smooth gate: full noise where signal < -50dBFS, none where > -30dBFS
+        # Gate: only add noise where signal is quiet
+        window_samples = max(1, int(sample_rate * 20 / 1000))
+        local_rms = _rolling_rms(data, window_samples)
         gate_lo = 10 ** (-50 / 20)
         gate_hi = 10 ** (-30 / 20)
         gate = np.clip((gate_hi - local_rms) / (gate_hi - gate_lo), 0, 1)
@@ -644,35 +651,22 @@ def _post_elevenlabs_restore(audio):
         # ----------------------------------------------------------------
         # 2. HARMONIC SATURATION — soft-clip waveshaper
         # ----------------------------------------------------------------
-        # tanh saturation: drive controls how much harmonics are generated
-        # drive=1.5 gives subtle warmth without audible distortion
         drive = 1.5
-        data = np.tanh(data * drive) / np.tanh(drive)  # normalize so peak stays at 1.0
+        data = np.tanh(data * drive) / np.tanh(drive)
 
         # ----------------------------------------------------------------
         # 3. DYNAMICS EXPANSION — restore natural volume variation
         # ----------------------------------------------------------------
-        # Downward expansion: signals below threshold get pushed further down
-        # This undoes ElevenLabs' over-compression
-        # Use envelope follower for smooth gain changes
-        env_ms = 50
-        env_samples = max(1, int(sample_rate * env_ms / 1000))
-        padded_sq = np.pad(data ** 2, (env_samples // 2, env_samples // 2), mode='edge')
-        cumsum_sq = np.cumsum(padded_sq)
-        envelope = np.sqrt((cumsum_sq[env_samples:] - cumsum_sq[:-env_samples]) / env_samples)
-        envelope = envelope[:len(data)]
-        # Expansion threshold at -30dBFS, ratio 1.5:1
+        env_samples = max(1, int(sample_rate * 50 / 1000))
+        envelope = _rolling_rms(data, env_samples)
         exp_threshold = 10 ** (-30 / 20)
         ratio = 1.5
-        # Below threshold: reduce level by ratio
         below_mask = envelope < exp_threshold
-        gain = np.ones_like(envelope)
+        gain = np.ones(n)
         safe_env = np.maximum(envelope[below_mask], 1e-10)
-        # dB below threshold * (ratio-1) = additional dB reduction
-        db_below = 20 * np.log10(safe_env / exp_threshold)  # negative values
-        gain_reduction_db = db_below * (ratio - 1)  # more negative = more reduction
+        db_below = 20 * np.log10(safe_env / exp_threshold)
+        gain_reduction_db = db_below * (ratio - 1)
         gain[below_mask] = 10 ** (gain_reduction_db / 20)
-        # Smooth the gain to avoid artifacts
         smooth_lpf = butter(1, 20, btype='low', fs=sample_rate, output='sos')
         gain = sosfiltfilt(smooth_lpf, gain)
         gain = np.clip(gain, 0.1, 1.0)
@@ -681,22 +675,14 @@ def _post_elevenlabs_restore(audio):
         # ----------------------------------------------------------------
         # 4. TRANSIENT SOFTENER — smooth aggressive attack onsets
         # ----------------------------------------------------------------
-        # Attack smoothing: when signal rises faster than natural speech,
-        # slow down the rise to match manual edit's 19ms median attack
-        # Use a simple one-pole envelope follower with asymmetric attack/release
-        attack_ms = 8   # slow down attacks (adds ~5ms to match manual's 19ms)
-        release_ms = 50  # fast release to preserve natural decay
-        attack_coeff = np.exp(-1.0 / (sample_rate * attack_ms / 1000))
-        release_coeff = np.exp(-1.0 / (sample_rate * release_ms / 1000))
+        # Use a simple one-pole LPF on the absolute signal as envelope follower
+        # Time constant ~8ms smooths fast transients without killing dynamics
+        from scipy.signal import lfilter
+        attack_tc = sample_rate * 8 / 1000  # 8ms in samples
+        alpha = 1.0 / max(attack_tc, 1.0)
         abs_data = np.abs(data)
-        smoothed_env = np.zeros_like(abs_data)
-        smoothed_env[0] = abs_data[0]
-        for i in range(1, len(abs_data)):
-            if abs_data[i] > smoothed_env[i - 1]:
-                smoothed_env[i] = attack_coeff * smoothed_env[i - 1] + (1 - attack_coeff) * abs_data[i]
-            else:
-                smoothed_env[i] = release_coeff * smoothed_env[i - 1] + (1 - release_coeff) * abs_data[i]
-        # Apply: reduce signal to smoothed envelope where it exceeds it
+        # One-pole IIR: y[n] = alpha * x[n] + (1-alpha) * y[n-1]
+        smoothed_env = lfilter([alpha], [1, -(1 - alpha)], abs_data)
         safe_abs = np.maximum(abs_data, 1e-10)
         trans_gain = np.minimum(smoothed_env / safe_abs, 1.0)
         data = data * trans_gain

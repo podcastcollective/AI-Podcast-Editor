@@ -221,15 +221,15 @@ EDITING PHILOSOPHY:
 - Do NOT over-edit. When in doubt, leave it in.
 
 FILLER WORD RULES:
-- Remove approximately 50% of the filler words listed above — NOT all of them.
-- Keep fillers that serve as natural transitions or thinking pauses.
-- Remove fillers that cluster together or interrupt the flow of a clear thought.
+- Remove approximately 60% of the filler words listed above — NOT all of them.
+- Keep fillers that serve as clear natural transitions between distinct thoughts.
+- Remove fillers that cluster together, interrupt flow, or appear mid-sentence.
 - Use the EXACT start_ms and end_ms provided. CRITICAL: Never adjust these timestamps — they are word-level boundaries from the transcription engine.
 - Preserve ALL acronyms and industry-specific terms exactly as spoken — they are key terminology, not mistakes.
 
 PAUSE RULES:
-- For pauses listed above, trim so that any pause longer than 2 seconds becomes about 1 second.
-- Set start_ms = pause_start_ms + 1000, end_ms = pause_end_ms (keeps ~1s of natural pause).
+- For pauses listed above, trim so that any pause longer than 2 seconds becomes about 0.8 seconds.
+- Set start_ms = pause_start_ms + 800, end_ms = pause_end_ms (keeps ~0.8s of natural pause).
 - Do NOT remove short, intentional pauses used for emphasis — only trim the clearly excessive ones.
 
 CONTENT RULES:
@@ -441,8 +441,8 @@ def process_with_aicoustics(wav_path):
     headers = {'X-API-Key': AI_COUSTICS_API_KEY}
     enhancement_params = json.dumps({
         'enhancement_model': 'LARK_V2',
-        'enhancement_level': 80,
-        'loudness_target': -16,
+        'enhancement_level': 65,
+        'loudness_target': -19,
         'true_peak': -1,
         'transcode': 'WAV',
     })
@@ -602,6 +602,76 @@ def process_with_cleanvoice(audio_path):
 
 
 # ============================================================================
+# ROOM TONE — fill dead silence at cut points
+# ============================================================================
+
+def _add_room_tone(wav_path):
+    """
+    Fill near-silent sections with a low-level room tone derived from the
+    quietest parts of the audio itself. This prevents jarring dead-silence
+    gaps at edit points and matches the natural floor of the manual edit.
+    """
+    from pydub import AudioSegment, silence
+
+    audio = AudioSegment.from_file(wav_path)
+
+    # Extract room tone: find the quietest 500ms+ section
+    quiet_sections = silence.detect_silence(audio, min_silence_len=500, silence_thresh=-50)
+    if not quiet_sections:
+        print("Room tone: no quiet sections found, skipping")
+        return wav_path
+
+    # Use the longest quiet section as our room tone source
+    quiet_sections.sort(key=lambda x: x[1] - x[0], reverse=True)
+    qs, qe = quiet_sections[0]
+    room_sample = audio[qs:qe]
+
+    # Target floor: -82 dBFS (matches manual edit's silence floor)
+    target_dbfs = -82
+    if room_sample.dBFS < -90:
+        # Section is too quiet / digital silence — generate minimal noise
+        # by adjusting gain on whatever ambient content exists
+        room_sample = room_sample + (target_dbfs - room_sample.dBFS) if room_sample.dBFS > -160 else room_sample
+        if room_sample.dBFS < -90:
+            print("Room tone: audio floor is digital silence, generating minimal tone")
+            import struct
+            import random
+            sample_rate = audio.frame_rate
+            channels = audio.channels
+            n_samples = sample_rate  # 1 second of noise
+            # Generate very quiet pink-ish noise at target level
+            raw = struct.pack(
+                f'<{n_samples * channels}h',
+                *[int(random.gauss(0, 1) * 5) for _ in range(n_samples * channels)]
+            )
+            room_sample = AudioSegment(
+                data=raw,
+                sample_width=2,
+                frame_rate=sample_rate,
+                channels=channels,
+            )
+            room_sample = room_sample + (target_dbfs - room_sample.dBFS)
+
+    # Loop room tone to match audio length
+    room_tone = room_sample
+    while len(room_tone) < len(audio):
+        room_tone += room_sample
+    room_tone = room_tone[:len(audio)]
+
+    # Set room tone to target level
+    if room_tone.dBFS > -160:
+        room_tone = room_tone + (target_dbfs - room_tone.dBFS)
+
+    # Overlay: room tone fills in where audio is near-silent
+    result = audio.overlay(room_tone)
+
+    output_path = wav_path.rsplit('.', 1)[0] + '_roomtone.wav'
+    result.export(output_path, format='wav')
+    print(f"Room tone: filled silence floor to ~{target_dbfs} dBFS, saved {output_path}")
+    return output_path
+
+
+# ============================================================================
 # EDIT PIPELINE — background job
 # ============================================================================
 
@@ -640,6 +710,12 @@ def _run_edit_job(job_id, audio_path, cuts_ms, transcript_id=None):
             with _edit_jobs_lock:
                 _edit_jobs[job_id]['status'] = 'cleanvoice'
             wav_path = process_with_cleanvoice(wav_path)
+
+        # Stage 4: Room tone — fill dead silence at cut points
+        active_stage = 'finalizing'
+        with _edit_jobs_lock:
+            _edit_jobs[job_id]['status'] = 'finalizing'
+        wav_path = _add_room_tone(wav_path)
 
         # Export as MP3
         from pydub import AudioSegment as _AS

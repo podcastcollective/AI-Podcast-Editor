@@ -76,6 +76,7 @@
             { key: 'cutting',      label: 'Applying edits' },
             { key: 'enhancing',    label: 'Studio enhancement with ai|coustics' },
             { key: 'cleanvoice',   label: 'Voice cleaning with Cleanvoice AI' },
+            { key: 'finalizing',   label: 'Finalizing audio' },
             { key: 'done',         label: 'Complete' },
         ];
 
@@ -207,6 +208,7 @@
                         if (statusData.status === 'cutting')    setPipelineStage('cutting');
                         if (statusData.status === 'enhancing')  setPipelineStage('enhancing');
                         if (statusData.status === 'cleanvoice') setPipelineStage('cleanvoice');
+                        if (statusData.status === 'finalizing') setPipelineStage('finalizing');
                         if (statusData.status === 'completed')  break;
                         if (!statusRes.ok) {
                             throw { stage: statusData.failed_step || 'cutting', message: statusData.error || 'Audio processing failed' };

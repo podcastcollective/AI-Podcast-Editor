@@ -522,16 +522,17 @@ def process_with_elevenlabs(wav_path):
 def _post_elevenlabs_eq(audio):
     """
     EQ to match Adobe Enhanced Speech tonal profile after ElevenLabs.
-    Measured gaps (level-matched spectrogram comparison):
-      80-200Hz:  AI is -3.9dB (thin — ElevenLabs strips warmth)
-      2-5kHz:    AI is +4.5dB (harsh presence — ElevenLabs boosts clarity)
-      5-10kHz:   matched after previous LPF work
-      10-16kHz:  AI is +6dB (residual air/noise)
+    Measured gaps (level-matched spectrogram, v4 iteration):
+      80-200Hz:  -2.2dB (still thin)
+      200-500Hz: +0.7dB (matched)
+      2-3.5kHz:  +1.8dB (improved)
+      3.5-5kHz:  +3.1dB (still harsh — main remaining problem)
+      8-16kHz:   +6.1dB (noise floor)
 
     Chain:
-      1. Low-shelf boost +4dB below 150Hz (restore warmth)
-      2. Cut 2-5kHz by -4.5dB (tame harsh presence)
-      3. LPF at 6kHz, 3rd-order (steep rolloff for air/hiss)
+      1. Low-shelf boost +5dB below 200Hz (restore warmth + richness)
+      2. Cut 2-6kHz by -5dB (tame harsh presence across full range)
+      3. LPF at 5.5kHz, 3rd-order (steep rolloff, no gap after presence cut)
     """
     import numpy as np
     from scipy.signal import butter, sosfiltfilt
@@ -544,19 +545,20 @@ def _post_elevenlabs_eq(audio):
         samples = samples.reshape(-1, channels)
 
     def process_channel(data):
-        # 1. Warmth: boost below 150Hz by +4dB
-        lo = butter(2, 150, btype='low', fs=sample_rate, output='sos')
+        # 1. Warmth: boost below 200Hz by +5dB (chest, body, richness)
+        lo = butter(2, 200, btype='low', fs=sample_rate, output='sos')
         low_band = sosfiltfilt(lo, data)
-        data = data + low_band * (10 ** (4 / 20) - 1)
+        data = data + low_band * (10 ** (5 / 20) - 1)
 
-        # 2. Presence cut: extract 2-5kHz band and subtract to reduce by ~4.5dB
-        bp = butter(2, [2000, 5000], btype='band', fs=sample_rate, output='sos')
+        # 2. Presence cut: extract 2-6kHz and reduce by -5dB
+        #    Wider than before to catch the 3.5-5kHz upper presence excess
+        bp = butter(2, [2000, 6000], btype='band', fs=sample_rate, output='sos')
         presence = sosfiltfilt(bp, data)
-        cut = 1.0 - 10 ** (-4.5 / 20)
+        cut = 1.0 - 10 ** (-5 / 20)
         data = data - presence * cut
 
-        # 3. LPF at 6kHz — steep rolloff for remaining air/hiss
-        lpf = butter(3, 6000, btype='low', fs=sample_rate, output='sos')
+        # 3. LPF at 5.5kHz — no gap between presence cut and LPF
+        lpf = butter(3, 5500, btype='low', fs=sample_rate, output='sos')
         data = sosfiltfilt(lpf, data)
 
         return data

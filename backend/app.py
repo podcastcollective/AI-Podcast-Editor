@@ -7,7 +7,6 @@ from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 import os
 import json
-import re
 import time
 import threading
 import uuid
@@ -17,25 +16,22 @@ import anthropic
 import requests
 
 app = Flask(__name__)
-
-# CORS: allow all origins without credentials (required for GitHub Pages -> Railway)
 CORS(app)
 
 ALLOWED_EXTENSIONS = {'mp3', 'wav', 'm4a', 'aac', 'ogg'}
 
-# Get API keys from environment variables
+# API keys
 ASSEMBLYAI_API_KEY = os.environ.get('ASSEMBLYAI_API_KEY')
 CLAUDE_API_KEY = os.environ.get('CLAUDE_API_KEY')
-AUPHONIC_API_KEY = os.environ.get('AUPHONIC_API_KEY')    # Bearer token from auphonic.com/accounts/api-access/
-CLEANVOICE_API_KEY = os.environ.get('CLEANVOICE_API_KEY')  # API key from cleanvoice.ai/dashboard
-ELEVENLABS_API_KEY = os.environ.get('ELEVENLABS_API_KEY')    # API key from elevenlabs.io/developers
-AI_COUSTICS_API_KEY = os.environ.get('AI_COUSTICS_API_KEY')  # API key from developers.ai-coustics.io
+AI_COUSTICS_API_KEY = os.environ.get('AI_COUSTICS_API_KEY')   # developers.ai-coustics.io
+CLEANVOICE_API_KEY = os.environ.get('CLEANVOICE_API_KEY')     # cleanvoice.ai/dashboard
 
 if not ASSEMBLYAI_API_KEY or not CLAUDE_API_KEY:
-    print("WARNING: API keys not set. Please set ASSEMBLYAI_API_KEY and CLAUDE_API_KEY environment variables")
+    print("WARNING: ASSEMBLYAI_API_KEY and CLAUDE_API_KEY are required")
+if not AI_COUSTICS_API_KEY:
+    print("WARNING: AI_COUSTICS_API_KEY not set — speech enhancement will fail")
 
-# In-memory job stores (Claude analysis + audio editing).
-# Gunicorn must use threads (not multiple processes) so these dicts are shared.
+# In-memory job stores. Gunicorn must use threads (not processes) so these are shared.
 _jobs: dict = {}
 _jobs_lock = threading.Lock()
 _edit_jobs: dict = {}
@@ -46,62 +42,65 @@ def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
 
+# ============================================================================
+# ASSEMBLYAI — transcription
+# ============================================================================
+
 def stream_bytes_to_assemblyai(data):
     """Upload raw audio bytes to AssemblyAI, return upload URL."""
     print(f"Uploading {len(data)} bytes to AssemblyAI...")
-    headers = {"authorization": ASSEMBLYAI_API_KEY}
-    response = requests.post(
+    resp = requests.post(
         "https://api.assemblyai.com/v2/upload",
-        headers=headers,
-        data=data
+        headers={"authorization": ASSEMBLYAI_API_KEY},
+        data=data,
     )
-    if response.status_code != 200:
-        raise Exception(f"AssemblyAI upload failed: {response.status_code} - {response.text}")
-    upload_url = response.json()["upload_url"]
+    if resp.status_code != 200:
+        raise Exception(f"AssemblyAI upload failed: {resp.status_code} - {resp.text}")
+    upload_url = resp.json()["upload_url"]
     print(f"AssemblyAI upload URL: {upload_url}")
     return upload_url
 
 
 def start_transcription(audio_url):
-    """Submit transcription job to AssemblyAI, return transcript_id immediately."""
+    """Submit transcription job to AssemblyAI, return transcript_id."""
     print("Submitting transcription job...")
-    headers = {
-        "authorization": ASSEMBLYAI_API_KEY,
-        "content-type": "application/json"
-    }
-    config = {
-        "audio_url": audio_url,
-        "speech_models": ["universal-2"],
-        "speaker_labels": True,
-        "punctuate": True,
-        "format_text": True,
-    }
-    response = requests.post(
+    resp = requests.post(
         "https://api.assemblyai.com/v2/transcript",
-        json=config,
-        headers=headers
+        json={
+            "audio_url": audio_url,
+            "speech_models": ["universal-2"],
+            "speaker_labels": True,
+            "punctuate": True,
+            "format_text": True,
+        },
+        headers={
+            "authorization": ASSEMBLYAI_API_KEY,
+            "content-type": "application/json",
+        },
     )
-    print(f"Transcription submit status: {response.status_code}")
-    print(f"Transcription submit response: {response.text[:500]}")
-    if response.status_code != 200:
-        raise Exception(f"Transcription submit failed: {response.status_code} - {response.text}")
-    data = response.json()
+    if resp.status_code != 200:
+        raise Exception(f"Transcription submit failed: {resp.status_code} - {resp.text}")
+    data = resp.json()
     if 'id' not in data:
         raise Exception(f"No 'id' in transcription response: {data}")
-    transcript_id = data["id"]
-    print(f"Transcription job started: {transcript_id}")
-    return transcript_id
+    print(f"Transcription job started: {data['id']}")
+    return data['id']
 
 
 def get_transcription(transcript_id):
-    """Fetch current transcription state from AssemblyAI (single request, no polling)."""
-    headers = {"authorization": ASSEMBLYAI_API_KEY}
-    url = f"https://api.assemblyai.com/v2/transcript/{transcript_id}"
-    response = requests.get(url, headers=headers)
-    if response.status_code != 200:
-        raise Exception(f"AssemblyAI status check failed: {response.status_code} - {response.text}")
-    return response.json()
+    """Fetch current transcription state from AssemblyAI."""
+    resp = requests.get(
+        f"https://api.assemblyai.com/v2/transcript/{transcript_id}",
+        headers={"authorization": ASSEMBLYAI_API_KEY},
+    )
+    if resp.status_code != 200:
+        raise Exception(f"AssemblyAI status check failed: {resp.status_code} - {resp.text}")
+    return resp.json()
 
+
+# ============================================================================
+# CLAUDE — edit analysis
+# ============================================================================
 
 FILLER_WORDS = {
     'um', 'uh', 'uhm', 'hmm', 'mhm', 'hm', 'mm', 'ah', 'eh',
@@ -109,13 +108,12 @@ FILLER_WORDS = {
 
 
 def _find_fillers(words):
-    """Scan word list for filler words/phrases; return list of {text, start_ms, end_ms, speaker}."""
+    """Scan word list for filler words; return list of {text, start_ms, end_ms, speaker}."""
     found = []
     i = 0
     while i < len(words):
         w = words[i]
         tok = w.get('text', '').lower().strip('.,!?;:')
-        # Two-word phrases first
         if i + 1 < len(words):
             two = tok + ' ' + words[i + 1].get('text', '').lower().strip('.,!?;:')
             if two in FILLER_WORDS:
@@ -156,51 +154,22 @@ def _find_pauses(words, min_ms=1000):
     return pauses
 
 
-def _extract_json_array(text):
-    """
-    Return the first complete JSON array found in text using balanced-bracket
-    scanning. More robust than a greedy regex when there is trailing prose.
-    """
-    start = text.find('[')
-    if start == -1:
-        return None
-    depth = 0
-    in_string = False
-    escape_next = False
-    for i, ch in enumerate(text[start:], start):
-        if escape_next:
-            escape_next = False
-            continue
-        if ch == '\\' and in_string:
-            escape_next = True
-            continue
-        if ch == '"':
-            in_string = not in_string
-            continue
-        if in_string:
-            continue
-        if ch == '[':
-            depth += 1
-        elif ch == ']':
-            depth -= 1
-            if depth == 0:
-                return text[start:i + 1]
-    return None
+def format_timestamp(milliseconds):
+    seconds = milliseconds / 1000
+    hours = int(seconds // 3600)
+    minutes = int((seconds % 3600) // 60)
+    secs = int(seconds % 60)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
 
 
 def analyze_transcript_with_claude(transcript_data, requirements, custom_instructions=""):
-    """
-    Pre-detect fillers and pauses in Python, then ask Claude only for
-    confirmation / content-level editorial decisions. Keeps the prompt small
-    so the request stays well within Railway's timeout.
-    """
+    """Pre-detect fillers/pauses, then ask Claude for editorial decisions."""
     print("Analyzing transcript with Claude...")
     client = anthropic.Anthropic(api_key=CLAUDE_API_KEY)
 
     words = transcript_data.get("words", [])
     utterances = transcript_data.get("utterances", [])
 
-    # --- Build a compact utterance transcript for content context ---
     utt_lines = []
     for utt in utterances[:80]:
         start = format_timestamp(utt.get("start", 0))
@@ -209,7 +178,6 @@ def analyze_transcript_with_claude(transcript_data, requirements, custom_instruc
         utt_lines.append(f"[{start}] Speaker {speaker}: {text}")
     utt_text = "\n".join(utt_lines) if utt_lines else transcript_data.get("text", "")[:4000]
 
-    # --- Pre-detect fillers ---
     remove_fillers = requirements.get('removeFillerWords', True)
     fillers = _find_fillers(words) if remove_fillers else []
     filler_lines = [
@@ -218,7 +186,6 @@ def analyze_transcript_with_claude(transcript_data, requirements, custom_instruc
     ]
     filler_text = "\n".join(filler_lines) if filler_lines else "None detected"
 
-    # --- Pre-detect long pauses ---
     remove_pauses = requirements.get('removeLongPauses', True)
     pauses = _find_pauses(words, min_ms=2000) if remove_pauses else []
     pause_lines = [
@@ -286,7 +253,6 @@ Call the submit_edit_decisions tool with your decisions.
 Example tool input for reference:
 {{"decisions": [{{"type": "Remove Filler", "description": "Remove 'um'", "start_ms": 12680, "end_ms": 12900, "confidence": 95, "rationale": "Filler word — interrupts flow"}}, {{"type": "Trim Pause", "description": "Trim 3200ms pause to ~1s", "start_ms": 15000, "end_ms": 17200, "confidence": 90, "rationale": "Excessive pause"}}, {{"type": "Content Cut", "description": "Remove false start", "start_ms": 22000, "end_ms": 23500, "confidence": 85, "rationale": "Speaker restarts sentence more clearly"}}, {{"type": "Note", "description": "Light edit — preserved natural conversational flow", "confidence": 100, "rationale": "Summary"}}]}}"""
 
-    # Use tool_use to force structured JSON output — no text parsing needed.
     tools = [{
         "name": "submit_edit_decisions",
         "description": "Submit the final list of edit decisions for the podcast episode.",
@@ -313,9 +279,6 @@ Example tool input for reference:
         }
     }]
 
-    # Retry with exponential backoff for transient API errors (overloaded, rate limit)
-    # Overload can persist for minutes — retry aggressively with long waits
-    import time as _time
     max_retries = 8
     message = None
     for attempt in range(max_retries):
@@ -325,22 +288,19 @@ Example tool input for reference:
                 max_tokens=4000,
                 tools=tools,
                 tool_choice={"type": "tool", "name": "submit_edit_decisions"},
-                messages=[
-                    {"role": "user", "content": prompt},
-                ]
+                messages=[{"role": "user", "content": prompt}],
             )
             break
         except anthropic.APIStatusError as e:
             if e.status_code in (429, 529) and attempt < max_retries - 1:
-                wait = min(10 * (2 ** attempt), 120)  # 10s, 20s, 40s, 80s, 120s, 120s, 120s
+                wait = min(10 * (2 ** attempt), 120)
                 print(f"Claude API {e.status_code}, retrying in {wait}s (attempt {attempt + 1}/{max_retries})")
-                _time.sleep(wait)
+                time.sleep(wait)
             else:
                 raise
     if message is None:
         raise Exception(f"Claude API failed after {max_retries} attempts")
 
-    # Extract structured data from the tool call — guaranteed valid JSON.
     edit_decisions = None
     for block in message.content:
         if block.type == "tool_use" and block.name == "submit_edit_decisions":
@@ -348,7 +308,6 @@ Example tool input for reference:
             break
 
     if edit_decisions is None:
-        print(f"Unexpected response blocks: {[b.type for b in message.content]}")
         raise Exception("Claude did not return tool call — unexpected response format")
 
     print(f"Generated {len(edit_decisions)} edit decisions")
@@ -358,15 +317,12 @@ Example tool input for reference:
     }
 
 
-
-
+# ============================================================================
+# AUDIO EDITING — cuts with crossfade
+# ============================================================================
 
 def _snap_to_zero_crossing(audio, ms, search_radius_ms=5):
-    """
-    Snap to the nearest zero-crossing within ±search_radius_ms.
-    Tiny radius — just eliminates waveform pops, never moves far enough
-    to clip into adjacent words.
-    """
+    """Snap to the nearest zero-crossing within ±search_radius_ms."""
     samples = audio.get_array_of_samples()
     sample_rate = audio.frame_rate
     channels = audio.channels
@@ -386,57 +342,44 @@ def _snap_to_zero_crossing(audio, ms, search_radius_ms=5):
 
 def apply_audio_edits(audio_path, cuts_ms, words=None):
     """
-    Remove segments from audio using pydub, apply noise gate, export as WAV.
+    Remove segments from audio using pydub with crossfade, export as WAV.
     cuts_ms: list of (start_ms, end_ms) tuples to remove.
-    words: optional list of word dicts with 'start' and 'end' ms from transcript.
-           Used to snap cut boundaries to word edges so we never clip mid-word.
-    Returns path to the edited WAV file.
+    words: optional word dicts for snapping cuts to word boundaries.
     """
     from pydub import AudioSegment
 
     audio = AudioSegment.from_file(audio_path)
     total_ms = len(audio)
 
-    # Build word intervals for safety checking: [(start, end), ...]
-    word_intervals = [(w.get('start', 0), w.get('end', 0)) for w in (words or []) if w.get('end', 0) > w.get('start', 0)]
+    word_intervals = [
+        (w.get('start', 0), w.get('end', 0))
+        for w in (words or [])
+        if w.get('end', 0) > w.get('start', 0)
+    ]
 
     def _lands_inside_word(ms):
-        """Check if a timestamp falls inside any word's audio."""
         for ws, we in word_intervals:
             if ws < ms < we:
                 return (ws, we)
         return None
 
     def _safe_cut_start(ms):
-        """Ensure cut start doesn't land inside a word.
-        If it does, move it backward to that word's start (removing the
-        whole word rather than clipping it)."""
         hit = _lands_inside_word(ms)
-        if hit:
-            print(f"  Cut start {ms}ms was inside word [{hit[0]}-{hit[1]}], moved to {hit[0]}ms")
-            return hit[0]
-        return ms
+        return hit[0] if hit else ms
 
     def _safe_cut_end(ms):
-        """Ensure cut end doesn't land inside a word.
-        If it does, move it forward to that word's end (removing the
-        whole word rather than clipping it)."""
         hit = _lands_inside_word(ms)
-        if hit:
-            print(f"  Cut end {ms}ms was inside word [{hit[0]}-{hit[1]}], moved to {hit[1]}ms")
-            return hit[1]
-        return ms
+        return hit[1] if hit else ms
 
-    # Step 1: Clamp and sort cuts
+    # Clamp, sort, merge overlapping cuts
     adjusted = []
     for s, e in cuts_ms:
         s, e = int(s), int(e)
         if e <= s:
             continue
         adjusted.append((max(0, s), min(total_ms, e)))
-
-    # Step 2: Sort, merge overlapping cuts
     adjusted.sort(key=lambda x: x[0])
+
     merged = []
     for s, e in adjusted:
         if merged and s <= merged[-1][1]:
@@ -444,22 +387,17 @@ def apply_audio_edits(audio_path, cuts_ms, words=None):
         else:
             merged.append([s, e])
 
-    # Step 3: Safety check — if a boundary lands mid-word, push it out
+    # Snap to word boundaries and zero-crossings
     if word_intervals:
         for cut in merged:
             cut[0] = _safe_cut_start(cut[0])
             cut[1] = _safe_cut_end(cut[1])
-
-    # Step 4: Snap to zero-crossing (±5ms only — prevents pops, can't clip words)
     for cut in merged:
         cut[0] = _snap_to_zero_crossing(audio, cut[0])
         cut[1] = _snap_to_zero_crossing(audio, cut[1])
 
-    # Build segments to keep — no artificial gaps inserted.
-    # Natural silence already exists around filler words in the original audio;
-    # adding extra gaps makes transitions sound unnatural and too slow.
-    CROSSFADE_MS = 50  # overlap crossfade — smooth and inaudible for speech
-
+    # Build kept segments with crossfade
+    CROSSFADE_MS = 50
     segments = []
     pos = 0
     for s, e in merged:
@@ -469,11 +407,9 @@ def apply_audio_edits(audio_path, cuts_ms, words=None):
     if pos < total_ms:
         segments.append(audio[pos:])
 
-    # Join with overlap crossfade — prevents volume dips at cut points
     if segments:
         edited = segments[0]
         for seg in segments[1:]:
-            # Only crossfade if both segments are long enough
             if len(edited) > CROSSFADE_MS and len(seg) > CROSSFADE_MS:
                 edited = edited.append(seg, crossfade=CROSSFADE_MS)
             else:
@@ -482,61 +418,32 @@ def apply_audio_edits(audio_path, cuts_ms, words=None):
         edited = AudioSegment.empty()
 
     removed_ms = total_ms - len(edited)
-    print(f"Cuts complete: {len(merged)} cuts, removed {removed_ms}ms, {len(edited)}ms remaining")
+    print(f"Cuts: {len(merged)} cuts, removed {removed_ms}ms, {len(edited)}ms remaining")
 
-    # Export as WAV — Dolby.io Enhance will handle noise reduction and voice processing
     wav_path = audio_path.rsplit('.', 1)[0] + '_edited.wav'
     edited.export(wav_path, format='wav')
-    print(f"Exported edited audio: {wav_path} ({len(edited)}ms, {os.path.getsize(wav_path) // 1024}KB)")
+    print(f"Exported: {wav_path} ({len(edited)}ms, {os.path.getsize(wav_path) // 1024}KB)")
     return wav_path
 
 
-def process_with_elevenlabs(wav_path):
-    """
-    Send audio to ElevenLabs Voice Isolator for ML-based speech enhancement.
-    Removes background noise, isolates speech — similar to Adobe Enhanced Speech.
-    Single synchronous POST — no polling needed.
-    Returns path to the enhanced audio file.
-    """
-    file_size = os.path.getsize(wav_path)
-    print(f"ElevenLabs: uploading {file_size // 1024 // 1024}MB for voice isolation")
-
-    with open(wav_path, 'rb') as f:
-        resp = requests.post(
-            'https://api.elevenlabs.io/v1/audio-isolation',
-            headers={'xi-api-key': ELEVENLABS_API_KEY},
-            files={'audio': (os.path.basename(wav_path), f, 'audio/wav')},
-            timeout=600,  # large files may take a while
-        )
-
-    if resp.status_code != 200:
-        raise Exception(f"ElevenLabs voice isolation failed: {resp.status_code} {resp.text[:300]}")
-
-    # Response is the enhanced audio as binary (MP3)
-    output_path = wav_path.rsplit('.', 1)[0] + '_enhanced.mp3'
-    with open(output_path, 'wb') as out:
-        out.write(resp.content)
-    print(f"ElevenLabs: enhanced audio saved: {output_path} ({len(resp.content) // 1024}KB)")
-    return output_path
-
+# ============================================================================
+# AI|COUSTICS — speech enhancement (dereverb, noise, loudness)
+# ============================================================================
 
 def process_with_aicoustics(wav_path):
     """
-    Send audio to ai|coustics for ML-based speech enhancement.
-    Uses Lark 2 (reconstructive model) — rebuilds audio to studio quality.
+    Send audio to ai|coustics Lark 2 for studio-quality speech enhancement.
     Handles: dereverb, noise removal, voice enhancement, loudness normalization.
-    Replaces: ElevenLabs + Auphonic + all custom DSP.
     """
     file_size = os.path.getsize(wav_path)
     print(f"ai|coustics: uploading {file_size // 1024 // 1024}MB for Lark 2 enhancement")
 
     headers = {'X-API-Key': AI_COUSTICS_API_KEY}
-
     enhancement_params = json.dumps({
         'enhancement_model': 'LARK_V2',
-        'enhancement_level': 80,    # 0-100, 80 = aggressive but natural
-        'loudness_target': -16,     # LUFS podcast standard
-        'true_peak': -1,            # dBTP ceiling
+        'enhancement_level': 80,
+        'loudness_target': -16,
+        'true_peak': -1,
         'transcode': 'WAV',
     })
 
@@ -548,7 +455,6 @@ def process_with_aicoustics(wav_path):
             data={'media_enhancement': enhancement_params},
             timeout=120,
         )
-
     if resp.status_code not in (200, 201):
         raise Exception(f"ai|coustics upload failed: {resp.status_code} {resp.text[:300]}")
 
@@ -568,12 +474,12 @@ def process_with_aicoustics(wav_path):
         )
         if status_resp.status_code != 200:
             raise Exception(f"ai|coustics status check failed: {status_resp.status_code}")
+
         status_data = status_resp.json()
         enhancement_status = status_data.get('enhancement_status', '')
         print(f"ai|coustics: status = {enhancement_status}")
 
         if enhancement_status == 'COMPLETED':
-            # Download enhanced file
             dl = requests.get(
                 f'https://api.ai-coustics.io/v2/medias/{media_uid}/file',
                 headers=headers,
@@ -583,111 +489,29 @@ def process_with_aicoustics(wav_path):
             if dl.status_code != 200:
                 raise Exception(f"ai|coustics download failed: {dl.status_code}")
 
-            output_path = wav_path.rsplit('.', 1)[0] + '_aicoustics.wav'
+            output_path = wav_path.rsplit('.', 1)[0] + '_enhanced.wav'
             with open(output_path, 'wb') as out:
                 out.write(dl.content)
-            print(f"ai|coustics: enhanced audio saved: {output_path} ({len(dl.content) // 1024}KB)")
+            print(f"ai|coustics: saved {output_path} ({len(dl.content) // 1024}KB)")
             return output_path
 
         if enhancement_status in ('FAILED', 'ERROR'):
-            error_msg = status_data.get('error', 'Unknown error')
-            raise Exception(f"ai|coustics enhancement failed: {error_msg}")
+            raise Exception(f"ai|coustics failed: {status_data.get('error', 'Unknown error')}")
 
     raise Exception("ai|coustics timed out after 15 minutes")
 
 
-def process_with_auphonic(wav_path):
-    """
-    Send a WAV file to Auphonic for professional audio post-production:
-    loudness normalisation (-16 LUFS podcast standard) + noise reduction.
-    Returns the path to the downloaded MP3 output file.
-    Raises an exception on any failure so the caller can fall back to the WAV.
-    """
-    headers = {"Authorization": f"Bearer {AUPHONIC_API_KEY}"}
-
-    print(f"Uploading to Auphonic: {wav_path} ({os.path.getsize(wav_path) // 1024 // 1024}MB)")
-    with open(wav_path, 'rb') as f:
-        resp = requests.post(
-            'https://auphonic.com/api/simple/productions.json',
-            headers=headers,
-            files={'input_file': (os.path.basename(wav_path), f, 'audio/wav')},
-            data={
-                'action': 'start',
-                'title': 'Podcast Edit',
-                'output_basename': 'edited_podcast',
-                'loudnesstarget': '-16',
-                'denoise': 'true',
-                'filtering': 'true',
-                'normloudness': 'true',
-            },
-            timeout=180,
-        )
-
-    if resp.status_code not in (200, 201):
-        raise Exception(f"Auphonic upload failed: {resp.status_code} — {resp.text[:300]}")
-
-    production = resp.json().get('data', {})
-    prod_uuid = production.get('uuid')
-    if not prod_uuid:
-        raise Exception(f"No UUID in Auphonic response: {resp.text[:300]}")
-    print(f"Auphonic production started: {prod_uuid}")
-
-    # Poll until Done (max 12 minutes, 15s interval)
-    deadline = time.time() + 720
-    while time.time() < deadline:
-        time.sleep(15)
-        check = requests.get(
-            f'https://auphonic.com/api/production/{prod_uuid}.json',
-            headers=headers,
-            timeout=30,
-        )
-        if check.status_code != 200:
-            raise Exception(f"Auphonic status check failed: {check.status_code}")
-        data = check.json().get('data', {})
-        status = data.get('status_string', '')
-        print(f"Auphonic status: {status}")
-
-        if status == 'Done':
-            output_files = data.get('output_files', [])
-            if not output_files:
-                raise Exception("Auphonic returned no output files")
-            download_url = output_files[0].get('download_url')
-            if not download_url:
-                raise Exception("Auphonic output has no download_url")
-
-            print(f"Downloading Auphonic output: {download_url}")
-            dl = requests.get(download_url, headers=headers, timeout=300)
-            if dl.status_code != 200:
-                raise Exception(f"Auphonic download failed: {dl.status_code}")
-
-            # Detect format from the output file info or URL
-            out_format = output_files[0].get('format', 'wav')
-            out_ext = 'mp3' if 'mp3' in out_format.lower() else out_format.lower()
-            out_path = wav_path.rsplit('.', 1)[0] + f'_auphonic.{out_ext}'
-            with open(out_path, 'wb') as out:
-                out.write(dl.content)
-            print(f"Auphonic output saved: {out_path} ({len(dl.content) // 1024}KB)")
-            return out_path
-
-        if status in ('Error', 'Failed'):
-            msg = data.get('error_message') or data.get('warning_message') or 'Unknown Auphonic error'
-            raise Exception(f"Auphonic processing failed: {msg}")
-
-    raise Exception("Auphonic timed out after 12 minutes")
-
+# ============================================================================
+# CLEANVOICE — mouth sounds, breathing, residual fillers
+# ============================================================================
 
 def process_with_cleanvoice(audio_path):
-    """
-    Send audio to Cleanvoice (v2 API) for AI-powered removal of mouth noises,
-    stutters, breathing, and remaining filler words at the audio level.
-    Flow: get signed URL → upload file → create edit → poll → download.
-    Returns path to the cleaned audio file.
-    """
+    """Send audio to Cleanvoice for AI-powered mouth noise and breathing removal."""
     headers = {"X-API-Key": CLEANVOICE_API_KEY}
     filename = os.path.basename(audio_path)
     file_size_mb = os.path.getsize(audio_path) / 1024 / 1024
 
-    # Step 1: Get a signed upload URL
+    # Get signed upload URL
     print(f"Cleanvoice: requesting signed URL for {filename} ({file_size_mb:.1f}MB)")
     sign_resp = requests.post(
         f'https://api.cleanvoice.ai/v2/upload?filename={filename}',
@@ -695,51 +519,44 @@ def process_with_cleanvoice(audio_path):
         timeout=30,
     )
     if sign_resp.status_code not in (200, 201):
-        raise Exception(f"Cleanvoice signed URL request failed: {sign_resp.status_code} — {sign_resp.text[:300]}")
+        raise Exception(f"Cleanvoice signed URL failed: {sign_resp.status_code} — {sign_resp.text[:300]}")
 
     signed_url = sign_resp.json().get('signedUrl')
     if not signed_url:
         raise Exception(f"No signedUrl in Cleanvoice response: {sign_resp.text[:300]}")
-    print(f"Cleanvoice: got signed URL")
 
-    # Step 2: Upload the file to the signed URL
-    print(f"Cleanvoice: uploading file...")
+    # Upload file
+    print("Cleanvoice: uploading...")
     with open(audio_path, 'rb') as f:
-        put_resp = requests.put(
-            signed_url,
-            data=f,
-            headers={'Content-Type': 'audio/wav'},
-            timeout=300,
-        )
+        put_resp = requests.put(signed_url, data=f, headers={'Content-Type': 'audio/wav'}, timeout=300)
     if put_resp.status_code not in (200, 201):
-        raise Exception(f"Cleanvoice file upload failed: {put_resp.status_code} — {put_resp.text[:300]}")
-    print(f"Cleanvoice: file uploaded")
+        raise Exception(f"Cleanvoice upload failed: {put_resp.status_code} — {put_resp.text[:300]}")
 
-    # Step 3: Create an edit job using the signed URL as the file reference
+    # Create edit job
     edit_resp = requests.post(
         'https://api.cleanvoice.ai/v2/edits',
         headers={**headers, 'Content-Type': 'application/json'},
         json={
             "input": {
-                "files": [signed_url.split('?')[0]],  # URL without query params
+                "files": [signed_url.split('?')[0]],
                 "config": {
                     "remove_noise": True,
                     "fillers": True,
-                    "long_silences": False,  # We already handle pauses ourselves
+                    "long_silences": False,
                 }
             }
         },
         timeout=30,
     )
     if edit_resp.status_code not in (200, 201):
-        raise Exception(f"Cleanvoice edit creation failed: {edit_resp.status_code} — {edit_resp.text[:300]}")
+        raise Exception(f"Cleanvoice edit failed: {edit_resp.status_code} — {edit_resp.text[:300]}")
 
     edit_id = edit_resp.json().get('id')
     if not edit_id:
         raise Exception(f"No edit ID in Cleanvoice response: {edit_resp.text[:300]}")
-    print(f"Cleanvoice edit started: {edit_id}")
+    print(f"Cleanvoice: edit started: {edit_id}")
 
-    # Step 4: Poll until complete (max 10 minutes, 10s interval)
+    # Poll for completion (max 10 minutes)
     deadline = time.time() + 600
     while time.time() < deadline:
         time.sleep(10)
@@ -749,60 +566,53 @@ def process_with_cleanvoice(audio_path):
             timeout=30,
         )
         if check.status_code != 200:
-            raise Exception(f"Cleanvoice status check failed: {check.status_code} — {check.text[:300]}")
+            raise Exception(f"Cleanvoice status failed: {check.status_code} — {check.text[:300]}")
+
         data = check.json()
         status = data.get('status', '')
-        print(f"Cleanvoice status: {status}")
+        print(f"Cleanvoice: status = {status}")
 
         if status in ('completed', 'SUCCESS', 'done'):
-            # Find the download URL — Cleanvoice v2 puts it at result.download_url
             result = data.get('result', {})
             download_url = (
-                result.get('download_url') or
-                result.get('url') or
-                data.get('download_url') or
-                data.get('output', {}).get('url')
+                result.get('download_url') or result.get('url') or
+                data.get('download_url') or data.get('output', {}).get('url')
             )
             if not download_url:
-                # Try output files array
                 outputs = data.get('output', {}).get('files', [])
                 if outputs:
                     download_url = outputs[0] if isinstance(outputs[0], str) else outputs[0].get('url')
             if not download_url:
-                raise Exception(f"Cleanvoice completed but no download URL found: {json.dumps(data)[:500]}")
+                raise Exception(f"Cleanvoice: no download URL: {json.dumps(data)[:500]}")
 
-            print(f"Downloading Cleanvoice output: {download_url}")
             dl = requests.get(download_url, timeout=300)
             if dl.status_code != 200:
                 raise Exception(f"Cleanvoice download failed: {dl.status_code}")
+
             output_path = audio_path.rsplit('.', 1)[0] + '_cleanvoice.wav'
             with open(output_path, 'wb') as out:
                 out.write(dl.content)
-            print(f"Cleanvoice output saved: {output_path} ({len(dl.content) // 1024}KB)")
+            print(f"Cleanvoice: saved {output_path} ({len(dl.content) // 1024}KB)")
             return output_path
 
         if status in ('ERROR', 'error', 'failed'):
-            raise Exception(f"Cleanvoice processing failed: {json.dumps(data)[:500]}")
+            raise Exception(f"Cleanvoice failed: {json.dumps(data)[:500]}")
 
     raise Exception("Cleanvoice timed out after 10 minutes")
 
 
-def _run_edit_job(job_id, audio_path, cuts_ms, use_auphonic, transcript_id=None):
+# ============================================================================
+# EDIT PIPELINE — background job
+# ============================================================================
+
+def _run_edit_job(job_id, audio_path, cuts_ms, transcript_id=None):
     """
-    Background thread for audio editing pipeline.
-
-    Pipeline (ai|coustics available):
-      cuts → ai|coustics Lark 2 (dereverb + enhance + loudness) → Cleanvoice → done
-
-    Fallback pipeline (ElevenLabs only):
-      cuts → ElevenLabs → Cleanvoice → Auphonic/loudness norm → done
-
-    Minimal pipeline (no enhancement keys):
-      cuts → Cleanvoice → Auphonic/loudness norm → done
+    Background thread: cuts → ai|coustics → Cleanvoice → MP3 export.
+    ai|coustics handles dereverb, noise, enhancement, and loudness.
     """
     active_stage = 'init'
     try:
-        # Fetch word-level timestamps from AssemblyAI for smart cut snapping
+        # Fetch word timestamps for smart cut snapping
         words = None
         if transcript_id:
             try:
@@ -812,72 +622,37 @@ def _run_edit_job(job_id, audio_path, cuts_ms, use_auphonic, transcript_id=None)
             except Exception as e:
                 print(f"Warning: could not fetch word timestamps: {e}")
 
-        # Stage 1: apply timestamp cuts
+        # Stage 1: Apply cuts
         active_stage = 'cutting'
         with _edit_jobs_lock:
             _edit_jobs[job_id]['status'] = 'cutting'
         wav_path = apply_audio_edits(audio_path, cuts_ms, words=words)
 
-        # Stage 2: Speech enhancement — ai|coustics preferred, ElevenLabs fallback
-        used_aicoustics = False
-        if AI_COUSTICS_API_KEY:
-            active_stage = 'enhancing'
-            with _edit_jobs_lock:
-                _edit_jobs[job_id]['status'] = 'enhancing'
-            wav_path = process_with_aicoustics(wav_path)
-            used_aicoustics = True
-        elif ELEVENLABS_API_KEY:
-            active_stage = 'elevenlabs'
-            with _edit_jobs_lock:
-                _edit_jobs[job_id]['status'] = 'elevenlabs'
-            wav_path = process_with_elevenlabs(wav_path)
+        # Stage 2: ai|coustics Lark 2 — dereverb, enhance, loudness
+        active_stage = 'enhancing'
+        with _edit_jobs_lock:
+            _edit_jobs[job_id]['status'] = 'enhancing'
+        wav_path = process_with_aicoustics(wav_path)
 
-        # Stage 3: Cleanvoice — AI voice cleaning (mouth sounds, breathing)
+        # Stage 3: Cleanvoice — mouth sounds, breathing
         if CLEANVOICE_API_KEY:
             active_stage = 'cleanvoice'
             with _edit_jobs_lock:
                 _edit_jobs[job_id]['status'] = 'cleanvoice'
             wav_path = process_with_cleanvoice(wav_path)
 
-        # Stage 4: Loudness normalization
-        # ai|coustics already handles loudness (-16 LUFS) — skip if used
-        if used_aicoustics:
-            final_path = wav_path
-        elif use_auphonic and AUPHONIC_API_KEY:
-            active_stage = 'auphonic'
-            with _edit_jobs_lock:
-                _edit_jobs[job_id]['status'] = 'auphonic'
-            final_path = process_with_auphonic(wav_path)
-        else:
-            active_stage = 'loudness_norm'
-            with _edit_jobs_lock:
-                _edit_jobs[job_id]['status'] = 'loudness_norm'
-            from pydub import AudioSegment as _AS
-            audio = _AS.from_file(wav_path)
-            target_dBFS = -16.0
-            change_dB = target_dBFS - audio.dBFS
-            audio = audio.apply_gain(change_dB)
-            ceiling_dBFS = -1.0
-            if audio.max_dBFS > ceiling_dBFS:
-                audio = audio.apply_gain(ceiling_dBFS - audio.max_dBFS)
-            norm_path = wav_path.rsplit('.', 1)[0] + '_normalized.mp3'
-            audio.export(norm_path, format='mp3', bitrate='192k')
-            print(f"Loudness normalized to {target_dBFS} LUFS: {norm_path}")
-            final_path = norm_path
-
-        # Final: export as MP3 if not already
-        if not final_path.endswith('.mp3'):
-            from pydub import AudioSegment as _AS
-            audio = _AS.from_file(final_path)
-            mp3_path = final_path.rsplit('.', 1)[0] + '_final.mp3'
-            audio.export(mp3_path, format='mp3', bitrate='192k')
-            final_path = mp3_path
+        # Export as MP3
+        from pydub import AudioSegment as _AS
+        audio = _AS.from_file(wav_path)
+        mp3_path = wav_path.rsplit('.', 1)[0] + '_final.mp3'
+        audio.export(mp3_path, format='mp3', bitrate='192k')
+        final_path = mp3_path
 
         with _edit_jobs_lock:
             _edit_jobs[job_id] = {
                 'status': 'completed',
                 'path': final_path,
-                'is_mp3': final_path.endswith('.mp3'),
+                'is_mp3': True,
             }
         print(f"Edit job {job_id} complete: {final_path}")
 
@@ -892,13 +667,9 @@ def _run_edit_job(job_id, audio_path, cuts_ms, use_auphonic, transcript_id=None)
             }
 
 
-def format_timestamp(milliseconds):
-    seconds = milliseconds / 1000
-    hours = int(seconds // 3600)
-    minutes = int((seconds % 3600) // 60)
-    secs = int(seconds % 60)
-    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
-
+# ============================================================================
+# REPORT
+# ============================================================================
 
 def generate_edit_report(filename, transcript_data, edit_analysis, requirements):
     decisions = edit_analysis['edit_decisions']
@@ -952,10 +723,6 @@ HUMAN EDITOR CHECKLIST
 [ ] Validate audio levels are consistent
 [ ] Review all flagged sections
 
-NOTES:
-_____________________________________________________________________
-_____________________________________________________________________
-
 EDITOR SIGNATURE: _________________ DATE: _____________
 
 ================================================================================
@@ -972,22 +739,15 @@ def index():
     return jsonify({
         "status": "online",
         "service": "AI Podcast Editor API",
-        "version": "3.0.0"
+        "version": "4.0.0",
     })
 
 
 @app.route('/api/upload', methods=['POST', 'OPTIONS'])
 def upload_file():
-    """
-    Step 1: Receive audio file, upload to AssemblyAI, start transcription.
-    Also saves audio to /tmp for later editing.
-    """
+    """Step 1: Receive audio, upload to AssemblyAI, start transcription."""
     if request.method == 'OPTIONS':
         return '', 204
-
-    print("=" * 60)
-    print("UPLOAD REQUEST RECEIVED")
-    print("=" * 60)
 
     if not ASSEMBLYAI_API_KEY:
         return jsonify({"error": "ASSEMBLYAI_API_KEY not configured"}), 500
@@ -996,37 +756,30 @@ def upload_file():
         return jsonify({"error": "No file provided"}), 400
 
     file = request.files['file']
-
     if file.filename == '':
         return jsonify({"error": "No file selected"}), 400
-
     if not allowed_file(file.filename):
         return jsonify({"error": "File type not allowed. Use MP3, WAV, M4A, AAC, or OGG"}), 400
 
-    print(f"Received file: {file.filename}")
+    print(f"Upload: {file.filename}")
     ext = file.filename.rsplit('.', 1)[1].lower() if '.' in file.filename else 'mp3'
 
     try:
         file_data = file.read()
-        print(f"Read {len(file_data)} bytes")
-
         upload_url = stream_bytes_to_assemblyai(file_data)
         transcript_id = start_transcription(upload_url)
 
-        # Save to /tmp so /api/edit-audio can access it later
         tmp_path = f"/tmp/{transcript_id}.{ext}"
         with open(tmp_path, 'wb') as f:
             f.write(file_data)
-        print(f"Audio saved to {tmp_path}")
 
         return jsonify({
             "success": True,
             "transcript_id": transcript_id,
             "filename": secure_filename(file.filename),
-            "message": "File uploaded and transcription started"
+            "message": "File uploaded and transcription started",
         })
     except Exception as e:
-        print(f"\nUPLOAD ERROR: {str(e)}")
         import traceback
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
@@ -1034,7 +787,6 @@ def upload_file():
 
 @app.route('/api/transcription-status/<transcript_id>', methods=['GET'])
 def transcription_status(transcript_id):
-    """Return current AssemblyAI transcription status without blocking."""
     if not ASSEMBLYAI_API_KEY:
         return jsonify({"error": "ASSEMBLYAI_API_KEY not configured"}), 500
     try:
@@ -1042,14 +794,14 @@ def transcription_status(transcript_id):
         status = data.get("status")
         return jsonify({
             "status": status,
-            "error": data.get("error") if status == "error" else None
+            "error": data.get("error") if status == "error" else None,
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 
 def _run_analysis_job(job_id, transcript_data, filename, requirements, custom_instructions):
-    """Background thread: run Claude analysis and store result in _jobs."""
+    """Background thread: run Claude analysis."""
     try:
         with _jobs_lock:
             _jobs[job_id]['status'] = 'analyzing'
@@ -1067,18 +819,17 @@ def _run_analysis_job(job_id, transcript_data, filename, requirements, custom_in
                 "duration": transcript_data.get('audio_duration', 0),
                 "words": len(transcript_data.get('words', [])),
                 "speakers": len(set(u.get('speaker') for u in transcript_data.get('utterances', []) if u.get('speaker'))),
-                "confidence": transcript_data.get('confidence', 0) or 0
+                "confidence": transcript_data.get('confidence', 0) or 0,
             }
         }
         with _jobs_lock:
             _jobs[job_id] = {'status': 'completed', 'result': result}
-        print(f"Job {job_id} complete: {cuts_count} cuts")
+        print(f"Analysis job {job_id} complete: {cuts_count} cuts")
 
     except anthropic.APIStatusError as e:
         err = "Claude API is temporarily overloaded. Please try again." if e.status_code == 529 else str(e)
-        retryable = e.status_code == 529
         with _jobs_lock:
-            _jobs[job_id] = {'status': 'error', 'error': err, 'retryable': retryable}
+            _jobs[job_id] = {'status': 'error', 'error': err, 'retryable': e.status_code == 529}
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -1088,19 +839,11 @@ def _run_analysis_job(job_id, transcript_data, filename, requirements, custom_in
 
 @app.route('/api/process', methods=['POST', 'OPTIONS'])
 def process_podcast():
-    """
-    Step 2: Fetch transcript from AssemblyAI, kick off Claude analysis in a
-    background thread, and return a job_id immediately.
-    Poll /api/process-status/<job_id> for the result.
-    """
+    """Step 2: Fetch transcript, kick off Claude analysis in background."""
     if request.method == 'OPTIONS':
         return '', 204
 
     try:
-        print("=" * 60)
-        print("PROCESSING REQUEST RECEIVED")
-        print("=" * 60)
-
         if not ASSEMBLYAI_API_KEY or not CLAUDE_API_KEY:
             return jsonify({"error": "API keys not configured on server"}), 500
 
@@ -1113,34 +856,26 @@ def process_podcast():
         if not transcript_id:
             return jsonify({"error": "No transcript_id provided"}), 400
 
-        print(f"transcript_id: {transcript_id}")
-
-        # Fetch transcript synchronously (fast, ~1s)
         transcript_data = get_transcription(transcript_id)
         status = transcript_data.get("status")
         if status == "error":
             raise Exception(f"Transcription failed: {transcript_data.get('error', 'Unknown error')}")
         if status != "completed":
             return jsonify({"error": f"Transcription not ready (status: {status})."}), 400
-        print(f"Transcript fetched. Duration: {transcript_data.get('audio_duration')}ms")
 
-        # Kick off Claude analysis in background thread
         job_id = str(uuid.uuid4())
         with _jobs_lock:
             _jobs[job_id] = {'status': 'pending'}
 
-        thread = threading.Thread(
+        threading.Thread(
             target=_run_analysis_job,
             args=(job_id, transcript_data, filename, requirements, custom_instructions),
-            daemon=True
-        )
-        thread.start()
-        print(f"Analysis job {job_id} started in background")
+            daemon=True,
+        ).start()
 
         return jsonify({"success": True, "job_id": job_id})
 
     except Exception as e:
-        print(f"\nFATAL ERROR: {str(e)}")
         import traceback
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
@@ -1148,7 +883,6 @@ def process_podcast():
 
 @app.route('/api/process-status/<job_id>', methods=['GET'])
 def process_status(job_id):
-    """Poll this endpoint after /api/process to get Claude analysis results."""
     with _jobs_lock:
         job = _jobs.get(job_id)
     if not job:
@@ -1162,11 +896,7 @@ def process_status(job_id):
 
 @app.route('/api/edit-audio', methods=['POST', 'OPTIONS'])
 def edit_audio():
-    """
-    Step 3: Start async audio editing job.
-    Accepts JSON: { transcript_id, cuts: [{start_ms, end_ms}, ...] }
-    Returns { job_id } immediately — poll /api/edit-audio-status/<job_id>.
-    """
+    """Step 3: Start async audio editing job."""
     if request.method == 'OPTIONS':
         return '', 204
 
@@ -1177,6 +907,8 @@ def edit_audio():
 
         if not transcript_id:
             return jsonify({"error": "No transcript_id provided"}), 400
+        if not AI_COUSTICS_API_KEY:
+            return jsonify({"error": "AI_COUSTICS_API_KEY not configured — cannot enhance audio"}), 500
 
         audio_path = None
         for ext in ALLOWED_EXTENSIONS:
@@ -1184,39 +916,33 @@ def edit_audio():
             if os.path.exists(path):
                 audio_path = path
                 break
-
         if not audio_path:
-            return jsonify({
-                "error": "Audio file not found on server. Files are cleared on restart — please re-upload your audio."
-            }), 404
+            return jsonify({"error": "Audio file not found. Please re-upload."}), 404
 
         cuts_ms = [
             (c['start_ms'], c['end_ms'])
             for c in cuts
             if 'start_ms' in c and 'end_ms' in c
         ]
-        print(f"Starting edit job: {len(cuts_ms)} cuts, cleanvoice={'yes' if CLEANVOICE_API_KEY else 'no'}, auphonic={'yes' if AUPHONIC_API_KEY else 'no'}")
+        print(f"Edit job: {len(cuts_ms)} cuts, cleanvoice={'yes' if CLEANVOICE_API_KEY else 'no'}")
 
         job_id = str(uuid.uuid4())
         with _edit_jobs_lock:
             _edit_jobs[job_id] = {'status': 'pending'}
 
-        thread = threading.Thread(
+        threading.Thread(
             target=_run_edit_job,
-            args=(job_id, audio_path, cuts_ms, bool(AUPHONIC_API_KEY), transcript_id),
+            args=(job_id, audio_path, cuts_ms, transcript_id),
             daemon=True,
-        )
-        thread.start()
+        ).start()
 
         return jsonify({
             "success": True,
             "job_id": job_id,
             "cleanvoice": bool(CLEANVOICE_API_KEY),
-            "auphonic": bool(AUPHONIC_API_KEY),
         })
 
     except Exception as e:
-        print(f"Edit audio error: {e}")
         import traceback
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
@@ -1224,7 +950,6 @@ def edit_audio():
 
 @app.route('/api/edit-audio-status/<job_id>', methods=['GET'])
 def edit_audio_status(job_id):
-    """Poll after /api/edit-audio. Returns status or signals ready-to-download."""
     with _edit_jobs_lock:
         job = _edit_jobs.get(job_id)
     if not job:
@@ -1238,18 +963,11 @@ def edit_audio_status(job_id):
 
 @app.route('/api/edit-audio-download/<job_id>', methods=['GET'])
 def edit_audio_download(job_id):
-    """Download the completed edited audio file."""
     with _edit_jobs_lock:
         job = _edit_jobs.get(job_id)
     if not job or job['status'] != 'completed':
         return jsonify({"error": "File not ready"}), 404
-
-    path = job['path']
-    is_mp3 = job.get('is_mp3', False)
-    mimetype = 'audio/mpeg' if is_mp3 else 'audio/wav'
-    download_name = 'edited_podcast.mp3' if is_mp3 else 'edited_podcast.wav'
-
-    return send_file(path, as_attachment=True, download_name=download_name, mimetype=mimetype)
+    return send_file(job['path'], as_attachment=True, download_name='edited_podcast.mp3', mimetype='audio/mpeg')
 
 
 @app.route('/api/status', methods=['GET'])
@@ -1259,9 +977,7 @@ def status():
         "assemblyai_configured": bool(ASSEMBLYAI_API_KEY),
         "claude_configured": bool(CLAUDE_API_KEY),
         "aicoustics_configured": bool(AI_COUSTICS_API_KEY),
-        "elevenlabs_configured": bool(ELEVENLABS_API_KEY),
         "cleanvoice_configured": bool(CLEANVOICE_API_KEY),
-        "auphonic_configured": bool(AUPHONIC_API_KEY),
     })
 
 

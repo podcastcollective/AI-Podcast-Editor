@@ -519,67 +519,21 @@ def process_with_elevenlabs(wav_path):
     return output_path
 
 
-def _post_elevenlabs_eq(audio):
+def _studio_polish(audio):
     """
-    EQ to match Adobe Enhanced Speech tonal profile after ElevenLabs.
-    Measured gaps (v6 iteration, post-restore):
-      Sub-bass 20-80Hz:  +7.7dB (over-boosted — reduce low shelf)
-      Warmth 80-200Hz:   -0.7dB (matched)
-      Low-mid 500-1kHz:  -4.6dB (deficit — needs boost)
-      Presence 2-3.5kHz: +5.6dB (still harsh)
-      Upper pres 3.5-5k: +7.7dB (still harsh)
-      Air 8-16kHz:       +13.1dB (LPF not steep enough)
+    Professional podcast studio mastering chain.
+    Emulates: Neve preamp → de-esser → gentle expander → transient designer.
 
-    Chain:
-      1. Low-shelf boost +2dB below 200Hz (subtle warmth, reduced from +5)
-      2. Low-mid boost +3dB at 500-1kHz (restore body)
-      3. Cut 2-6kHz by -8dB (stronger presence taming)
-      4. LPF at 4.5kHz, 4th-order (steep rolloff for air)
-    """
-    import numpy as np
-    from scipy.signal import butter, sosfiltfilt
+    Applied after ElevenLabs voice isolation to transform clinical ML output
+    into broadcast-quality audio that sounds like it came from a real studio.
 
-    samples = np.array(audio.get_array_of_samples(), dtype=np.float64)
-    sample_rate = audio.frame_rate
-    channels = audio.channels
-
-    if channels > 1:
-        samples = samples.reshape(-1, channels)
-
-    def process_channel(data):
-        # Only a gentle high-shelf rolloff above 10kHz to tame ElevenLabs air/hiss
-        # No presence cuts, no low boosts — those were making it muffled
-        lpf = butter(1, 10000, btype='low', fs=sample_rate, output='sos')
-        data = sosfiltfilt(lpf, data)
-        return data
-
-    if channels > 1:
-        for ch in range(channels):
-            samples[:, ch] = process_channel(samples[:, ch])
-        samples = samples.flatten()
-    else:
-        samples = process_channel(samples)
-
-    samples = np.clip(samples, -32768, 32767).astype(np.int16)
-    from pydub import AudioSegment
-    result = AudioSegment(
-        data=samples.tobytes(),
-        sample_width=2,
-        frame_rate=sample_rate,
-        channels=channels,
-    )
-    print(f"Post-ElevenLabs EQ: dBFS {audio.dBFS:.1f} -> {result.dBFS:.1f}")
-    return result
-
-
-def _post_elevenlabs_restore(audio):
-    """
-    Restore natural audio characteristics that ElevenLabs strips out.
-    Runs BEFORE Cleanvoice/Auphonic (which would strip room tone).
-
-    1. Harmonics: tanh soft-clip saturation restores natural voice richness
-    2. Dynamics: downward expansion restores natural volume variation
-    3. Transients: envelope follower smooths aggressive attack onsets
+    Signal chain:
+      1. HPF at 80Hz — remove sub-bass rumble and plosive energy
+      2. Tube warmth — asymmetric soft-clip saturation (even harmonics = warm)
+      3. De-esser — dynamic sibilance control (4-9kHz, only on "s" sounds)
+      4. Gentle expansion — restore natural dynamics ElevenLabs flattened
+      5. Transient shaping — smooth aggressive digital onsets to natural timing
+      6. High shelf — tame digital brightness above 12kHz
     """
     import numpy as np
     from scipy.signal import butter, sosfiltfilt, lfilter
@@ -588,13 +542,12 @@ def _post_elevenlabs_restore(audio):
     sample_rate = audio.frame_rate
     channels = audio.channels
     peak = np.max(np.abs(samples)) or 1.0
-    samples = samples / peak
+    samples = samples / peak  # normalize to [-1, 1]
 
     if channels > 1:
         samples = samples.reshape(-1, channels)
 
     def _rolling_rms(data, window_samples):
-        """Compute rolling RMS with guaranteed output length == len(data)."""
         n = len(data)
         w = min(window_samples, n)
         sq = data ** 2
@@ -608,31 +561,65 @@ def _post_elevenlabs_restore(audio):
     def process_channel(data):
         n = len(data)
 
-        # 1. HARMONIC SATURATION — soft-clip waveshaper
-        drive = 1.5
-        data = np.tanh(data * drive) / np.tanh(drive)
+        # ---- 1. HIGH-PASS FILTER at 80Hz ----
+        # Removes sub-bass rumble and plosive energy below voice range
+        hpf = butter(2, 80, btype='high', fs=sample_rate, output='sos')
+        data = sosfiltfilt(hpf, data)
 
-        # 2. DYNAMICS EXPANSION — restore natural volume variation
+        # ---- 2. TUBE WARMTH (asymmetric saturation) ----
+        # Asymmetric soft-clip: positive peaks saturate slightly harder
+        # This generates primarily even harmonics (2nd, 4th) — sounds warm and musical
+        # vs symmetric tanh which adds harsher odd harmonics
+        drive = 1.8
+        pos_driven = np.tanh(data * drive)
+        neg_driven = np.tanh(data * drive * 0.85) / 0.85
+        data = np.where(data >= 0, pos_driven, neg_driven) / np.tanh(drive)
+
+        # ---- 3. DE-ESSER (dynamic sibilance control) ----
+        # Only reduces 4-9kHz when sibilance is dominant — NOT a static EQ cut
+        # Leaves consonants, presence, and clarity untouched in non-sibilant frames
+        bp_sib = butter(2, [4000, 9000], btype='band', fs=sample_rate, output='sos')
+        sib_band = sosfiltfilt(bp_sib, data)
+        # Fast envelope (5ms) to track sibilant transients
+        sib_env = _rolling_rms(sib_band, max(1, int(sample_rate * 0.005)))
+        full_env = _rolling_rms(data, max(1, int(sample_rate * 0.005)))
+        # Sibilance ratio: when high band dominates the signal
+        sib_ratio = sib_env / np.maximum(full_env, 1e-10)
+        # Reduce sibilance band when ratio > 0.35 (sibilant), max 6dB reduction
+        excess = np.clip((sib_ratio - 0.35) / 0.35, 0, 1)
+        sib_gain = 1.0 - excess * 0.5  # 0.5 = 6dB max cut
+        # Split-band: only modify the sibilance band, leave everything else
+        data = (data - sib_band) + sib_band * sib_gain
+
+        # ---- 4. GENTLE EXPANSION (restore dynamics) ----
+        # ElevenLabs over-compresses. Expand below -35dBFS at 1.3:1 ratio
+        # Gentler than before (was -30dB, 1.5:1) to avoid making quiet parts too quiet
         env_samples = max(1, int(sample_rate * 50 / 1000))
         envelope = _rolling_rms(data, env_samples)
-        exp_threshold = 10 ** (-30 / 20)
-        ratio = 1.5
+        exp_threshold = 10 ** (-35 / 20)
         below_mask = envelope < exp_threshold
         gain = np.ones(n)
         safe_env = np.maximum(envelope[below_mask], 1e-10)
         db_below = 20 * np.log10(safe_env / exp_threshold)
-        gain[below_mask] = 10 ** (db_below * (ratio - 1) / 20)
+        gain[below_mask] = 10 ** (db_below * 0.3 / 20)  # 1.3:1 ratio = 0.3 extra dB per dB below
         smooth_lpf = butter(1, 20, btype='low', fs=sample_rate, output='sos')
-        gain = np.clip(sosfiltfilt(smooth_lpf, gain), 0.1, 1.0)
+        gain = np.clip(sosfiltfilt(smooth_lpf, gain), 0.15, 1.0)
         data = data * gain
 
-        # 3. TRANSIENT SOFTENER — smooth aggressive attack onsets
-        attack_tc = sample_rate * 8 / 1000
+        # ---- 5. TRANSIENT SHAPING (smooth digital onsets) ----
+        # ElevenLabs produces unnaturally sharp attacks. Smooth to natural speech timing.
+        attack_tc = sample_rate * 8 / 1000  # 8ms time constant
         alpha = 1.0 / max(attack_tc, 1.0)
         abs_data = np.abs(data)
         smoothed_env = lfilter([alpha], [1, -(1 - alpha)], abs_data)
         safe_abs = np.maximum(abs_data, 1e-10)
         data = data * np.minimum(smoothed_env / safe_abs, 1.0)
+
+        # ---- 6. HIGH SHELF at 12kHz (-2dB) ----
+        # Tame digital brightness/air without affecting speech clarity
+        hp_shelf = butter(1, 12000, btype='high', fs=sample_rate, output='sos')
+        air = sosfiltfilt(hp_shelf, data)
+        data = data - air * (1.0 - 10 ** (-2 / 20))
 
         return data
 
@@ -649,7 +636,7 @@ def _post_elevenlabs_restore(audio):
         data=samples.tobytes(), sample_width=2,
         frame_rate=sample_rate, channels=channels,
     )
-    print(f"Post-ElevenLabs restore: harmonics + dynamics + transients applied")
+    print(f"Studio polish: HPF → tube warmth → de-esser → expansion → transients → high shelf")
     print(f"  dBFS {audio.dBFS:.1f} -> {result.dBFS:.1f}")
     return result
 
@@ -938,18 +925,14 @@ def _run_edit_job(job_id, audio_path, cuts_ms, use_auphonic, transcript_id=None)
                 _edit_jobs[job_id]['status'] = 'elevenlabs'
             wav_path = process_with_elevenlabs(wav_path)
 
-            # Stage 2b: EQ to match Adobe Enhanced Speech tonal profile
-            # Restores warmth, tames harsh presence, rolls off highs
+            # Stage 2b: Studio polish — professional broadcast mastering chain
+            # HPF → tube warmth → de-esser → expansion → transient shaping → high shelf
             from pydub import AudioSegment as _AS
             enhanced = _AS.from_file(wav_path)
-            eqd = _post_elevenlabs_eq(enhanced)
-
-            # Stage 2c: Restore natural audio characteristics
-            # Harmonics, dynamics expansion, transient smoothing (NOT room tone — added last)
-            restored = _post_elevenlabs_restore(eqd)
-            eq_path = wav_path.rsplit('.', 1)[0] + '_eq.wav'
-            restored.export(eq_path, format='wav')
-            wav_path = eq_path
+            polished = _studio_polish(enhanced)
+            polish_path = wav_path.rsplit('.', 1)[0] + '_polished.wav'
+            polished.export(polish_path, format='wav')
+            wav_path = polish_path
 
         # Stage 3: Cleanvoice — AI voice cleaning (filler sounds, mouth clicks)
         if CLEANVOICE_API_KEY:

@@ -74,9 +74,8 @@
             { key: 'transcribing', label: 'Transcribing with AssemblyAI' },
             { key: 'analyzing',    label: 'Analysing with Claude AI' },
             { key: 'cutting',      label: 'Applying edits' },
-            { key: 'elevenlabs',   label: 'Enhancing speech with ElevenLabs AI' },
+            { key: 'enhancing',    label: 'Studio enhancement with ai|coustics' },
             { key: 'cleanvoice',   label: 'Voice cleaning with Cleanvoice AI' },
-            { key: 'auphonic',     label: 'Loudness mastering with Auphonic' },
             { key: 'done',         label: 'Complete' },
         ];
 
@@ -196,7 +195,7 @@
                     const editData = await editRes.json();
                     if (!editRes.ok) throw { stage: 'cutting', message: editData.error || 'Edit job failed to start' };
                     const editJobId = editData.job_id;
-                    downloadExtRef.current = editData.auphonic ? 'mp3' : 'wav';
+                    downloadExtRef.current = 'mp3';
 
                     while (true) {
                         await new Promise(r => setTimeout(r, 4000));
@@ -206,9 +205,8 @@
                         if (statusRes.status === 404) throw { stage: 'cutting', message: 'Server restarted during processing. Please retry.' };
                         const statusData = await statusRes.json();
                         if (statusData.status === 'cutting')    setPipelineStage('cutting');
-                        if (statusData.status === 'elevenlabs') setPipelineStage('elevenlabs');
+                        if (statusData.status === 'enhancing')  setPipelineStage('enhancing');
                         if (statusData.status === 'cleanvoice') setPipelineStage('cleanvoice');
-                        if (statusData.status === 'auphonic')   setPipelineStage('auphonic');
                         if (statusData.status === 'completed')  break;
                         if (!statusRes.ok) {
                             throw { stage: statusData.failed_step || 'cutting', message: statusData.error || 'Audio processing failed' };

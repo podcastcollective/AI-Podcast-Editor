@@ -25,6 +25,7 @@ ASSEMBLYAI_API_KEY = os.environ.get('ASSEMBLYAI_API_KEY')
 CLAUDE_API_KEY = os.environ.get('CLAUDE_API_KEY')
 AI_COUSTICS_API_KEY = os.environ.get('AI_COUSTICS_API_KEY')   # developers.ai-coustics.io
 CLEANVOICE_API_KEY = os.environ.get('CLEANVOICE_API_KEY')     # cleanvoice.ai/dashboard
+LALALAI_API_KEY = os.environ.get('LALALAI_API_KEY')           # lalal.ai — dereverb
 
 if not ASSEMBLYAI_API_KEY or not CLAUDE_API_KEY:
     print("WARNING: ASSEMBLYAI_API_KEY and CLAUDE_API_KEY are required")
@@ -427,6 +428,111 @@ def apply_audio_edits(audio_path, cuts_ms, words=None):
 
 
 # ============================================================================
+# LALAL.AI — dedicated echo & reverb removal
+# ============================================================================
+
+def process_with_lalalai(audio_path):
+    """
+    Send audio to LALAL.AI for dedicated echo/reverb removal using
+    the Andromeda neural network. Returns path to dereverbed audio.
+    """
+    file_size = os.path.getsize(audio_path)
+    print(f"LALAL.AI: uploading {file_size // 1024 // 1024}MB for dereverb")
+
+    headers = {'X-License-Key': LALALAI_API_KEY}
+
+    # Step 1: Upload file
+    filename = os.path.basename(audio_path)
+    with open(audio_path, 'rb') as f:
+        upload_resp = requests.post(
+            'https://www.lalal.ai/api/v1/upload/',
+            headers={**headers, 'Content-Disposition': f'attachment; filename="{filename}"'},
+            data=f,
+            timeout=120,
+        )
+    if upload_resp.status_code not in (200, 201):
+        raise Exception(f"LALAL.AI upload failed: {upload_resp.status_code} {upload_resp.text[:300]}")
+
+    source_id = upload_resp.json().get('id')
+    if not source_id:
+        raise Exception(f"No id in LALAL.AI upload response: {upload_resp.text[:300]}")
+    print(f"LALAL.AI: uploaded, source_id={source_id}")
+
+    # Step 2: Start dereverb processing
+    split_resp = requests.post(
+        'https://www.lalal.ai/api/v1/split/voice_clean/',
+        headers={**headers, 'Content-Type': 'application/json'},
+        json={
+            'source_id': source_id,
+            'presets': {
+                'vocals': {
+                    'dereverb_enabled': True,
+                },
+            },
+        },
+        timeout=30,
+    )
+    if split_resp.status_code not in (200, 201):
+        raise Exception(f"LALAL.AI split failed: {split_resp.status_code} {split_resp.text[:300]}")
+
+    task_id = split_resp.json().get('task_id')
+    if not task_id:
+        raise Exception(f"No task_id in LALAL.AI response: {split_resp.text[:300]}")
+    print(f"LALAL.AI: dereverb started, task_id={task_id}")
+
+    # Step 3: Poll for completion (max 15 minutes)
+    deadline = time.time() + 900
+    while time.time() < deadline:
+        time.sleep(5)
+        check_resp = requests.post(
+            'https://www.lalal.ai/api/v1/check/',
+            headers={**headers, 'Content-Type': 'application/json'},
+            json={'task_ids': [task_id]},
+            timeout=30,
+        )
+        if check_resp.status_code != 200:
+            raise Exception(f"LALAL.AI check failed: {check_resp.status_code}")
+
+        tasks = check_resp.json()
+        task_data = tasks.get(task_id, {})
+        status = task_data.get('status', '')
+        print(f"LALAL.AI: status = {status}")
+
+        if status == 'success':
+            # Download the vocal track (dereverbed)
+            result = task_data.get('result', {})
+            tracks = result.get('tracks', [])
+            vocal_track = None
+            for t in tracks:
+                if t.get('type') == 'vocals' or t.get('label') == 'vocals':
+                    vocal_track = t
+                    break
+            if not vocal_track and tracks:
+                vocal_track = tracks[0]
+            if not vocal_track:
+                raise Exception(f"LALAL.AI: no vocal track in result: {json.dumps(tasks)[:500]}")
+
+            dl_url = vocal_track.get('url')
+            if not dl_url:
+                raise Exception(f"LALAL.AI: no download URL for vocal track")
+
+            dl = requests.get(dl_url, timeout=300)
+            if dl.status_code != 200:
+                raise Exception(f"LALAL.AI download failed: {dl.status_code}")
+
+            output_path = audio_path.rsplit('.', 1)[0] + '_dereverbed.wav'
+            with open(output_path, 'wb') as out:
+                out.write(dl.content)
+            print(f"LALAL.AI: saved {output_path} ({len(dl.content) // 1024}KB)")
+            return output_path
+
+        if status in ('error', 'cancelled'):
+            raise Exception(f"LALAL.AI failed: {json.dumps(task_data)[:500]}")
+
+    raise Exception("LALAL.AI timed out after 15 minutes")
+
+
+# ============================================================================
 # AI|COUSTICS — speech enhancement (dereverb, noise, loudness)
 # ============================================================================
 
@@ -543,6 +649,7 @@ def process_with_cleanvoice(audio_path):
                     "remove_noise": True,
                     "fillers": True,
                     "long_silences": False,
+                    "studio_sound": "nightly",
                 }
             }
         },
@@ -677,9 +784,8 @@ def _add_room_tone(wav_path):
 
 def _run_edit_job(job_id, audio_path, cuts_ms, transcript_id=None):
     """
-    Background thread: ai|coustics → cuts → Cleanvoice → MP3 export.
-    Enhance FIRST on raw audio so the ML model gets clean continuous input
-    for better dereverb, then apply cuts to the enhanced audio.
+    Background thread: LALAL.AI dereverb → ai|coustics → cuts → Cleanvoice → MP3.
+    Dereverb raw audio first, then enhance, then cut.
     """
     active_stage = 'init'
     try:
@@ -693,11 +799,19 @@ def _run_edit_job(job_id, audio_path, cuts_ms, transcript_id=None):
             except Exception as e:
                 print(f"Warning: could not fetch word timestamps: {e}")
 
-        # Stage 1: ai|coustics — enhance raw audio first for best dereverb
+        # Stage 1: LALAL.AI — dedicated dereverb on raw audio
+        wav_path = audio_path
+        if LALALAI_API_KEY:
+            active_stage = 'dereverb'
+            with _edit_jobs_lock:
+                _edit_jobs[job_id]['status'] = 'dereverb'
+            wav_path = process_with_lalalai(audio_path)
+
+        # Stage 2: ai|coustics — enhance dereverbed audio
         active_stage = 'enhancing'
         with _edit_jobs_lock:
             _edit_jobs[job_id]['status'] = 'enhancing'
-        wav_path = process_with_aicoustics(audio_path)
+        wav_path = process_with_aicoustics(wav_path)
 
         # Stage 2: Apply cuts to enhanced audio
         active_stage = 'cutting'
@@ -1057,6 +1171,7 @@ def status():
         "assemblyai_configured": bool(ASSEMBLYAI_API_KEY),
         "claude_configured": bool(CLAUDE_API_KEY),
         "aicoustics_configured": bool(AI_COUSTICS_API_KEY),
+        "lalalai_configured": bool(LALALAI_API_KEY),
         "cleanvoice_configured": bool(CLEANVOICE_API_KEY),
     })
 

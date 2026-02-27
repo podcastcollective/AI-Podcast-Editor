@@ -73,6 +73,7 @@
             { key: 'uploading',    label: 'Uploading audio' },
             { key: 'transcribing', label: 'Transcribing with AssemblyAI' },
             { key: 'analyzing',    label: 'Analysing with Claude AI' },
+            { key: 'dereverb',     label: 'Removing reverb with LALAL.AI' },
             { key: 'enhancing',    label: 'Studio enhancement with ai|coustics' },
             { key: 'cutting',      label: 'Applying edits' },
             { key: 'cleanvoice',   label: 'Voice cleaning with Cleanvoice AI' },
@@ -205,6 +206,7 @@
                         catch { throw { stage: 'cutting', message: 'Server unreachable — it may be restarting. Please retry.' }; }
                         if (statusRes.status === 404) throw { stage: 'cutting', message: 'Server restarted during processing. Please retry.' };
                         const statusData = await statusRes.json();
+                        if (statusData.status === 'dereverb')   setPipelineStage('dereverb');
                         if (statusData.status === 'cutting')    setPipelineStage('cutting');
                         if (statusData.status === 'enhancing')  setPipelineStage('enhancing');
                         if (statusData.status === 'cleanvoice') setPipelineStage('cleanvoice');

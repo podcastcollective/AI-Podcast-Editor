@@ -3,7 +3,7 @@ Flask Backend API for AI Podcast Editor
 Handles file uploads, transcription, Claude analysis, and audio editing.
 """
 
-from flask import Flask, request, jsonify, send_file
+from flask import Flask, request, jsonify, send_file, Response
 from flask_cors import CORS
 import os
 import json
@@ -896,6 +896,34 @@ def edit_audio_download(job_id):
     if not job or job['status'] != 'completed':
         return jsonify({"error": "File not ready"}), 404
     return send_file(job['path'], as_attachment=True, download_name='edited_podcast.mp3', mimetype='audio/mpeg')
+
+
+@app.route('/api/transcript-download/<transcript_id>', methods=['GET'])
+def transcript_download(transcript_id):
+    """Return the transcript as a formatted text file with speaker labels."""
+    if not ASSEMBLYAI_API_KEY:
+        return jsonify({"error": "ASSEMBLYAI_API_KEY not configured"}), 500
+    try:
+        data = get_transcription(transcript_id)
+        if data.get('status') != 'completed':
+            return jsonify({"error": "Transcript not ready"}), 404
+
+        utterances = data.get('utterances', [])
+        lines = []
+        for utt in utterances:
+            start = format_timestamp(utt.get('start', 0))
+            speaker = utt.get('speaker', '?')
+            text = utt.get('text', '')
+            lines.append(f"[{start}] Speaker {speaker}: {text}")
+
+        transcript_text = "\n\n".join(lines)
+        return Response(
+            transcript_text,
+            mimetype='text/plain',
+            headers={'Content-Disposition': 'attachment; filename=transcript.txt'}
+        )
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route('/api/status', methods=['GET'])

@@ -93,6 +93,7 @@
             const [pipelineError, setPipelineError] = useState(null);
             const downloadBlobRef = useRef(null);
             const downloadExtRef = useRef('mp3');
+            const transcriptIdRef = useRef(null);
 
             const handleFileUpload = (e) => {
                 const uploadedFile = e.target.files[0];
@@ -118,6 +119,7 @@
                     }
                     const uploadData = await uploadRes.json();
                     const { transcript_id, filename } = uploadData;
+                    transcriptIdRef.current = transcript_id;
 
                     // Stage 2: Transcribe (poll)
                     setPipelineStage('transcribing');
@@ -244,12 +246,30 @@
                 URL.revokeObjectURL(url);
             };
 
+            const handleTranscriptDownload = async () => {
+                if (!transcriptIdRef.current) return;
+                try {
+                    const res = await fetch(`${API_URL}/api/transcript-download/${transcriptIdRef.current}`);
+                    if (!res.ok) throw new Error('Failed to fetch transcript');
+                    const blob = await res.blob();
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = 'transcript.txt';
+                    a.click();
+                    URL.revokeObjectURL(url);
+                } catch (e) {
+                    console.error('Transcript download error:', e);
+                }
+            };
+
             const resetToUpload = () => {
                 setScreen('upload');
                 setPipelineStage(null);
                 setPipelineError(null);
                 setFile(null);
                 downloadBlobRef.current = null;
+                transcriptIdRef.current = null;
             };
 
             // --- Render ---
@@ -430,13 +450,22 @@
                                 <h2 className="text-2xl font-bold text-white mb-2">Your podcast is ready</h2>
                                 <p className="text-purple-200 mb-8">All editing stages completed successfully.</p>
 
-                                <button
-                                    onClick={handleDownload}
-                                    className="bg-gradient-to-r from-green-500 to-emerald-500 text-white font-semibold py-4 px-8 rounded-xl hover:from-green-600 hover:to-emerald-600 transition-all flex items-center justify-center gap-2 mx-auto"
-                                >
-                                    <Download className="w-5 h-5" />
-                                    Download Edited Audio
-                                </button>
+                                <div className="flex flex-col sm:flex-row items-center justify-center gap-3">
+                                    <button
+                                        onClick={handleDownload}
+                                        className="bg-gradient-to-r from-green-500 to-emerald-500 text-white font-semibold py-4 px-8 rounded-xl hover:from-green-600 hover:to-emerald-600 transition-all flex items-center justify-center gap-2"
+                                    >
+                                        <Download className="w-5 h-5" />
+                                        Download Edited Audio
+                                    </button>
+                                    <button
+                                        onClick={handleTranscriptDownload}
+                                        className="bg-white/10 border border-white/20 text-white font-semibold py-4 px-8 rounded-xl hover:bg-white/20 transition-all flex items-center justify-center gap-2"
+                                    >
+                                        <FileAudio className="w-5 h-5" />
+                                        Download Transcript
+                                    </button>
+                                </div>
 
                                 <button
                                     onClick={resetToUpload}

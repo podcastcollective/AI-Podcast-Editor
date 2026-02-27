@@ -233,9 +233,16 @@ PAUSE RULES:
 
 CONTENT RULES:
 - Look for FALSE STARTS where a speaker starts a sentence, stops, and restarts. Keep the best full version, remove the false start. Only fix stumbles and restarts that reduce clarity \u2014 leave minor ones that sound natural.
+- STUTTERS: When the same word appears twice in a row (e.g. "so so", "part part", "just as just", "still there still"), remove the duplicate. These are speech disfluencies, not emphasis.
 - If the same point is made twice in nearly identical ways, remove the weaker version. Cut at sentence boundaries.
 - Do NOT rewrite or paraphrase content. Do NOT change the meaning or tone of the speaker.
 - All content cuts MUST start at the beginning of a word (use the word's start_ms) and end at the end of a word (use the word's end_ms). NEVER cut mid-word.
+
+PRESERVE RULES (do NOT cut these):
+- TRANSITIONAL PHRASES that connect topics or introduce new points, even if they seem tangential. E.g. "I think the other thing I'd flag which maybe doesn't fall under compliance but it's part of it" — these bridge ideas and must be kept.
+- AGREEMENT MARKERS between speakers like "yeah absolutely", "yeah exactly", "absolutely" — these show active engagement and are part of natural conversation flow.
+- SHORT RESPONSES between speakers like "yeah" or "right" that acknowledge the other speaker — these maintain conversational rhythm and show listening. Only cut if they overlap with the other speaker's words.
+- SPEAKER TRANSITIONS where one person hands off to another — keep the social glue that makes dialogue sound natural.
 
 STRUCTURAL RULES:
 - If there is pre-interview chat before the official episode begins, mark it for removal.

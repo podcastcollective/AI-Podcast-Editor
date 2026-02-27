@@ -440,7 +440,7 @@ def process_with_aicoustics(wav_path):
 
     headers = {'X-API-Key': AI_COUSTICS_API_KEY}
     enhancement_params = json.dumps({
-        'enhancement_model': 'LARK',
+        'enhancement_model': 'LARK_V2',
         'enhancement_level': 100,
         'loudness_target': -19,
         'true_peak': -1,
@@ -677,8 +677,9 @@ def _add_room_tone(wav_path):
 
 def _run_edit_job(job_id, audio_path, cuts_ms, transcript_id=None):
     """
-    Background thread: cuts → ai|coustics → Cleanvoice → MP3 export.
-    ai|coustics handles dereverb, noise, enhancement, and loudness.
+    Background thread: ai|coustics → cuts → Cleanvoice → MP3 export.
+    Enhance FIRST on raw audio so the ML model gets clean continuous input
+    for better dereverb, then apply cuts to the enhanced audio.
     """
     active_stage = 'init'
     try:
@@ -692,17 +693,17 @@ def _run_edit_job(job_id, audio_path, cuts_ms, transcript_id=None):
             except Exception as e:
                 print(f"Warning: could not fetch word timestamps: {e}")
 
-        # Stage 1: Apply cuts
-        active_stage = 'cutting'
-        with _edit_jobs_lock:
-            _edit_jobs[job_id]['status'] = 'cutting'
-        wav_path = apply_audio_edits(audio_path, cuts_ms, words=words)
-
-        # Stage 2: ai|coustics Lark 2 — dereverb, enhance, loudness
+        # Stage 1: ai|coustics — enhance raw audio first for best dereverb
         active_stage = 'enhancing'
         with _edit_jobs_lock:
             _edit_jobs[job_id]['status'] = 'enhancing'
-        wav_path = process_with_aicoustics(wav_path)
+        wav_path = process_with_aicoustics(audio_path)
+
+        # Stage 2: Apply cuts to enhanced audio
+        active_stage = 'cutting'
+        with _edit_jobs_lock:
+            _edit_jobs[job_id]['status'] = 'cutting'
+        wav_path = apply_audio_edits(wav_path, cuts_ms, words=words)
 
         # Stage 3: Cleanvoice — mouth sounds, breathing
         if CLEANVOICE_API_KEY:

@@ -146,6 +146,62 @@ def _get_preset(name):
     return PRESETS.get(name, PRESETS['zoom'])
 
 
+def _analyze_audio(audio_path, transcript_data):
+    """
+    Analyze audio + transcript metadata to auto-detect the best preset.
+    Returns (preset_name, metrics_dict).
+    """
+    from pydub import AudioSegment
+
+    audio = AudioSegment.from_file(audio_path)
+
+    # Speaker count from utterances
+    utterances = transcript_data.get('utterances', [])
+    speakers = set(u.get('speaker') for u in utterances if u.get('speaker'))
+    speaker_count = len(speakers)
+
+    # Noise floor: measure RMS of gaps between words (silence segments)
+    words = transcript_data.get('words', [])
+    gap_dbfs_values = []
+    for i in range(len(words) - 1):
+        gap_start = words[i].get('end', 0)
+        gap_end = words[i + 1].get('start', 0)
+        gap_ms = gap_end - gap_start
+        if gap_ms >= 200:  # only measure gaps >= 200ms
+            segment = audio[gap_start:gap_end]
+            if len(segment) > 0:
+                gap_dbfs_values.append(segment.dBFS)
+            if len(gap_dbfs_values) >= 30:  # sample up to 30 gaps
+                break
+    noise_floor = sum(gap_dbfs_values) / len(gap_dbfs_values) if gap_dbfs_values else -35.0
+
+    # Transcription confidence
+    confidence = transcript_data.get('confidence', 0) or 0
+
+    # Dynamic range
+    dynamic_range = audio.max_dBFS - audio.dBFS if audio.dBFS != float('-inf') else 0
+
+    # Decision tree
+    if speaker_count <= 1:
+        preset_name = 'solo'
+    elif noise_floor < -42 and confidence >= 0.90 and dynamic_range > 10:
+        preset_name = 'studio'
+    elif noise_floor > -28 or confidence < 0.78:
+        preset_name = 'raw'
+    else:
+        preset_name = 'zoom'
+
+    metrics = {
+        'speakers': speaker_count,
+        'noise_floor': round(noise_floor, 1),
+        'confidence': round(confidence, 3),
+        'dynamic_range': round(dynamic_range, 1),
+    }
+    print(f"Auto-detect: speakers={speaker_count}, noise_floor={noise_floor:.1f}dB, "
+          f"confidence={confidence:.3f}, dynamic_range={dynamic_range:.1f}dB → {preset_name}")
+    return preset_name, metrics
+
+
 # ============================================================================
 # CLAUDE — edit analysis
 # ============================================================================
@@ -781,9 +837,32 @@ def transcription_status(transcript_id):
         return jsonify({"error": str(e)}), 500
 
 
-def _run_analysis_job(job_id, transcript_data, filename, preset_cfg, custom_instructions):
-    """Background thread: run Claude analysis."""
+def _run_analysis_job(job_id, transcript_data, filename, preset_name, transcript_id, custom_instructions):
+    """Background thread: auto-detect preset if needed, then run Claude analysis."""
     try:
+        detected_preset = None
+        detection_metrics = None
+
+        # Auto-detect preset from audio analysis
+        if preset_name == 'auto':
+            with _jobs_lock:
+                _jobs[job_id]['status'] = 'detecting'
+            audio_path = None
+            for ext in ALLOWED_EXTENSIONS:
+                path = f"/tmp/{transcript_id}.{ext}"
+                if os.path.exists(path):
+                    audio_path = path
+                    break
+            if audio_path:
+                detected_preset, detection_metrics = _analyze_audio(audio_path, transcript_data)
+                preset_cfg = _get_preset(detected_preset)
+            else:
+                print("Auto-detect: audio file not found, falling back to 'zoom'")
+                detected_preset = 'zoom'
+                preset_cfg = _get_preset('zoom')
+        else:
+            preset_cfg = _get_preset(preset_name)
+
         with _jobs_lock:
             _jobs[job_id]['status'] = 'analyzing'
 
@@ -803,6 +882,11 @@ def _run_analysis_job(job_id, transcript_data, filename, preset_cfg, custom_inst
                 "confidence": transcript_data.get('confidence', 0) or 0,
             }
         }
+        if detected_preset:
+            result['detected_preset'] = detected_preset
+        if detection_metrics:
+            result['detection_metrics'] = detection_metrics
+
         with _jobs_lock:
             _jobs[job_id] = {'status': 'completed', 'result': result}
         print(f"Analysis job {job_id} complete: {cuts_count} cuts")
@@ -831,7 +915,7 @@ def process_podcast():
         data = request.json
         transcript_id = data.get('transcript_id')
         filename = data.get('filename', 'episode')
-        preset_cfg = _get_preset(data.get('preset', 'zoom'))
+        preset_name = data.get('preset', 'auto')
         custom_instructions = data.get('customInstructions', '')
 
         if not transcript_id:
@@ -850,7 +934,7 @@ def process_podcast():
 
         threading.Thread(
             target=_run_analysis_job,
-            args=(job_id, transcript_data, filename, preset_cfg, custom_instructions),
+            args=(job_id, transcript_data, filename, preset_name, transcript_id, custom_instructions),
             daemon=True,
         ).start()
 

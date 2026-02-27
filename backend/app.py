@@ -98,6 +98,55 @@ def get_transcription(transcript_id):
 
 
 # ============================================================================
+# PRESETS — control both Claude editing and Cleanvoice enhancement
+# ============================================================================
+
+PRESETS = {
+    'studio': {
+        'remove_fillers': True,
+        'filler_pct': 40,           # remove fewer fillers — studio audio is clean
+        'remove_pauses': True,
+        'pause_min_ms': 2500,       # only trim very long pauses
+        'studio_sound': False,      # skip heavy enhancement — already clean
+        'remove_noise': False,
+        'claude_hint': 'This is a studio recording with clean audio. Be very conservative with cuts — only remove clear disfluencies. The audio quality is already good, so preserve the natural sound.',
+    },
+    'zoom': {
+        'remove_fillers': True,
+        'filler_pct': 60,
+        'remove_pauses': True,
+        'pause_min_ms': 2000,
+        'studio_sound': 'nightly',  # full dereverb + enhancement
+        'remove_noise': True,
+        'claude_hint': 'This is a remote/Zoom recording. Standard editing — remove clear filler words and trim long pauses while keeping conversational flow.',
+    },
+    'solo': {
+        'remove_fillers': True,
+        'filler_pct': 80,           # aggressive filler removal for narration
+        'remove_pauses': True,
+        'pause_min_ms': 1500,       # tighter pause trimming
+        'studio_sound': 'nightly',
+        'remove_noise': True,
+        'claude_hint': 'This is solo narration. Be more aggressive with filler word removal since there is no conversation to preserve. Tighten pauses for a polished delivery.',
+    },
+    'raw': {
+        'remove_fillers': True,
+        'filler_pct': 80,
+        'remove_pauses': True,
+        'pause_min_ms': 1500,
+        'studio_sound': 'nightly',
+        'remove_noise': True,
+        'claude_hint': 'This is a rough recording that needs heavy cleanup. Be aggressive with filler removal and pause trimming. Look for false starts and repeated sentences to cut.',
+    },
+}
+
+
+def _get_preset(name):
+    """Return preset config, defaulting to 'zoom' for unknown values."""
+    return PRESETS.get(name, PRESETS['zoom'])
+
+
+# ============================================================================
 # CLAUDE — edit analysis
 # ============================================================================
 
@@ -161,7 +210,7 @@ def format_timestamp(milliseconds):
     return f"{hours:02d}:{minutes:02d}:{secs:02d}"
 
 
-def analyze_transcript_with_claude(transcript_data, requirements, custom_instructions=""):
+def analyze_transcript_with_claude(transcript_data, preset_cfg, custom_instructions=""):
     """Pre-detect fillers/pauses, then ask Claude for editorial decisions."""
     print("Analyzing transcript with Claude...")
     client = anthropic.Anthropic(api_key=CLAUDE_API_KEY)
@@ -177,7 +226,8 @@ def analyze_transcript_with_claude(transcript_data, requirements, custom_instruc
         utt_lines.append(f"[{start}] Speaker {speaker}: {text}")
     utt_text = "\n".join(utt_lines) if utt_lines else transcript_data.get("text", "")[:4000]
 
-    remove_fillers = requirements.get('removeFillerWords', True)
+    remove_fillers = preset_cfg.get('remove_fillers', True)
+    filler_pct = preset_cfg.get('filler_pct', 60)
     fillers = _find_fillers(words) if remove_fillers else []
     filler_lines = [
         f'{f["start_ms"]} {f["end_ms"]} "{f["text"]}" (Speaker {f["speaker"]})'
@@ -185,8 +235,9 @@ def analyze_transcript_with_claude(transcript_data, requirements, custom_instruc
     ]
     filler_text = "\n".join(filler_lines) if filler_lines else "None detected"
 
-    remove_pauses = requirements.get('removeLongPauses', True)
-    pauses = _find_pauses(words, min_ms=2000) if remove_pauses else []
+    remove_pauses = preset_cfg.get('remove_pauses', True)
+    pause_min_ms = preset_cfg.get('pause_min_ms', 2000)
+    pauses = _find_pauses(words, min_ms=pause_min_ms) if remove_pauses else []
     pause_lines = [
         f'{p["start_ms"]} {p["end_ms"]} {p["duration_ms"]}ms  ("{p["before"]}" \u2192 "{p["after"]}")'
         for p in pauses[:100]
@@ -203,13 +254,11 @@ UTTERANCE TRANSCRIPT (for context):
 PRE-DETECTED FILLER WORDS (format: start_ms end_ms "word" speaker):
 {filler_text}
 
-PRE-DETECTED PAUSES >2s (format: start_ms end_ms duration before\u2192after):
+PRE-DETECTED PAUSES >{pause_min_ms}ms (format: start_ms end_ms duration before\u2192after):
 {pause_text}
 
-CLIENT REQUIREMENTS:
-- Remove filler words: {remove_fillers}
-- Trim long pauses: {remove_pauses}
-- Target length: {requirements.get('targetLength', 'Not specified')}
+RECORDING CONTEXT:
+{preset_cfg.get('claude_hint', '')}
 
 CUSTOM INSTRUCTIONS:
 {custom_instructions if custom_instructions else "None"}
@@ -222,7 +271,7 @@ EDITING PHILOSOPHY:
 - NEVER make a Content Cut that would break a sentence or remove words that are needed for the sentence to make grammatical sense. If a cut would leave an incomplete or nonsensical sentence, do NOT make it.
 
 FILLER WORD RULES:
-- Remove approximately 60% of the filler words listed above \u2014 NOT all of them.
+- Remove approximately {filler_pct}% of the filler words listed above \u2014 NOT all of them.
 - Keep fillers that serve as clear natural transitions between distinct thoughts.
 - Remove fillers that cluster together, interrupt flow, or appear mid-sentence.
 - Use the EXACT start_ms and end_ms provided. CRITICAL: Never adjust these timestamps \u2014 they are word-level boundaries from the transcription engine.
@@ -439,8 +488,10 @@ def apply_audio_edits(audio_path, cuts_ms, words=None):
 # CLEANVOICE — studio sound, dereverb, mouth sounds, breathing
 # ============================================================================
 
-def process_with_cleanvoice(audio_path):
+def process_with_cleanvoice(audio_path, preset_cfg=None):
     """Send audio to Cleanvoice for Studio Sound enhancement + cleanup."""
+    if preset_cfg is None:
+        preset_cfg = _get_preset('zoom')
     headers = {"X-API-Key": CLEANVOICE_API_KEY}
     filename = os.path.basename(audio_path)
     file_size_mb = os.path.getsize(audio_path) / 1024 / 1024
@@ -474,10 +525,10 @@ def process_with_cleanvoice(audio_path):
             "input": {
                 "files": [signed_url.split('?')[0]],
                 "config": {
-                    "remove_noise": True,
+                    "remove_noise": preset_cfg.get('remove_noise', True),
                     "fillers": True,
                     "long_silences": False,
-                    "studio_sound": "nightly",
+                    "studio_sound": preset_cfg.get('studio_sound', 'nightly'),
                 }
             }
         },
@@ -540,11 +591,13 @@ def process_with_cleanvoice(audio_path):
 # EDIT PIPELINE — background job
 # ============================================================================
 
-def _run_edit_job(job_id, audio_path, cuts_ms, transcript_id=None):
+def _run_edit_job(job_id, audio_path, cuts_ms, transcript_id=None, preset_cfg=None):
     """
     Background thread: cuts \u2192 Cleanvoice Studio Sound \u2192 MP3 export.
     Cleanvoice handles dereverb, noise, enhancement, and mouth sounds.
     """
+    if preset_cfg is None:
+        preset_cfg = _get_preset('zoom')
     active_stage = 'init'
     try:
         # Fetch word timestamps for smart cut snapping
@@ -564,11 +617,11 @@ def _run_edit_job(job_id, audio_path, cuts_ms, transcript_id=None):
         wav_path = apply_audio_edits(audio_path, cuts_ms, words=words)
 
         # Stage 2: Cleanvoice Studio Sound — dereverb, enhance, mouth sounds
-        if CLEANVOICE_API_KEY:
+        if CLEANVOICE_API_KEY and preset_cfg.get('studio_sound'):
             active_stage = 'cleanvoice'
             with _edit_jobs_lock:
                 _edit_jobs[job_id]['status'] = 'cleanvoice'
-            wav_path = process_with_cleanvoice(wav_path)
+            wav_path = process_with_cleanvoice(wav_path, preset_cfg)
 
         # Export as MP3
         from pydub import AudioSegment
@@ -600,7 +653,7 @@ def _run_edit_job(job_id, audio_path, cuts_ms, transcript_id=None):
 # REPORT
 # ============================================================================
 
-def generate_edit_report(filename, transcript_data, edit_analysis, requirements):
+def generate_edit_report(filename, transcript_data, edit_analysis, preset_cfg):
     decisions = edit_analysis['edit_decisions']
     cuts = [d for d in decisions if 'start_ms' in d and 'end_ms' in d]
     report = f"""
@@ -613,13 +666,12 @@ PROCESSED: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 DURATION: {format_timestamp(transcript_data.get('audio_duration', 0))}
 
 --------------------------------------------------------------------------------
-CLIENT REQUIREMENTS
+PRESET
 --------------------------------------------------------------------------------
-Remove filler words: {requirements.get('removeFillerWords', True)}
-Remove long pauses: {requirements.get('removeLongPauses', True)}
-Normalize audio: {requirements.get('normalizeAudio', True)}
-Remove background noise: {requirements.get('removeBackgroundNoise', True)}
-Target length: {requirements.get('targetLength', 'Not specified')}
+Filler removal: {preset_cfg.get('filler_pct', 60)}%
+Pause threshold: {preset_cfg.get('pause_min_ms', 2000)}ms
+Studio sound: {preset_cfg.get('studio_sound', 'nightly')}
+Noise removal: {preset_cfg.get('remove_noise', True)}
 
 --------------------------------------------------------------------------------
 TRANSCRIPT STATISTICS
@@ -729,14 +781,14 @@ def transcription_status(transcript_id):
         return jsonify({"error": str(e)}), 500
 
 
-def _run_analysis_job(job_id, transcript_data, filename, requirements, custom_instructions):
+def _run_analysis_job(job_id, transcript_data, filename, preset_cfg, custom_instructions):
     """Background thread: run Claude analysis."""
     try:
         with _jobs_lock:
             _jobs[job_id]['status'] = 'analyzing'
 
-        edit_analysis = analyze_transcript_with_claude(transcript_data, requirements, custom_instructions)
-        report = generate_edit_report(filename, transcript_data, edit_analysis, requirements)
+        edit_analysis = analyze_transcript_with_claude(transcript_data, preset_cfg, custom_instructions)
+        report = generate_edit_report(filename, transcript_data, edit_analysis, preset_cfg)
         cuts_count = sum(1 for d in edit_analysis['edit_decisions'] if 'start_ms' in d and 'end_ms' in d)
 
         result = {
@@ -779,7 +831,7 @@ def process_podcast():
         data = request.json
         transcript_id = data.get('transcript_id')
         filename = data.get('filename', 'episode')
-        requirements = data.get('requirements', {})
+        preset_cfg = _get_preset(data.get('preset', 'zoom'))
         custom_instructions = data.get('customInstructions', '')
 
         if not transcript_id:
@@ -798,7 +850,7 @@ def process_podcast():
 
         threading.Thread(
             target=_run_analysis_job,
-            args=(job_id, transcript_data, filename, requirements, custom_instructions),
+            args=(job_id, transcript_data, filename, preset_cfg, custom_instructions),
             daemon=True,
         ).start()
 
@@ -833,10 +885,11 @@ def edit_audio():
         data = request.json
         transcript_id = data.get('transcript_id')
         cuts = data.get('cuts', [])
+        preset_cfg = _get_preset(data.get('preset', 'zoom'))
 
         if not transcript_id:
             return jsonify({"error": "No transcript_id provided"}), 400
-        if not CLEANVOICE_API_KEY:
+        if not CLEANVOICE_API_KEY and preset_cfg.get('studio_sound'):
             return jsonify({"error": "CLEANVOICE_API_KEY not configured \u2014 cannot enhance audio"}), 500
 
         audio_path = None
@@ -853,7 +906,7 @@ def edit_audio():
             for c in cuts
             if 'start_ms' in c and 'end_ms' in c
         ]
-        print(f"Edit job: {len(cuts_ms)} cuts")
+        print(f"Edit job: {len(cuts_ms)} cuts, preset: {data.get('preset', 'zoom')}")
 
         job_id = str(uuid.uuid4())
         with _edit_jobs_lock:
@@ -861,7 +914,7 @@ def edit_audio():
 
         threading.Thread(
             target=_run_edit_job,
-            args=(job_id, audio_path, cuts_ms, transcript_id),
+            args=(job_id, audio_path, cuts_ms, transcript_id, preset_cfg),
             daemon=True,
         ).start()
 

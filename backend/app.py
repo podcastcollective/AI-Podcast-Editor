@@ -107,6 +107,7 @@ PRESETS = {
         'filler_pct': 40,           # remove fewer fillers — studio audio is clean
         'remove_pauses': True,
         'pause_min_ms': 2500,       # only trim very long pauses
+        'pause_target_ms': 800,
         'studio_sound': False,      # skip heavy enhancement — already clean
         'remove_noise': False,
         'claude_hint': 'This is a studio recording with clean audio. Be very conservative with cuts — only remove clear disfluencies. The audio quality is already good, so preserve the natural sound.',
@@ -116,6 +117,7 @@ PRESETS = {
         'filler_pct': 60,
         'remove_pauses': True,
         'pause_min_ms': 2000,
+        'pause_target_ms': 800,
         'studio_sound': 'nightly',  # full dereverb + enhancement
         'remove_noise': True,
         'claude_hint': 'This is a remote/Zoom recording. Standard editing — remove clear filler words and trim long pauses while keeping conversational flow.',
@@ -124,7 +126,8 @@ PRESETS = {
         'remove_fillers': True,
         'filler_pct': 80,           # aggressive filler removal for narration
         'remove_pauses': True,
-        'pause_min_ms': 1500,       # tighter pause trimming
+        'pause_min_ms': 800,        # catch shorter pauses for tight narration
+        'pause_target_ms': 400,     # trim to ~0.4s for polished delivery
         'studio_sound': 'nightly',
         'remove_noise': True,
         'claude_hint': 'This is solo narration. Be more aggressive with filler word removal since there is no conversation to preserve. Tighten pauses for a polished delivery.',
@@ -134,6 +137,7 @@ PRESETS = {
         'filler_pct': 80,
         'remove_pauses': True,
         'pause_min_ms': 1500,
+        'pause_target_ms': 800,
         'studio_sound': 'nightly',
         'remove_noise': True,
         'claude_hint': 'This is a rough recording that needs heavy cleanup. Be aggressive with filler removal and pause trimming. Look for false starts and repeated sentences to cut.',
@@ -293,6 +297,7 @@ def analyze_transcript_with_claude(transcript_data, preset_cfg, custom_instructi
 
     remove_pauses = preset_cfg.get('remove_pauses', True)
     pause_min_ms = preset_cfg.get('pause_min_ms', 2000)
+    pause_target_ms = preset_cfg.get('pause_target_ms', 800)
     pauses = _find_pauses(words, min_ms=pause_min_ms) if remove_pauses else []
     pause_lines = [
         f'{p["start_ms"]} {p["end_ms"]} {p["duration_ms"]}ms  ("{p["before"]}" \u2192 "{p["after"]}")'
@@ -334,8 +339,9 @@ FILLER WORD RULES:
 - Preserve ALL acronyms and industry-specific terms exactly as spoken \u2014 they are key terminology, not mistakes.
 
 PAUSE RULES:
-- For pauses listed above, trim so that any pause longer than 2 seconds becomes about 0.8 seconds.
-- Set start_ms = pause_start_ms + 800, end_ms = pause_end_ms (keeps ~0.8s of natural pause).
+- For pauses listed above, trim so that any pause longer than {pause_min_ms}ms becomes about {pause_target_ms/1000:.1f} seconds.
+- Set start_ms = pause_start_ms + {pause_target_ms}, end_ms = pause_end_ms (keeps ~{pause_target_ms/1000:.1f}s of natural pause).
+- Trim ALL pauses in the list above \u2014 they have already been filtered by threshold, so every one should be trimmed.
 - Do NOT remove short, intentional pauses used for emphasis \u2014 only trim the clearly excessive ones.
 
 CONTENT RULES:

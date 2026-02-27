@@ -215,9 +215,11 @@ CUSTOM INSTRUCTIONS:
 {custom_instructions if custom_instructions else "None"}
 
 EDITING PHILOSOPHY:
+- Be CONSERVATIVE. Only cut things you are highly confident should be removed. A slightly imperfect but natural-sounding podcast is far better than one with broken sentences or jarring cuts.
 - Preserve personality, rhythm, and emotion. The episode should sound human, not robotic.
 - Avoid abrupt or robotic cuts \u2014 edits must sound conversational and smooth.
-- Do NOT over-edit. When in doubt, leave it in.
+- Do NOT over-edit. When in doubt, ALWAYS leave it in.
+- NEVER make a Content Cut that would break a sentence or remove words that are needed for the sentence to make grammatical sense. If a cut would leave an incomplete or nonsensical sentence, do NOT make it.
 
 FILLER WORD RULES:
 - Remove approximately 60% of the filler words listed above \u2014 NOT all of them.
@@ -232,11 +234,12 @@ PAUSE RULES:
 - Do NOT remove short, intentional pauses used for emphasis \u2014 only trim the clearly excessive ones.
 
 CONTENT RULES:
-- Look for FALSE STARTS where a speaker starts a sentence, stops, and restarts. Keep the best full version, remove the false start. Only fix stumbles and restarts that reduce clarity \u2014 leave minor ones that sound natural.
-- STUTTERS: When the same word appears twice in a row (e.g. "so so", "part part", "just as just", "still there still"), remove the duplicate. These are speech disfluencies, not emphasis.
-- If the same point is made twice in nearly identical ways, remove the weaker version. Cut at sentence boundaries.
+- STUTTERS: When the EXACT same word appears twice in a row (e.g. "so so", "part part", "just as just", "still there still"), remove the duplicate. These are speech disfluencies, not emphasis. This is the safest type of content cut.
+- FALSE STARTS: Only cut when a speaker clearly abandons a sentence and restarts it. You must be very confident the restart is cleaner. If in doubt, leave both.
+- Do NOT make speculative content cuts. Only cut content you are 95%+ confident should be removed.
 - Do NOT rewrite or paraphrase content. Do NOT change the meaning or tone of the speaker.
 - All content cuts MUST start at the beginning of a word (use the word's start_ms) and end at the end of a word (use the word's end_ms). NEVER cut mid-word.
+- SAFETY CHECK: Before finalizing any Content Cut, mentally read the sentence with the cut applied. If the remaining words do not form a complete, grammatical sentence, do NOT make the cut.
 
 PRESERVE RULES (do NOT cut these):
 - TRANSITIONAL PHRASES that connect topics or introduce new points, even if they seem tangential. E.g. "I think the other thing I'd flag which maybe doesn't fall under compliance but it's part of it" — these bridge ideas and must be kept.

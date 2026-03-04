@@ -26,10 +26,24 @@ ALLOWED_EXTENSIONS = {'mp3', 'wav', 'm4a', 'aac', 'ogg'}
 # API keys
 ASSEMBLYAI_API_KEY = os.environ.get('ASSEMBLYAI_API_KEY')
 CLAUDE_API_KEY = os.environ.get('CLAUDE_API_KEY')
-ADOBE_ENHANCE_TOKEN = os.environ.get('ADOBE_ENHANCE_TOKEN')
+_adobe_token_lock = threading.Lock()
+_adobe_token: str | None = os.environ.get('ADOBE_ENHANCE_TOKEN')
+
+
+def get_adobe_token():
+    with _adobe_token_lock:
+        return _adobe_token
+
+
+def set_adobe_token(token):
+    global _adobe_token
+    with _adobe_token_lock:
+        _adobe_token = token
+
+
 if not ASSEMBLYAI_API_KEY or not CLAUDE_API_KEY:
     print("WARNING: ASSEMBLYAI_API_KEY and CLAUDE_API_KEY are required")
-if ADOBE_ENHANCE_TOKEN:
+if _adobe_token:
     print("Adobe Enhance Speech: configured (auto-enhance enabled)")
 else:
     print("Adobe Enhance Speech: not configured (manual enhance mode)")
@@ -568,10 +582,11 @@ ADOBE_API_BASE = 'https://phonos-server-flex.adobe.io'
 
 def _adobe_headers():
     """Base headers for authenticated Adobe API requests."""
+    token = get_adobe_token()
     return {
         'accept': '*/*',
         'accept-language': 'en-US,en;q=0.9',
-        'authorization': f'Bearer {ADOBE_ENHANCE_TOKEN}' if not ADOBE_ENHANCE_TOKEN.startswith('Bearer ') else ADOBE_ENHANCE_TOKEN,
+        'authorization': f'Bearer {token}' if not token.startswith('Bearer ') else token,
         'origin': 'https://podcast.adobe.com',
         'referer': 'https://podcast.adobe.com/',
         'sec-ch-ua': '"Chromium";v="137", "Not/A)Brand";v="24"',
@@ -718,7 +733,7 @@ def _run_edit_job(job_id, audio_path, cuts_ms, transcript_id=None):
         wav_path = apply_audio_edits(audio_path, cuts_ms, words=words)
 
         # If no Adobe token, stop here for manual enhancement
-        if not ADOBE_ENHANCE_TOKEN:
+        if not get_adobe_token():
             with _edit_jobs_lock:
                 _edit_jobs[job_id]['status'] = 'cuts_completed'
                 _edit_jobs[job_id]['cuts_path'] = wav_path
@@ -1200,8 +1215,25 @@ def status():
         "status": "online",
         "assemblyai_configured": bool(ASSEMBLYAI_API_KEY),
         "claude_configured": bool(CLAUDE_API_KEY),
-        "adobe_enhance_configured": bool(ADOBE_ENHANCE_TOKEN),
+        "adobe_enhance_configured": bool(get_adobe_token()),
     })
+
+
+@app.route('/api/set-adobe-token', methods=['POST', 'OPTIONS'])
+def set_adobe_token_route():
+    """Receive a fresh Adobe Bearer token from the Chrome extension."""
+    if request.method == 'OPTIONS':
+        return '', 204
+    data = request.json or {}
+    token = data.get('token', '').strip()
+    if not token:
+        return jsonify({"error": "No token provided"}), 400
+    # Strip "Bearer " prefix if the extension sent it with the prefix
+    if token.startswith('Bearer '):
+        token = token[7:]
+    set_adobe_token(token)
+    print(f"Adobe token updated via API ({len(token)} chars)")
+    return jsonify({"success": True})
 
 
 if __name__ == '__main__':

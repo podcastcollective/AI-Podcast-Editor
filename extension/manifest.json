@@ -1,0 +1,14 @@
+{
+  "manifest_version": 3,
+  "name": "Adobe Token Sync",
+  "version": "1.0",
+  "description": "Auto-sync Adobe Enhance Speech token to AI Podcast Editor backend",
+  "permissions": ["webRequest"],
+  "host_permissions": [
+    "https://phonos-server-flex.adobe.io/*",
+    "https://ai-podcast-editor-production.up.railway.app/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  }
+}

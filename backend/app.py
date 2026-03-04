@@ -702,8 +702,11 @@ def _run_edit_job(job_id, audio_path, cuts_ms, transcript_id=None, preset_cfg=No
             audio = AudioSegment.from_mono_audiosegments(audio, audio)
 
         # Normalize loudness to -16 LUFS (podcast standard) via simple gain
+        # Cap gain so peaks stay below -1dBFS to avoid clipping
         TARGET_DBFS = -16.0
         gain = TARGET_DBFS - audio.dBFS
+        max_gain = -1.0 - audio.max_dBFS
+        gain = min(gain, max_gain)
         audio = audio.apply_gain(gain)
         print(f"Loudness normalized: {audio.dBFS - gain:.1f} → {audio.dBFS:.1f} dBFS (gain {gain:+.1f}dB)")
 

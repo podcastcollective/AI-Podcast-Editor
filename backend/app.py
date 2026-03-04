@@ -126,8 +126,8 @@ PRESETS = {
         'remove_fillers': True,
         'filler_pct': 80,           # aggressive filler removal for narration
         'remove_pauses': True,
-        'pause_min_ms': 800,        # catch shorter pauses for tight narration
-        'pause_target_ms': 400,     # trim to ~0.4s for polished delivery
+        'pause_min_ms': 600,        # catch shorter pauses for tight narration
+        'pause_target_ms': 300,     # trim to ~0.3s for polished delivery
         'studio_sound': 'nightly',
         'remove_noise': True,
         'claude_hint': 'This is solo narration. Be more aggressive with filler word removal since there is no conversation to preserve. Tighten pauses for a polished delivery.',
@@ -525,7 +525,7 @@ def apply_audio_edits(audio_path, cuts_ms, words=None):
         cut[1] = _snap_to_zero_crossing(audio, cut[1])
 
     # Build kept segments with crossfade
-    CROSSFADE_MS = 50
+    CROSSFADE_MS = 100
     segments = []
     pos = 0
     for s, e in merged:

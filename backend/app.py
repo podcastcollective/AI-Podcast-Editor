@@ -12,6 +12,9 @@ import threading
 import uuid
 from datetime import datetime
 from werkzeug.utils import secure_filename
+import hashlib
+import base64
+import urllib.parse
 import anthropic
 import requests
 
@@ -23,8 +26,13 @@ ALLOWED_EXTENSIONS = {'mp3', 'wav', 'm4a', 'aac', 'ogg'}
 # API keys
 ASSEMBLYAI_API_KEY = os.environ.get('ASSEMBLYAI_API_KEY')
 CLAUDE_API_KEY = os.environ.get('CLAUDE_API_KEY')
+ADOBE_ENHANCE_TOKEN = os.environ.get('ADOBE_ENHANCE_TOKEN')
 if not ASSEMBLYAI_API_KEY or not CLAUDE_API_KEY:
     print("WARNING: ASSEMBLYAI_API_KEY and CLAUDE_API_KEY are required")
+if ADOBE_ENHANCE_TOKEN:
+    print("Adobe Enhance Speech: configured (auto-enhance enabled)")
+else:
+    print("Adobe Enhance Speech: not configured (manual enhance mode)")
 
 # In-memory job stores. Gunicorn must use threads (not processes) so these are shared.
 _jobs: dict = {}
@@ -552,14 +560,147 @@ def apply_audio_edits(audio_path, cuts_ms, words=None):
 
 
 # ============================================================================
+# ADOBE ENHANCE SPEECH — reverse-engineered API
+# ============================================================================
+
+ADOBE_API_BASE = 'https://phonos-server-flex.adobe.io'
+
+
+def _adobe_headers():
+    """Base headers for authenticated Adobe API requests."""
+    return {
+        'accept': '*/*',
+        'accept-language': 'en-US,en;q=0.9',
+        'authorization': f'Bearer {ADOBE_ENHANCE_TOKEN}' if not ADOBE_ENHANCE_TOKEN.startswith('Bearer ') else ADOBE_ENHANCE_TOKEN,
+        'origin': 'https://podcast.adobe.com',
+        'referer': 'https://podcast.adobe.com/',
+        'sec-ch-ua': '"Chromium";v="137", "Not/A)Brand";v="24"',
+        'sec-ch-ua-mobile': '?0',
+        'sec-ch-ua-platform': '"Windows"',
+        'sec-fetch-dest': 'empty',
+        'sec-fetch-mode': 'cors',
+        'sec-fetch-site': 'cross-site',
+        'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36',
+        'x-api-key': 'phonos-server-prod',
+    }
+
+
+def process_with_adobe_enhance(audio_path):
+    """Upload audio to Adobe Enhance Speech API and download enhanced result."""
+    headers = _adobe_headers()
+
+    # Read file and compute MD5 checksum
+    with open(audio_path, 'rb') as f:
+        file_data = f.read()
+    file_size = len(file_data)
+    checksum = base64.b64encode(hashlib.md5(file_data).digest()).decode('utf-8')
+    filename = os.path.basename(audio_path)
+
+    # Step 1: Get signed upload URL
+    print(f"Adobe Enhance: requesting upload URL for {filename} ({file_size // 1024}KB)")
+    resp = requests.post(
+        f'{ADOBE_API_BASE}/rails/active_storage/direct_uploads',
+        headers={**headers, 'content-type': 'application/json'},
+        json={
+            'blob': {
+                'filename': filename,
+                'content_type': 'audio/wav',
+                'byte_size': file_size,
+                'checksum': checksum,
+            }
+        },
+    )
+    if resp.status_code != 200:
+        raise Exception(f'Adobe upload URL request failed: {resp.status_code} - {resp.text[:200]}')
+    upload_data = resp.json()
+    signed_id = upload_data['signed_id']
+    signed_url = upload_data['direct_upload']['url']
+    print(f"Adobe Enhance: got signed upload URL, signed_id={signed_id[:20]}...")
+
+    # Step 2: Upload file to signed URL (no auth needed — pre-signed)
+    upload_headers = {
+        'Content-Length': str(file_size),
+        'Content-Md5': checksum,
+        'Content-Type': 'audio/wav',
+        'Content-Disposition': f'inline; filename="{urllib.parse.quote(filename)}"; filename*=UTF-8\'\'{urllib.parse.quote(filename)}',
+        'Accept': '*/*',
+        'Origin': 'https://podcast.adobe.com',
+        'Referer': 'https://podcast.adobe.com/',
+        'Sec-Fetch-Site': 'cross-site',
+        'Sec-Fetch-Mode': 'cors',
+        'Sec-Fetch-Dest': 'empty',
+    }
+    resp = requests.put(signed_url, headers=upload_headers, data=file_data)
+    if resp.status_code not in (200, 204):
+        raise Exception(f'Adobe file upload failed: {resp.status_code} - {resp.text[:200]}')
+    print("Adobe Enhance: file uploaded successfully")
+
+    # Step 3: Create enhancement job
+    track_id = str(uuid.uuid4())
+    timestamp_ms = str(int(time.time() * 1000))
+    resp = requests.post(
+        f'{ADOBE_API_BASE}/api/v1/enhance_speech_tracks',
+        headers={**headers, 'content-type': 'application/json'},
+        params={'time': timestamp_ms},
+        json={
+            'id': track_id,
+            'track_name': filename,
+            'model_version': 'v1',
+            'signed_id': signed_id,
+        },
+    )
+    if resp.status_code not in (200, 201):
+        raise Exception(f'Adobe enhance job creation failed: {resp.status_code} - {resp.text[:200]}')
+    print(f"Adobe Enhance: enhancement job created, track_id={track_id}")
+
+    # Step 4: Poll for completion (max 60 attempts x 5s = 5 min)
+    download_url = None
+    for attempt in range(60):
+        time.sleep(5)
+        timestamp_ms = str(int(time.time() * 1000))
+        resp = requests.get(
+            f'{ADOBE_API_BASE}/api/v1/enhance_speech_tracks/{track_id}/enhanced_audio',
+            headers=headers,
+            params={'time': timestamp_ms},
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            if data and 'url' in data:
+                download_url = data['url'].replace('\u0026', '&')
+                break
+        elif resp.status_code == 204:
+            if attempt % 6 == 0:
+                print(f"Adobe Enhance: still processing... ({attempt * 5}s elapsed)")
+            continue
+        else:
+            raise Exception(f'Adobe enhance poll failed: {resp.status_code} - {resp.text[:200]}')
+    if not download_url:
+        raise Exception('Adobe Enhance Speech timed out after 5 minutes')
+    print(f"Adobe Enhance: processing complete, downloading enhanced audio")
+
+    # Step 5: Download enhanced file
+    resp = requests.get(download_url, stream=True)
+    if resp.status_code != 200:
+        raise Exception(f'Adobe enhanced file download failed: {resp.status_code}')
+
+    enhanced_path = audio_path.rsplit('.', 1)[0] + '_adobe_enhanced.wav'
+    with open(enhanced_path, 'wb') as f:
+        for chunk in resp.iter_content(chunk_size=8192):
+            f.write(chunk)
+    enhanced_size = os.path.getsize(enhanced_path)
+    print(f"Adobe Enhance: saved {enhanced_path} ({enhanced_size // 1024}KB)")
+    return enhanced_path
+
+
+# ============================================================================
 # EDIT PIPELINE — two-phase background jobs
 # ============================================================================
 
-def _run_cuts_job(job_id, audio_path, cuts_ms, transcript_id=None):
+def _run_edit_job(job_id, audio_path, cuts_ms, transcript_id=None):
     """
-    Background thread phase 1: apply cuts -> export intermediate WAV.
-    After this completes the user enhances externally (e.g. Adobe Enhance Speech)
-    then re-uploads the enhanced file for finalization.
+    Background thread: apply cuts, then either auto-enhance or stop for manual enhance.
+    - ADOBE_ENHANCE_TOKEN set: cuts → Adobe enhance → finalize → completed
+    - Token not set: cuts → cuts_completed (user enhances manually, re-uploads)
     """
     try:
         # Fetch word timestamps for smart cut snapping
@@ -576,10 +717,23 @@ def _run_cuts_job(job_id, audio_path, cuts_ms, transcript_id=None):
             _edit_jobs[job_id]['status'] = 'cutting'
         wav_path = apply_audio_edits(audio_path, cuts_ms, words=words)
 
+        # If no Adobe token, stop here for manual enhancement
+        if not ADOBE_ENHANCE_TOKEN:
+            with _edit_jobs_lock:
+                _edit_jobs[job_id]['status'] = 'cuts_completed'
+                _edit_jobs[job_id]['cuts_path'] = wav_path
+            print(f"Cuts job {job_id} complete (manual enhance mode): {wav_path}")
+            return
+
+        # Auto-enhance with Adobe Enhance Speech
         with _edit_jobs_lock:
-            _edit_jobs[job_id]['status'] = 'cuts_completed'
-            _edit_jobs[job_id]['cuts_path'] = wav_path
-        print(f"Cuts job {job_id} complete: {wav_path}")
+            _edit_jobs[job_id]['status'] = 'enhancing'
+        enhanced_path = process_with_adobe_enhance(wav_path)
+
+        # Finalize: stereo + peak-normalize + MP3
+        with _edit_jobs_lock:
+            _edit_jobs[job_id]['status'] = 'finalizing'
+        _finalize_audio(job_id, enhanced_path)
 
     except Exception as e:
         import traceback
@@ -588,45 +742,46 @@ def _run_cuts_job(job_id, audio_path, cuts_ms, transcript_id=None):
             _edit_jobs[job_id] = {
                 'status': 'error',
                 'error': str(e),
-                'failed_step': 'cutting',
+                'failed_step': 'enhancing' if _edit_jobs.get(job_id, {}).get('status') == 'enhancing' else 'cutting',
             }
 
 
+def _finalize_audio(job_id, enhanced_path):
+    """Shared finalization: stereo -> peak-normalize -> MP3 export. Updates job status."""
+    from pydub import AudioSegment
+    audio = AudioSegment.from_file(enhanced_path)
+    print(f"Finalize: channels={audio.channels}, duration={len(audio)}ms")
+
+    # Always export stereo — standard for podcast distribution
+    if audio.channels == 1:
+        print("Converting mono to stereo for podcast output")
+        audio = AudioSegment.from_mono_audiosegments(audio, audio)
+
+    # Peak-normalize to -1 dBFS (standard podcast mastering)
+    gain = -1.0 - audio.max_dBFS
+    if gain > 0:
+        audio = audio.apply_gain(gain)
+        print(f"Peak-normalized: gain {gain:+.1f}dB \u2192 peaks at {audio.max_dBFS:.1f} dBFS, avg {audio.dBFS:.1f} dBFS")
+    else:
+        print(f"Audio already loud enough: peaks at {audio.max_dBFS:.1f} dBFS, avg {audio.dBFS:.1f} dBFS")
+
+    # Export as MP3
+    mp3_path = enhanced_path.rsplit('.', 1)[0] + '_final.mp3'
+    audio.export(mp3_path, format='mp3', bitrate='192k')
+
+    with _edit_jobs_lock:
+        _edit_jobs[job_id]['status'] = 'completed'
+        _edit_jobs[job_id]['path'] = mp3_path
+        _edit_jobs[job_id]['is_mp3'] = True
+    print(f"Finalize job {job_id} complete: {mp3_path}")
+
+
 def _run_finalize_job(job_id, enhanced_path):
-    """
-    Background thread phase 2: load enhanced file -> stereo -> peak-normalize -> MP3 export.
-    """
+    """Background thread phase 2 (manual path): finalize after user re-uploads enhanced file."""
     try:
         with _edit_jobs_lock:
             _edit_jobs[job_id]['status'] = 'finalizing'
-
-        from pydub import AudioSegment
-        audio = AudioSegment.from_file(enhanced_path)
-        print(f"Finalize: channels={audio.channels}, duration={len(audio)}ms")
-
-        # Always export stereo — standard for podcast distribution
-        if audio.channels == 1:
-            print("Converting mono to stereo for podcast output")
-            audio = AudioSegment.from_mono_audiosegments(audio, audio)
-
-        # Peak-normalize to -1 dBFS (standard podcast mastering)
-        gain = -1.0 - audio.max_dBFS
-        if gain > 0:
-            audio = audio.apply_gain(gain)
-            print(f"Peak-normalized: gain {gain:+.1f}dB \u2192 peaks at {audio.max_dBFS:.1f} dBFS, avg {audio.dBFS:.1f} dBFS")
-        else:
-            print(f"Audio already loud enough: peaks at {audio.max_dBFS:.1f} dBFS, avg {audio.dBFS:.1f} dBFS")
-
-        # Export as MP3
-        mp3_path = enhanced_path.rsplit('.', 1)[0] + '_final.mp3'
-        audio.export(mp3_path, format='mp3', bitrate='192k')
-
-        with _edit_jobs_lock:
-            _edit_jobs[job_id]['status'] = 'completed'
-            _edit_jobs[job_id]['path'] = mp3_path
-            _edit_jobs[job_id]['is_mp3'] = True
-        print(f"Finalize job {job_id} complete: {mp3_path}")
-
+        _finalize_audio(job_id, enhanced_path)
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -925,7 +1080,7 @@ def edit_audio():
             _edit_jobs[job_id] = {'status': 'pending'}
 
         threading.Thread(
-            target=_run_cuts_job,
+            target=_run_edit_job,
             args=(job_id, audio_path, cuts_ms, transcript_id),
             daemon=True,
         ).start()
@@ -953,6 +1108,7 @@ def edit_audio_status(job_id):
         return jsonify({"status": "cuts_completed"})
     if job['status'] == 'error':
         return jsonify({"error": job['error'], "failed_step": job.get('failed_step')}), 500
+    # enhancing, finalizing, cutting, pending
     return jsonify({"status": job['status']})
 
 
@@ -1044,6 +1200,7 @@ def status():
         "status": "online",
         "assemblyai_configured": bool(ASSEMBLYAI_API_KEY),
         "claude_configured": bool(CLAUDE_API_KEY),
+        "adobe_enhance_configured": bool(ADOBE_ENHANCE_TOKEN),
     })
 
 

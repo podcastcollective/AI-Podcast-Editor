@@ -74,6 +74,8 @@
             { key: 'transcribing', label: 'Transcribing with AssemblyAI' },
             { key: 'analyzing',    label: 'Analysing with Claude AI' },
             { key: 'cutting',      label: 'Applying edits' },
+            { key: 'enhancing',    label: 'Enhancing with Adobe Enhance Speech' },
+            { key: 'finalizing',   label: 'Finalizing audio' },
             { key: 'done',         label: 'Complete' },
         ];
 
@@ -184,7 +186,7 @@
                     }
                     if (editDecisions.length === 0) throw { stage: 'analyzing', message: lastError || 'No edit decisions were generated. Try again or adjust your recording type.' };
 
-                    // Stage 4: Apply cuts (no enhancement — stops at cuts_completed)
+                    // Stage 4: Apply cuts → auto-enhance (if configured) or manual enhance
                     setPipelineStage('cutting');
                     const cuts = editDecisions.filter(d => d.start_ms != null && d.end_ms != null);
                     const editRes = await fetch(`${API_URL}/api/edit-audio`, {
@@ -197,6 +199,7 @@
                     const editJobId = editData.job_id;
                     editJobIdRef.current = editJobId;
 
+                    let autoEnhanced = false;
                     while (true) {
                         await new Promise(r => setTimeout(r, 4000));
                         let statusRes;
@@ -205,15 +208,34 @@
                         if (statusRes.status === 404) throw { stage: 'cutting', message: 'Server restarted during processing. Please retry.' };
                         const statusData = await statusRes.json();
                         if (statusData.status === 'cutting')         setPipelineStage('cutting');
+                        if (statusData.status === 'enhancing')       setPipelineStage('enhancing');
+                        if (statusData.status === 'finalizing')      setPipelineStage('finalizing');
                         if (statusData.status === 'cuts_completed')  break;
+                        if (statusData.status === 'completed') {
+                            autoEnhanced = true;
+                            break;
+                        }
                         if (!statusRes.ok) {
                             throw { stage: statusData.failed_step || 'cutting', message: statusData.error || 'Audio processing failed' };
                         }
                     }
 
-                    // Cuts done — transition to enhance screen
-                    setPipelineStage('done');
-                    setScreen('enhance');
+                    if (autoEnhanced) {
+                        // Auto path: download final MP3 blob directly
+                        const dlRes = await fetch(`${API_URL}/api/edit-audio-download/${editJobId}`);
+                        if (!dlRes.ok) {
+                            const err = await dlRes.json();
+                            throw { stage: 'finalizing', message: err.error || 'Download failed' };
+                        }
+                        downloadBlobRef.current = await dlRes.blob();
+                        downloadExtRef.current = 'mp3';
+                        setPipelineStage('done');
+                        setScreen('download');
+                    } else {
+                        // Manual path: show enhance screen
+                        setPipelineStage('done');
+                        setScreen('enhance');
+                    }
 
                 } catch (err) {
                     console.error('Pipeline error:', err);

@@ -160,8 +160,11 @@
                             catch { throw { stage: 'analyzing', message: 'Server unreachable — it may be restarting. Please retry.' }; }
                             if (pollRes.status === 404) throw { stage: 'analyzing', message: 'Server restarted during processing. Please retry.' };
                             const pollData = await pollRes.json();
-                            if (pollData.retryable) { lastError = pollData.error || 'API overloaded'; retryable = true; break; }
-                            if (!pollRes.ok) throw { stage: 'analyzing', message: pollData.error || 'Analysis failed' };
+                            if (!pollRes.ok) {
+                                console.error(`Analysis poll error (${pollRes.status}):`, pollData);
+                                if (pollData.retryable) { lastError = pollData.error || 'API overloaded'; retryable = true; break; }
+                                throw { stage: 'analyzing', message: pollData.error || 'Analysis failed' };
+                            }
                             if (pollData.success) {
                                 editDecisions = pollData.edit_decisions || [];
                                 if (pollData.detected_preset) {

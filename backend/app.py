@@ -906,9 +906,11 @@ def _run_analysis_job(job_id, transcript_data, filename, preset_name, transcript
         print(f"Analysis job {job_id} complete: {cuts_count} cuts")
 
     except anthropic.APIStatusError as e:
-        err = "Claude API is temporarily overloaded. Please try again." if e.status_code == 529 else str(e)
+        print(f"Claude API error: status={e.status_code}, message={e.message}")
+        retryable = e.status_code in (429, 529)
+        err = f"Claude API error ({e.status_code}): {e.message}"
         with _jobs_lock:
-            _jobs[job_id] = {'status': 'error', 'error': err, 'retryable': e.status_code == 529}
+            _jobs[job_id] = {'status': 'error', 'error': err, 'retryable': retryable}
     except Exception as e:
         import traceback
         traceback.print_exc()

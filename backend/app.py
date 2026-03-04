@@ -492,12 +492,14 @@ def apply_audio_edits(audio_path, cuts_ms, words=None):
         return None
 
     def _safe_cut_start(ms):
-        hit = _lands_inside_word(ms)
-        return hit[0] if hit else ms
-
-    def _safe_cut_end(ms):
+        """If cut start lands inside a word, push it to AFTER the word (preserve it)."""
         hit = _lands_inside_word(ms)
         return hit[1] if hit else ms
+
+    def _safe_cut_end(ms):
+        """If cut end lands inside a word, pull it to BEFORE the word (preserve it)."""
+        hit = _lands_inside_word(ms)
+        return hit[0] if hit else ms
 
     # Clamp, sort, merge overlapping cuts
     adjusted = []
@@ -524,9 +526,10 @@ def apply_audio_edits(audio_path, cuts_ms, words=None):
         cut[0] = _snap_to_zero_crossing(audio, cut[0])
         cut[1] = _snap_to_zero_crossing(audio, cut[1])
 
-    # Build kept segments with crossfade
-    # 15ms = just enough to avoid digital clicks without eating into word edges
-    CROSSFADE_MS = 15
+    # Build kept segments with micro-fade butt-splice
+    # Crossfading causes -6dB volume dips at every cut (sounds like connection drops).
+    # Instead: fade each segment edge to zero independently, then concatenate.
+    FADE_MS = 5  # 5ms micro-fade — prevents clicks, no audible volume change
     segments = []
     pos = 0
     for s, e in merged:
@@ -537,12 +540,17 @@ def apply_audio_edits(audio_path, cuts_ms, words=None):
         segments.append(audio[pos:])
 
     if segments:
+        # Apply micro-fades only at cut boundaries (not episode start/end)
+        for i in range(len(segments)):
+            seg = segments[i]
+            if i < len(segments) - 1 and len(seg) > FADE_MS:
+                seg = seg.fade_out(FADE_MS)
+            if i > 0 and len(seg) > FADE_MS:
+                seg = seg.fade_in(FADE_MS)
+            segments[i] = seg
         edited = segments[0]
         for seg in segments[1:]:
-            if len(edited) > CROSSFADE_MS and len(seg) > CROSSFADE_MS:
-                edited = edited.append(seg, crossfade=CROSSFADE_MS)
-            else:
-                edited += seg
+            edited += seg  # butt-splice — no overlap, no volume dip
     else:
         edited = AudioSegment.empty()
 

@@ -399,27 +399,35 @@ Example tool input for reference:
         }
     }]
 
-    max_retries = 8
+    models = ["claude-sonnet-4-6", "claude-haiku-4-5-20251001"]
+    max_retries = 3
     message = None
-    for attempt in range(max_retries):
-        try:
-            message = client.messages.create(
-                model="claude-sonnet-4-6",
-                max_tokens=4000,
-                tools=tools,
-                tool_choice={"type": "tool", "name": "submit_edit_decisions"},
-                messages=[{"role": "user", "content": prompt}],
-            )
+    for model in models:
+        for attempt in range(max_retries):
+            try:
+                message = client.messages.create(
+                    model=model,
+                    max_tokens=4000,
+                    tools=tools,
+                    tool_choice={"type": "tool", "name": "submit_edit_decisions"},
+                    messages=[{"role": "user", "content": prompt}],
+                )
+                print(f"Claude analysis succeeded with {model}")
+                break
+            except anthropic.APIStatusError as e:
+                if e.status_code in (429, 529) and attempt < max_retries - 1:
+                    wait = min(10 * (2 ** attempt), 30)
+                    print(f"{model} API {e.status_code}, retrying in {wait}s (attempt {attempt + 1}/{max_retries})")
+                    time.sleep(wait)
+                elif e.status_code in (429, 529):
+                    print(f"{model} failed after {max_retries} attempts, trying next model")
+                    break
+                else:
+                    raise
+        if message is not None:
             break
-        except anthropic.APIStatusError as e:
-            if e.status_code in (429, 529) and attempt < max_retries - 1:
-                wait = min(10 * (2 ** attempt), 120)
-                print(f"Claude API {e.status_code}, retrying in {wait}s (attempt {attempt + 1}/{max_retries})")
-                time.sleep(wait)
-            else:
-                raise
     if message is None:
-        raise Exception(f"Claude API failed after {max_retries} attempts")
+        raise Exception("Claude API failed — all models overloaded")
 
     edit_decisions = None
     for block in message.content:

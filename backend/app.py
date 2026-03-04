@@ -686,38 +686,6 @@ def _run_edit_job(job_id, audio_path, cuts_ms, transcript_id=None, preset_cfg=No
             _edit_jobs[job_id]['status'] = 'cutting'
         wav_path = apply_audio_edits(audio_path, cuts_ms, words=words)
 
-        # Stage 1b: Trim any remaining long silences created by cuts
-        from pydub import AudioSegment, silence as pydub_silence
-        pause_target_ms = preset_cfg.get('pause_target_ms', 800)
-        pause_min_ms = preset_cfg.get('pause_min_ms', 2000)
-        post_audio = AudioSegment.from_file(wav_path)
-        silent_ranges = pydub_silence.detect_silence(post_audio, min_silence_len=pause_min_ms, silence_thresh=-40)
-        if silent_ranges:
-            # Build list of excess silence to trim (keep pause_target_ms of each)
-            post_cuts = []
-            for s, e in silent_ranges:
-                excess_start = s + pause_target_ms
-                if excess_start < e:
-                    post_cuts.append((excess_start, e))
-            if post_cuts:
-                # Apply trims
-                segments = []
-                pos = 0
-                for s, e in post_cuts:
-                    if s > pos:
-                        segments.append(post_audio[pos:s])
-                    pos = e
-                if pos < len(post_audio):
-                    segments.append(post_audio[pos:])
-                trimmed = segments[0]
-                for seg in segments[1:]:
-                    trimmed += seg
-                trimmed_ms = len(post_audio) - len(trimmed)
-                print(f"Post-cut silence trim: {len(post_cuts)} silences, removed {trimmed_ms}ms")
-                wav_path2 = wav_path.rsplit('.', 1)[0] + '_trimmed.wav'
-                trimmed.export(wav_path2, format='wav')
-                wav_path = wav_path2
-
         # Stage 2: Cleanvoice Studio Sound — dereverb, enhance, mouth sounds
         if CLEANVOICE_API_KEY and preset_cfg.get('studio_sound'):
             active_stage = 'cleanvoice'
@@ -726,9 +694,9 @@ def _run_edit_job(job_id, audio_path, cuts_ms, transcript_id=None, preset_cfg=No
             wav_path = process_with_cleanvoice(wav_path, preset_cfg)
 
         # Restore stereo if Cleanvoice returned mono but original was stereo
+        from pydub import AudioSegment
         original_audio = AudioSegment.from_file(audio_path)
         audio = AudioSegment.from_file(wav_path)
-        print(f"Channels: original={original_audio.channels}, output={audio.channels}")
         if original_audio.channels == 2 and audio.channels == 1:
             print(f"Restoring stereo (Cleanvoice returned mono)")
             audio = AudioSegment.from_mono_audiosegments(audio, audio)

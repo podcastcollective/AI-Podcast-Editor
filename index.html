@@ -133,6 +133,7 @@
                     setPipelineStage('analyzing');
                     let editDecisions = [];
                     let resolvedPreset = preset;
+                    let lastError = '';
                     const analysisBody = JSON.stringify({
                         transcript_id,
                         filename,
@@ -152,7 +153,6 @@
                         if (!analysisJobId) throw { stage: 'analyzing', message: 'No job_id returned' };
 
                         let retryable = false;
-                        let lastError = '';
                         while (true) {
                             await new Promise(r => setTimeout(r, 3000));
                             let pollRes;

@@ -152,6 +152,7 @@
                         if (!analysisJobId) throw { stage: 'analyzing', message: 'No job_id returned' };
 
                         let retryable = false;
+                        let lastError = '';
                         while (true) {
                             await new Promise(r => setTimeout(r, 3000));
                             let pollRes;
@@ -159,7 +160,7 @@
                             catch { throw { stage: 'analyzing', message: 'Server unreachable — it may be restarting. Please retry.' }; }
                             if (pollRes.status === 404) throw { stage: 'analyzing', message: 'Server restarted during processing. Please retry.' };
                             const pollData = await pollRes.json();
-                            if (pollData.retryable) { retryable = true; break; }
+                            if (pollData.retryable) { lastError = pollData.error || 'API overloaded'; retryable = true; break; }
                             if (!pollRes.ok) throw { stage: 'analyzing', message: pollData.error || 'Analysis failed' };
                             if (pollData.success) {
                                 editDecisions = pollData.edit_decisions || [];
@@ -172,11 +173,11 @@
                         }
                         if (editDecisions.length > 0 || !retryable) break;
                         if (analysisAttempt < 2) {
-                            console.log(`Claude API overloaded, frontend retry ${analysisAttempt + 1}/3 in 30s...`);
+                            console.log(`Claude API error, frontend retry ${analysisAttempt + 1}/3 in 30s: ${lastError}`);
                             await new Promise(r => setTimeout(r, 30000));
                         }
                     }
-                    if (editDecisions.length === 0) throw { stage: 'analyzing', message: 'Claude API overloaded after multiple retries. Please try again later.' };
+                    if (editDecisions.length === 0) throw { stage: 'analyzing', message: lastError || 'Claude API failed after multiple retries.' };
 
                     // Stage 4-6: Edit audio pipeline (cutting + cleanvoice)
                     setPipelineStage('cutting');

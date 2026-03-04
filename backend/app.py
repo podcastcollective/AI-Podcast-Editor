@@ -407,7 +407,7 @@ Example tool input for reference:
             try:
                 message = client.messages.create(
                     model=model,
-                    max_tokens=4000,
+                    max_tokens=16000,
                     tools=tools,
                     tool_choice={"type": "tool", "name": "submit_edit_decisions"},
                     messages=[{"role": "user", "content": prompt}],

@@ -180,7 +180,7 @@
                             await new Promise(r => setTimeout(r, 30000));
                         }
                     }
-                    if (editDecisions.length === 0) throw { stage: 'analyzing', message: lastError || 'Claude API failed after multiple retries.' };
+                    if (editDecisions.length === 0) throw { stage: 'analyzing', message: lastError || 'No edit decisions were generated. Try again or adjust your recording type.' };
 
                     // Stage 4-6: Edit audio pipeline (cutting + cleanvoice)
                     setPipelineStage('cutting');

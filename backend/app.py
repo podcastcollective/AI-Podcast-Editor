@@ -693,9 +693,21 @@ def _run_edit_job(job_id, audio_path, cuts_ms, transcript_id=None, preset_cfg=No
                 _edit_jobs[job_id]['status'] = 'cleanvoice'
             wav_path = process_with_cleanvoice(wav_path, preset_cfg)
 
-        # Export as MP3
+        # Restore stereo if Cleanvoice returned mono but original was stereo
         from pydub import AudioSegment
+        original_audio = AudioSegment.from_file(audio_path)
         audio = AudioSegment.from_file(wav_path)
+        if original_audio.channels == 2 and audio.channels == 1:
+            print(f"Restoring stereo (Cleanvoice returned mono)")
+            audio = AudioSegment.from_mono_audiosegments(audio, audio)
+
+        # Normalize loudness to -16 LUFS (podcast standard) via simple gain
+        TARGET_DBFS = -16.0
+        gain = TARGET_DBFS - audio.dBFS
+        audio = audio.apply_gain(gain)
+        print(f"Loudness normalized: {audio.dBFS - gain:.1f} → {audio.dBFS:.1f} dBFS (gain {gain:+.1f}dB)")
+
+        # Export as MP3
         mp3_path = wav_path.rsplit('.', 1)[0] + '_final.mp3'
         audio.export(mp3_path, format='mp3', bitrate='192k')
         final_path = mp3_path

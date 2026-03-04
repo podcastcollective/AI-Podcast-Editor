@@ -702,23 +702,21 @@ def _run_edit_job(job_id, audio_path, cuts_ms, transcript_id=None, preset_cfg=No
                 _edit_jobs[job_id]['status'] = 'cleanvoice'
             wav_path = process_with_cleanvoice(wav_path, preset_cfg)
 
-        # Restore stereo if Cleanvoice returned mono but original was stereo
+        # Always export stereo — standard for podcast distribution
         from pydub import AudioSegment
-        original_audio = AudioSegment.from_file(audio_path)
         audio = AudioSegment.from_file(wav_path)
-        print(f"Channels: original={original_audio.channels}, processed={audio.channels}")
-        if original_audio.channels == 2 and audio.channels == 1:
-            print(f"Restoring stereo (Cleanvoice returned mono)")
+        print(f"Channels: processed={audio.channels}")
+        if audio.channels == 1:
+            print(f"Converting mono to stereo for podcast output")
             audio = AudioSegment.from_mono_audiosegments(audio, audio)
 
-        # Normalize loudness to -16 LUFS (podcast standard) via simple gain
-        # Cap gain so peaks stay below -1dBFS to avoid clipping
-        TARGET_DBFS = -16.0
-        gain = TARGET_DBFS - audio.dBFS
-        max_gain = -1.0 - audio.max_dBFS
-        gain = min(gain, max_gain)
-        audio = audio.apply_gain(gain)
-        print(f"Loudness normalized: {audio.dBFS - gain:.1f} → {audio.dBFS:.1f} dBFS (gain {gain:+.1f}dB)")
+        # Peak-normalize to -1 dBFS (standard podcast mastering)
+        gain = -1.0 - audio.max_dBFS
+        if gain > 0:
+            audio = audio.apply_gain(gain)
+            print(f"Peak-normalized: gain {gain:+.1f}dB → peaks at {audio.max_dBFS:.1f} dBFS, avg {audio.dBFS:.1f} dBFS")
+        else:
+            print(f"Audio already loud enough: peaks at {audio.max_dBFS:.1f} dBFS, avg {audio.dBFS:.1f} dBFS")
 
         # Export as MP3
         mp3_path = wav_path.rsplit('.', 1)[0] + '_final.mp3'

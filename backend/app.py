@@ -525,7 +525,8 @@ def apply_audio_edits(audio_path, cuts_ms, words=None):
         cut[1] = _snap_to_zero_crossing(audio, cut[1])
 
     # Build kept segments with crossfade
-    CROSSFADE_MS = 100
+    # 15ms = just enough to avoid digital clicks without eating into word edges
+    CROSSFADE_MS = 15
     segments = []
     pos = 0
     for s, e in merged:
@@ -697,6 +698,7 @@ def _run_edit_job(job_id, audio_path, cuts_ms, transcript_id=None, preset_cfg=No
         from pydub import AudioSegment
         original_audio = AudioSegment.from_file(audio_path)
         audio = AudioSegment.from_file(wav_path)
+        print(f"Channels: original={original_audio.channels}, processed={audio.channels}")
         if original_audio.channels == 2 and audio.channels == 1:
             print(f"Restoring stereo (Cleanvoice returned mono)")
             audio = AudioSegment.from_mono_audiosegments(audio, audio)

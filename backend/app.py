@@ -23,12 +23,8 @@ ALLOWED_EXTENSIONS = {'mp3', 'wav', 'm4a', 'aac', 'ogg'}
 # API keys
 ASSEMBLYAI_API_KEY = os.environ.get('ASSEMBLYAI_API_KEY')
 CLAUDE_API_KEY = os.environ.get('CLAUDE_API_KEY')
-CLEANVOICE_API_KEY = os.environ.get('CLEANVOICE_API_KEY')     # cleanvoice.ai/dashboard
-
 if not ASSEMBLYAI_API_KEY or not CLAUDE_API_KEY:
     print("WARNING: ASSEMBLYAI_API_KEY and CLAUDE_API_KEY are required")
-if not CLEANVOICE_API_KEY:
-    print("WARNING: CLEANVOICE_API_KEY not set — audio enhancement will be skipped")
 
 # In-memory job stores. Gunicorn must use threads (not processes) so these are shared.
 _jobs: dict = {}
@@ -98,7 +94,7 @@ def get_transcription(transcript_id):
 
 
 # ============================================================================
-# PRESETS — control both Claude editing and Cleanvoice enhancement
+# PRESETS — control Claude editing behaviour
 # ============================================================================
 
 PRESETS = {
@@ -108,8 +104,6 @@ PRESETS = {
         'remove_pauses': True,
         'pause_min_ms': 2500,       # only trim very long pauses
         'pause_target_ms': 800,
-        'studio_sound': False,      # skip heavy enhancement — already clean
-        'remove_noise': False,
         'claude_hint': 'This is a studio recording with clean audio. Be very conservative with cuts — only remove clear disfluencies. The audio quality is already good, so preserve the natural sound.',
     },
     'zoom': {
@@ -118,8 +112,6 @@ PRESETS = {
         'remove_pauses': True,
         'pause_min_ms': 2000,
         'pause_target_ms': 800,
-        'studio_sound': 'nightly',  # full dereverb + enhancement
-        'remove_noise': True,
         'claude_hint': 'This is a remote/Zoom recording. Standard editing — remove clear filler words and trim long pauses while keeping conversational flow.',
     },
     'solo': {
@@ -128,8 +120,6 @@ PRESETS = {
         'remove_pauses': True,
         'pause_min_ms': 600,        # catch shorter pauses for tight narration
         'pause_target_ms': 300,     # trim to ~0.3s for polished delivery
-        'studio_sound': 'nightly',
-        'remove_noise': True,
         'claude_hint': 'This is solo narration. Be more aggressive with filler word removal since there is no conversation to preserve. Tighten pauses for a polished delivery.',
     },
     'raw': {
@@ -138,8 +128,6 @@ PRESETS = {
         'remove_pauses': True,
         'pause_min_ms': 1500,
         'pause_target_ms': 800,
-        'studio_sound': 'nightly',
-        'remove_noise': True,
         'claude_hint': 'This is a rough recording that needs heavy cleanup. Be aggressive with filler removal and pause trimming. Look for false starts and repeated sentences to cut.',
     },
 }
@@ -202,7 +190,7 @@ def _analyze_audio(audio_path, transcript_data):
         'dynamic_range': round(dynamic_range, 1),
     }
     print(f"Auto-detect: speakers={speaker_count}, noise_floor={noise_floor:.1f}dB, "
-          f"confidence={confidence:.3f}, dynamic_range={dynamic_range:.1f}dB → {preset_name}")
+          f"confidence={confidence:.3f}, dynamic_range={dynamic_range:.1f}dB \u2192 {preset_name}")
     return preset_name, metrics
 
 
@@ -353,10 +341,10 @@ CONTENT RULES:
 - SAFETY CHECK: Before finalizing any Content Cut, mentally read the sentence with the cut applied. If the remaining words do not form a complete, grammatical sentence, do NOT make the cut.
 
 PRESERVE RULES (do NOT cut these):
-- TRANSITIONAL PHRASES that connect topics or introduce new points, even if they seem tangential. E.g. "I think the other thing I'd flag which maybe doesn't fall under compliance but it's part of it" — these bridge ideas and must be kept.
-- AGREEMENT MARKERS between speakers like "yeah absolutely", "yeah exactly", "absolutely" — these show active engagement and are part of natural conversation flow.
-- SHORT RESPONSES between speakers like "yeah" or "right" that acknowledge the other speaker — these maintain conversational rhythm and show listening. Only cut if they overlap with the other speaker's words.
-- SPEAKER TRANSITIONS where one person hands off to another — keep the social glue that makes dialogue sound natural.
+- TRANSITIONAL PHRASES that connect topics or introduce new points, even if they seem tangential. E.g. "I think the other thing I'd flag which maybe doesn't fall under compliance but it's part of it" \u2014 these bridge ideas and must be kept.
+- AGREEMENT MARKERS between speakers like "yeah absolutely", "yeah exactly", "absolutely" \u2014 these show active engagement and are part of natural conversation flow.
+- SHORT RESPONSES between speakers like "yeah" or "right" that acknowledge the other speaker \u2014 these maintain conversational rhythm and show listening. Only cut if they overlap with the other speaker's words.
+- SPEAKER TRANSITIONS where one person hands off to another \u2014 keep the social glue that makes dialogue sound natural.
 
 STRUCTURAL RULES:
 - If there is pre-interview chat before the official episode begins, mark it for removal.
@@ -427,7 +415,7 @@ Example tool input for reference:
         if message is not None:
             break
     if message is None:
-        raise Exception("Claude API failed — all models overloaded")
+        raise Exception("Claude API failed \u2014 all models overloaded")
 
     edit_decisions = None
     for block in message.content:
@@ -564,120 +552,15 @@ def apply_audio_edits(audio_path, cuts_ms, words=None):
 
 
 # ============================================================================
-# CLEANVOICE — studio sound, dereverb, mouth sounds, breathing
+# EDIT PIPELINE — two-phase background jobs
 # ============================================================================
 
-def process_with_cleanvoice(audio_path, preset_cfg=None):
-    """Send audio to Cleanvoice for Studio Sound enhancement + cleanup."""
-    if preset_cfg is None:
-        preset_cfg = _get_preset('zoom')
-    headers = {"X-API-Key": CLEANVOICE_API_KEY}
-    filename = os.path.basename(audio_path)
-    file_size_mb = os.path.getsize(audio_path) / 1024 / 1024
-
-    # Get signed upload URL
-    print(f"Cleanvoice: requesting signed URL for {filename} ({file_size_mb:.1f}MB)")
-    sign_resp = requests.post(
-        f'https://api.cleanvoice.ai/v2/upload?filename={filename}',
-        headers=headers,
-        timeout=30,
-    )
-    if sign_resp.status_code not in (200, 201):
-        raise Exception(f"Cleanvoice signed URL failed: {sign_resp.status_code} \u2014 {sign_resp.text[:300]}")
-
-    signed_url = sign_resp.json().get('signedUrl')
-    if not signed_url:
-        raise Exception(f"No signedUrl in Cleanvoice response: {sign_resp.text[:300]}")
-
-    # Upload file
-    print("Cleanvoice: uploading...")
-    with open(audio_path, 'rb') as f:
-        put_resp = requests.put(signed_url, data=f, headers={'Content-Type': 'audio/wav'}, timeout=300)
-    if put_resp.status_code not in (200, 201):
-        raise Exception(f"Cleanvoice upload failed: {put_resp.status_code} \u2014 {put_resp.text[:300]}")
-
-    # Create edit job
-    edit_resp = requests.post(
-        'https://api.cleanvoice.ai/v2/edits',
-        headers={**headers, 'Content-Type': 'application/json'},
-        json={
-            "input": {
-                "files": [signed_url.split('?')[0]],
-                "config": {
-                    "remove_noise": preset_cfg.get('remove_noise', True),
-                    "fillers": True,
-                    "long_silences": False,
-                    "studio_sound": preset_cfg.get('studio_sound', 'nightly'),
-                }
-            }
-        },
-        timeout=30,
-    )
-    if edit_resp.status_code not in (200, 201):
-        raise Exception(f"Cleanvoice edit failed: {edit_resp.status_code} \u2014 {edit_resp.text[:300]}")
-
-    edit_id = edit_resp.json().get('id')
-    if not edit_id:
-        raise Exception(f"No edit ID in Cleanvoice response: {edit_resp.text[:300]}")
-    print(f"Cleanvoice: edit started: {edit_id}")
-
-    # Poll for completion (max 10 minutes)
-    deadline = time.time() + 600
-    while time.time() < deadline:
-        time.sleep(10)
-        check = requests.get(
-            f'https://api.cleanvoice.ai/v2/edits/{edit_id}',
-            headers=headers,
-            timeout=30,
-        )
-        if check.status_code != 200:
-            raise Exception(f"Cleanvoice status failed: {check.status_code} \u2014 {check.text[:300]}")
-
-        data = check.json()
-        status = data.get('status', '')
-        print(f"Cleanvoice: status = {status}")
-
-        if status in ('completed', 'SUCCESS', 'done'):
-            result = data.get('result', {})
-            download_url = (
-                result.get('download_url') or result.get('url') or
-                data.get('download_url') or data.get('output', {}).get('url')
-            )
-            if not download_url:
-                outputs = data.get('output', {}).get('files', [])
-                if outputs:
-                    download_url = outputs[0] if isinstance(outputs[0], str) else outputs[0].get('url')
-            if not download_url:
-                raise Exception(f"Cleanvoice: no download URL: {json.dumps(data)[:500]}")
-
-            dl = requests.get(download_url, timeout=300)
-            if dl.status_code != 200:
-                raise Exception(f"Cleanvoice download failed: {dl.status_code}")
-
-            output_path = audio_path.rsplit('.', 1)[0] + '_cleanvoice.wav'
-            with open(output_path, 'wb') as out:
-                out.write(dl.content)
-            print(f"Cleanvoice: saved {output_path} ({len(dl.content) // 1024}KB)")
-            return output_path
-
-        if status in ('ERROR', 'error', 'failed'):
-            raise Exception(f"Cleanvoice failed: {json.dumps(data)[:500]}")
-
-    raise Exception("Cleanvoice timed out after 10 minutes")
-
-
-# ============================================================================
-# EDIT PIPELINE — background job
-# ============================================================================
-
-def _run_edit_job(job_id, audio_path, cuts_ms, transcript_id=None, preset_cfg=None):
+def _run_cuts_job(job_id, audio_path, cuts_ms, transcript_id=None):
     """
-    Background thread: cuts \u2192 Cleanvoice Studio Sound \u2192 MP3 export.
-    Cleanvoice handles dereverb, noise, enhancement, and mouth sounds.
+    Background thread phase 1: apply cuts -> export intermediate WAV.
+    After this completes the user enhances externally (e.g. Adobe Enhance Speech)
+    then re-uploads the enhanced file for finalization.
     """
-    if preset_cfg is None:
-        preset_cfg = _get_preset('zoom')
-    active_stage = 'init'
     try:
         # Fetch word timestamps for smart cut snapping
         words = None
@@ -689,47 +572,14 @@ def _run_edit_job(job_id, audio_path, cuts_ms, transcript_id=None, preset_cfg=No
             except Exception as e:
                 print(f"Warning: could not fetch word timestamps: {e}")
 
-        # Stage 1: Apply cuts
-        active_stage = 'cutting'
         with _edit_jobs_lock:
             _edit_jobs[job_id]['status'] = 'cutting'
         wav_path = apply_audio_edits(audio_path, cuts_ms, words=words)
 
-        # Stage 2: Cleanvoice Studio Sound — dereverb, enhance, mouth sounds
-        if CLEANVOICE_API_KEY and preset_cfg.get('studio_sound'):
-            active_stage = 'cleanvoice'
-            with _edit_jobs_lock:
-                _edit_jobs[job_id]['status'] = 'cleanvoice'
-            wav_path = process_with_cleanvoice(wav_path, preset_cfg)
-
-        # Always export stereo — standard for podcast distribution
-        from pydub import AudioSegment
-        audio = AudioSegment.from_file(wav_path)
-        print(f"Channels: processed={audio.channels}")
-        if audio.channels == 1:
-            print(f"Converting mono to stereo for podcast output")
-            audio = AudioSegment.from_mono_audiosegments(audio, audio)
-
-        # Peak-normalize to -1 dBFS (standard podcast mastering)
-        gain = -1.0 - audio.max_dBFS
-        if gain > 0:
-            audio = audio.apply_gain(gain)
-            print(f"Peak-normalized: gain {gain:+.1f}dB → peaks at {audio.max_dBFS:.1f} dBFS, avg {audio.dBFS:.1f} dBFS")
-        else:
-            print(f"Audio already loud enough: peaks at {audio.max_dBFS:.1f} dBFS, avg {audio.dBFS:.1f} dBFS")
-
-        # Export as MP3
-        mp3_path = wav_path.rsplit('.', 1)[0] + '_final.mp3'
-        audio.export(mp3_path, format='mp3', bitrate='192k')
-        final_path = mp3_path
-
         with _edit_jobs_lock:
-            _edit_jobs[job_id] = {
-                'status': 'completed',
-                'path': final_path,
-                'is_mp3': True,
-            }
-        print(f"Edit job {job_id} complete: {final_path}")
+            _edit_jobs[job_id]['status'] = 'cuts_completed'
+            _edit_jobs[job_id]['cuts_path'] = wav_path
+        print(f"Cuts job {job_id} complete: {wav_path}")
 
     except Exception as e:
         import traceback
@@ -738,8 +588,52 @@ def _run_edit_job(job_id, audio_path, cuts_ms, transcript_id=None, preset_cfg=No
             _edit_jobs[job_id] = {
                 'status': 'error',
                 'error': str(e),
-                'failed_step': active_stage,
+                'failed_step': 'cutting',
             }
+
+
+def _run_finalize_job(job_id, enhanced_path):
+    """
+    Background thread phase 2: load enhanced file -> stereo -> peak-normalize -> MP3 export.
+    """
+    try:
+        with _edit_jobs_lock:
+            _edit_jobs[job_id]['status'] = 'finalizing'
+
+        from pydub import AudioSegment
+        audio = AudioSegment.from_file(enhanced_path)
+        print(f"Finalize: channels={audio.channels}, duration={len(audio)}ms")
+
+        # Always export stereo — standard for podcast distribution
+        if audio.channels == 1:
+            print("Converting mono to stereo for podcast output")
+            audio = AudioSegment.from_mono_audiosegments(audio, audio)
+
+        # Peak-normalize to -1 dBFS (standard podcast mastering)
+        gain = -1.0 - audio.max_dBFS
+        if gain > 0:
+            audio = audio.apply_gain(gain)
+            print(f"Peak-normalized: gain {gain:+.1f}dB \u2192 peaks at {audio.max_dBFS:.1f} dBFS, avg {audio.dBFS:.1f} dBFS")
+        else:
+            print(f"Audio already loud enough: peaks at {audio.max_dBFS:.1f} dBFS, avg {audio.dBFS:.1f} dBFS")
+
+        # Export as MP3
+        mp3_path = enhanced_path.rsplit('.', 1)[0] + '_final.mp3'
+        audio.export(mp3_path, format='mp3', bitrate='192k')
+
+        with _edit_jobs_lock:
+            _edit_jobs[job_id]['status'] = 'completed'
+            _edit_jobs[job_id]['path'] = mp3_path
+            _edit_jobs[job_id]['is_mp3'] = True
+        print(f"Finalize job {job_id} complete: {mp3_path}")
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        with _edit_jobs_lock:
+            _edit_jobs[job_id]['status'] = 'error'
+            _edit_jobs[job_id]['error'] = str(e)
+            _edit_jobs[job_id]['failed_step'] = 'finalizing'
 
 
 # ============================================================================
@@ -763,8 +657,6 @@ PRESET
 --------------------------------------------------------------------------------
 Filler removal: {preset_cfg.get('filler_pct', 60)}%
 Pause threshold: {preset_cfg.get('pause_min_ms', 2000)}ms
-Studio sound: {preset_cfg.get('studio_sound', 'nightly')}
-Noise removal: {preset_cfg.get('remove_noise', True)}
 
 --------------------------------------------------------------------------------
 TRANSCRIPT STATISTICS
@@ -813,7 +705,7 @@ def index():
     return jsonify({
         "status": "online",
         "service": "AI Podcast Editor API",
-        "version": "5.0.0",
+        "version": "6.0.0",
     })
 
 
@@ -1000,7 +892,7 @@ def process_status(job_id):
 
 @app.route('/api/edit-audio', methods=['POST', 'OPTIONS'])
 def edit_audio():
-    """Step 3: Start async audio editing job."""
+    """Step 3: Start async audio editing job (cuts only)."""
     if request.method == 'OPTIONS':
         return '', 204
 
@@ -1008,12 +900,9 @@ def edit_audio():
         data = request.json
         transcript_id = data.get('transcript_id')
         cuts = data.get('cuts', [])
-        preset_cfg = _get_preset(data.get('preset', 'zoom'))
 
         if not transcript_id:
             return jsonify({"error": "No transcript_id provided"}), 400
-        if not CLEANVOICE_API_KEY and preset_cfg.get('studio_sound'):
-            return jsonify({"error": "CLEANVOICE_API_KEY not configured \u2014 cannot enhance audio"}), 500
 
         audio_path = None
         for ext in ALLOWED_EXTENSIONS:
@@ -1029,15 +918,15 @@ def edit_audio():
             for c in cuts
             if 'start_ms' in c and 'end_ms' in c
         ]
-        print(f"Edit job: {len(cuts_ms)} cuts, preset: {data.get('preset', 'zoom')}")
+        print(f"Edit job: {len(cuts_ms)} cuts")
 
         job_id = str(uuid.uuid4())
         with _edit_jobs_lock:
             _edit_jobs[job_id] = {'status': 'pending'}
 
         threading.Thread(
-            target=_run_edit_job,
-            args=(job_id, audio_path, cuts_ms, transcript_id, preset_cfg),
+            target=_run_cuts_job,
+            args=(job_id, audio_path, cuts_ms, transcript_id),
             daemon=True,
         ).start()
 
@@ -1060,6 +949,8 @@ def edit_audio_status(job_id):
         return jsonify({"error": "Job not found"}), 404
     if job['status'] == 'completed':
         return jsonify({"status": "completed", "is_mp3": job.get('is_mp3', False)})
+    if job['status'] == 'cuts_completed':
+        return jsonify({"status": "cuts_completed"})
     if job['status'] == 'error':
         return jsonify({"error": job['error'], "failed_step": job.get('failed_step')}), 500
     return jsonify({"status": job['status']})
@@ -1069,9 +960,54 @@ def edit_audio_status(job_id):
 def edit_audio_download(job_id):
     with _edit_jobs_lock:
         job = _edit_jobs.get(job_id)
-    if not job or job['status'] != 'completed':
+    if not job:
         return jsonify({"error": "File not ready"}), 404
-    return send_file(job['path'], as_attachment=True, download_name='edited_podcast.mp3', mimetype='audio/mpeg')
+    if job['status'] == 'cuts_completed':
+        return send_file(job['cuts_path'], as_attachment=True, download_name='edited_podcast.wav', mimetype='audio/wav')
+    if job['status'] == 'completed':
+        return send_file(job['path'], as_attachment=True, download_name='edited_podcast.mp3', mimetype='audio/mpeg')
+    return jsonify({"error": "File not ready"}), 404
+
+
+@app.route('/api/upload-enhanced', methods=['POST', 'OPTIONS'])
+def upload_enhanced():
+    """Step 4: Receive enhanced audio file, kick off finalization."""
+    if request.method == 'OPTIONS':
+        return '', 204
+
+    try:
+        job_id = request.form.get('job_id')
+        if not job_id:
+            return jsonify({"error": "No job_id provided"}), 400
+
+        with _edit_jobs_lock:
+            job = _edit_jobs.get(job_id)
+        if not job or job['status'] != 'cuts_completed':
+            return jsonify({"error": "Job not found or cuts not completed yet"}), 400
+
+        if 'file' not in request.files:
+            return jsonify({"error": "No file provided"}), 400
+
+        file = request.files['file']
+        if file.filename == '':
+            return jsonify({"error": "No file selected"}), 400
+
+        enhanced_path = f"/tmp/{job_id}_enhanced.wav"
+        file.save(enhanced_path)
+        print(f"Enhanced file saved: {enhanced_path} ({os.path.getsize(enhanced_path) // 1024}KB)")
+
+        threading.Thread(
+            target=_run_finalize_job,
+            args=(job_id, enhanced_path),
+            daemon=True,
+        ).start()
+
+        return jsonify({"success": True, "job_id": job_id})
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route('/api/transcript-download/<transcript_id>', methods=['GET'])
@@ -1108,7 +1044,6 @@ def status():
         "status": "online",
         "assemblyai_configured": bool(ASSEMBLYAI_API_KEY),
         "claude_configured": bool(CLAUDE_API_KEY),
-        "cleanvoice_configured": bool(CLEANVOICE_API_KEY),
     })
 
 

@@ -74,7 +74,6 @@
             { key: 'transcribing', label: 'Transcribing with AssemblyAI' },
             { key: 'analyzing',    label: 'Analysing with Claude AI' },
             { key: 'cutting',      label: 'Applying edits' },
-            { key: 'cleanvoice',   label: 'Studio enhancement with Cleanvoice AI' },
             { key: 'done',         label: 'Complete' },
         ];
 
@@ -85,9 +84,12 @@
             const [customInstructions, setCustomInstructions] = useState('');
             const [pipelineStage, setPipelineStage] = useState(null);
             const [pipelineError, setPipelineError] = useState(null);
+            const [enhanceUploading, setEnhanceUploading] = useState(false);
+            const [finalizing, setFinalizing] = useState(false);
             const downloadBlobRef = useRef(null);
             const downloadExtRef = useRef('mp3');
             const transcriptIdRef = useRef(null);
+            const editJobIdRef = useRef(null);
 
             const handleFileUpload = (e) => {
                 const uploadedFile = e.target.files[0];
@@ -182,7 +184,7 @@
                     }
                     if (editDecisions.length === 0) throw { stage: 'analyzing', message: lastError || 'No edit decisions were generated. Try again or adjust your recording type.' };
 
-                    // Stage 4-6: Edit audio pipeline (cutting + cleanvoice)
+                    // Stage 4: Apply cuts (no enhancement — stops at cuts_completed)
                     setPipelineStage('cutting');
                     const cuts = editDecisions.filter(d => d.start_ms != null && d.end_ms != null);
                     const editRes = await fetch(`${API_URL}/api/edit-audio`, {
@@ -193,7 +195,7 @@
                     const editData = await editRes.json();
                     if (!editRes.ok) throw { stage: 'cutting', message: editData.error || 'Edit job failed to start' };
                     const editJobId = editData.job_id;
-                    downloadExtRef.current = 'mp3';
+                    editJobIdRef.current = editJobId;
 
                     while (true) {
                         await new Promise(r => setTimeout(r, 4000));
@@ -202,24 +204,16 @@
                         catch { throw { stage: 'cutting', message: 'Server unreachable — it may be restarting. Please retry.' }; }
                         if (statusRes.status === 404) throw { stage: 'cutting', message: 'Server restarted during processing. Please retry.' };
                         const statusData = await statusRes.json();
-                        if (statusData.status === 'cutting')    setPipelineStage('cutting');
-                        if (statusData.status === 'cleanvoice') setPipelineStage('cleanvoice');
-                        if (statusData.status === 'completed')  break;
+                        if (statusData.status === 'cutting')         setPipelineStage('cutting');
+                        if (statusData.status === 'cuts_completed')  break;
                         if (!statusRes.ok) {
                             throw { stage: statusData.failed_step || 'cutting', message: statusData.error || 'Audio processing failed' };
                         }
                     }
 
-                    // Stage 7: Download blob into memory
-                    const dlRes = await fetch(`${API_URL}/api/edit-audio-download/${editJobId}`);
-                    if (!dlRes.ok) {
-                        const err = await dlRes.json();
-                        throw { stage: 'done', message: err.error || 'Download failed' };
-                    }
-                    downloadBlobRef.current = await dlRes.blob();
-
+                    // Cuts done — transition to enhance screen
                     setPipelineStage('done');
-                    setScreen('download');
+                    setScreen('enhance');
 
                 } catch (err) {
                     console.error('Pipeline error:', err);
@@ -229,6 +223,74 @@
                     setPipelineError({
                         stage: err.stage || pipelineStage || 'uploading',
                         message
+                    });
+                }
+            };
+
+            const handleDownloadIntermediate = async () => {
+                const jobId = editJobIdRef.current;
+                if (!jobId) return;
+                const url = `${API_URL}/api/edit-audio-download/${jobId}`;
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = 'edited_podcast.wav';
+                a.click();
+            };
+
+            const handleEnhancedUpload = async (e) => {
+                const enhancedFile = e.target.files[0];
+                if (!enhancedFile || !editJobIdRef.current) return;
+
+                setEnhanceUploading(true);
+                setPipelineError(null);
+
+                try {
+                    const formData = new FormData();
+                    formData.append('file', enhancedFile);
+                    formData.append('job_id', editJobIdRef.current);
+
+                    const res = await fetch(`${API_URL}/api/upload-enhanced`, {
+                        method: 'POST',
+                        body: formData,
+                    });
+                    const data = await res.json();
+                    if (!res.ok) throw new Error(data.error || 'Upload failed');
+
+                    // Poll for finalization
+                    setFinalizing(true);
+                    const jobId = editJobIdRef.current;
+                    while (true) {
+                        await new Promise(r => setTimeout(r, 3000));
+                        let statusRes;
+                        try { statusRes = await fetch(`${API_URL}/api/edit-audio-status/${jobId}`); }
+                        catch { throw new Error('Server unreachable during finalization'); }
+                        const statusData = await statusRes.json();
+                        if (statusData.status === 'completed') break;
+                        if (!statusRes.ok) {
+                            throw new Error(statusData.error || 'Finalization failed');
+                        }
+                    }
+
+                    // Download final MP3 blob
+                    const dlRes = await fetch(`${API_URL}/api/edit-audio-download/${jobId}`);
+                    if (!dlRes.ok) {
+                        const err = await dlRes.json();
+                        throw new Error(err.error || 'Download failed');
+                    }
+                    downloadBlobRef.current = await dlRes.blob();
+                    downloadExtRef.current = 'mp3';
+
+                    setEnhanceUploading(false);
+                    setFinalizing(false);
+                    setScreen('download');
+
+                } catch (err) {
+                    console.error('Enhanced upload error:', err);
+                    setEnhanceUploading(false);
+                    setFinalizing(false);
+                    setPipelineError({
+                        stage: 'enhance',
+                        message: err.message || 'Enhancement upload failed',
                     });
                 }
             };
@@ -267,8 +329,11 @@
                 setFile(null);
                 setPreset('auto');
                 setCustomInstructions('');
+                setEnhanceUploading(false);
+                setFinalizing(false);
                 downloadBlobRef.current = null;
                 transcriptIdRef.current = null;
+                editJobIdRef.current = null;
             };
 
             // --- Render ---
@@ -285,7 +350,7 @@
                             </div>
                         </div>
 
-                        {/* ─── Screen 1: Upload ─── */}
+                        {/* Screen 1: Upload */}
                         {screen === 'upload' && (
                             <div className="bg-white/10 backdrop-blur-lg rounded-2xl border border-white/20 p-8">
                                 <h2 className="text-xl font-semibold text-white mb-6">Upload Episode</h2>
@@ -324,7 +389,7 @@
                                             }`}
                                         >
                                             <div className="flex items-center gap-3">
-                                                <div className="text-lg">✨</div>
+                                                <div className="text-lg">&#10024;</div>
                                                 <div>
                                                     <div className="text-sm font-semibold text-white">Auto-Detect</div>
                                                     <div className="text-xs text-purple-300 mt-0.5">Analyses your audio and picks the best settings</div>
@@ -332,10 +397,10 @@
                                             </div>
                                         </button>
                                         {[
-                                            { key: 'studio', label: 'Studio Interview', desc: 'Clean audio, light editing', icon: '🎙️' },
-                                            { key: 'zoom', label: 'Zoom / Remote', desc: 'Full cleanup + dereverb', icon: '💻' },
-                                            { key: 'solo', label: 'Solo Narration', desc: 'Aggressive filler removal', icon: '🎧' },
-                                            { key: 'raw', label: 'Raw / Rough Cut', desc: 'Heavy cleanup all round', icon: '🔧' },
+                                            { key: 'studio', label: 'Studio Interview', desc: 'Clean audio, light editing', icon: '\uD83C\uDF99\uFE0F' },
+                                            { key: 'zoom', label: 'Zoom / Remote', desc: 'Standard cleanup', icon: '\uD83D\uDCBB' },
+                                            { key: 'solo', label: 'Solo Narration', desc: 'Aggressive filler removal', icon: '\uD83C\uDFA7' },
+                                            { key: 'raw', label: 'Raw / Rough Cut', desc: 'Heavy cleanup all round', icon: '\uD83D\uDD27' },
                                         ].map(p => (
                                             <button
                                                 key={p.key}
@@ -376,7 +441,7 @@
                             </div>
                         )}
 
-                        {/* ─── Screen 2: Progress ─── */}
+                        {/* Screen 2: Progress */}
                         {screen === 'progress' && (
                             <div className="bg-white/10 backdrop-blur-lg rounded-2xl border border-white/20 p-8">
                                 <h2 className="text-xl font-semibold text-white mb-6">Editing in progress</h2>
@@ -448,7 +513,110 @@
                             </div>
                         )}
 
-                        {/* ─── Screen 3: Download ─── */}
+                        {/* Screen 3: Enhance */}
+                        {screen === 'enhance' && (
+                            <div className="bg-white/10 backdrop-blur-lg rounded-2xl border border-white/20 p-8">
+                                <div className="flex items-center gap-3 mb-6">
+                                    <CheckCircle className="w-6 h-6 text-green-400" />
+                                    <h2 className="text-xl font-semibold text-white">Cuts complete — enhance your audio</h2>
+                                </div>
+
+                                <div className="space-y-6">
+                                    {/* Step 1: Download */}
+                                    <div className="bg-white/5 rounded-xl border border-white/10 p-5">
+                                        <div className="flex items-start gap-3">
+                                            <div className="w-7 h-7 rounded-full bg-purple-500/30 border border-purple-400/50 flex items-center justify-center text-purple-300 text-sm font-bold shrink-0">1</div>
+                                            <div className="flex-1">
+                                                <p className="text-white font-medium mb-2">Download the edited audio</p>
+                                                <button
+                                                    onClick={handleDownloadIntermediate}
+                                                    className="bg-gradient-to-r from-purple-500 to-pink-500 text-white font-semibold py-3 px-6 rounded-xl hover:from-purple-600 hover:to-pink-600 transition-all flex items-center gap-2"
+                                                >
+                                                    <Download className="w-4 h-4" />
+                                                    Download WAV
+                                                </button>
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    {/* Step 2: Enhance externally */}
+                                    <div className="bg-white/5 rounded-xl border border-white/10 p-5">
+                                        <div className="flex items-start gap-3">
+                                            <div className="w-7 h-7 rounded-full bg-purple-500/30 border border-purple-400/50 flex items-center justify-center text-purple-300 text-sm font-bold shrink-0">2</div>
+                                            <div>
+                                                <p className="text-white font-medium mb-1">Enhance with Adobe Enhance Speech</p>
+                                                <p className="text-purple-200/70 text-sm">
+                                                    Go to <span className="text-purple-300 font-mono">podcast.adobe.com/enhance</span> and upload the WAV file. Download the enhanced result when it finishes.
+                                                </p>
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    {/* Step 3: Upload enhanced */}
+                                    <div className="bg-white/5 rounded-xl border border-white/10 p-5">
+                                        <div className="flex items-start gap-3">
+                                            <div className="w-7 h-7 rounded-full bg-purple-500/30 border border-purple-400/50 flex items-center justify-center text-purple-300 text-sm font-bold shrink-0">3</div>
+                                            <div className="flex-1">
+                                                <p className="text-white font-medium mb-2">Upload the enhanced file</p>
+                                                {finalizing ? (
+                                                    <div className="flex items-center gap-2 text-purple-300 text-sm">
+                                                        <svg className="w-4 h-4 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                                            <path d="M21 12a9 9 0 1 1-6.219-8.56" />
+                                                        </svg>
+                                                        Finalizing — converting to stereo MP3...
+                                                    </div>
+                                                ) : enhanceUploading ? (
+                                                    <div className="flex items-center gap-2 text-purple-300 text-sm">
+                                                        <svg className="w-4 h-4 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                                            <path d="M21 12a9 9 0 1 1-6.219-8.56" />
+                                                        </svg>
+                                                        Uploading enhanced file...
+                                                    </div>
+                                                ) : (
+                                                    <div>
+                                                        <input
+                                                            type="file"
+                                                            accept="audio/*"
+                                                            onChange={handleEnhancedUpload}
+                                                            className="hidden"
+                                                            id="enhanced-upload"
+                                                        />
+                                                        <label
+                                                            htmlFor="enhanced-upload"
+                                                            className="inline-flex items-center gap-2 bg-gradient-to-r from-green-500 to-emerald-500 text-white font-semibold py-3 px-6 rounded-xl hover:from-green-600 hover:to-emerald-600 transition-all cursor-pointer"
+                                                        >
+                                                            <UploadIcon className="w-4 h-4" />
+                                                            Upload Enhanced Audio
+                                                        </label>
+                                                    </div>
+                                                )}
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                {/* Error card */}
+                                {pipelineError && (
+                                    <div className="mt-6 bg-red-500/10 border border-red-500/50 rounded-xl p-5">
+                                        <p className="text-red-300 font-semibold text-sm mb-1">
+                                            Error during enhancement
+                                        </p>
+                                        <p className="text-red-200/70 text-xs font-mono break-all">
+                                            {pipelineError.message}
+                                        </p>
+                                    </div>
+                                )}
+
+                                <button
+                                    onClick={resetToUpload}
+                                    className="mt-6 text-purple-300 hover:text-white text-sm transition-all"
+                                >
+                                    Start over
+                                </button>
+                            </div>
+                        )}
+
+                        {/* Screen 4: Download */}
                         {screen === 'download' && (
                             <div className="bg-white/10 backdrop-blur-lg rounded-2xl border border-white/20 p-8 text-center">
                                 <div className="w-16 h-16 mx-auto mb-4 text-green-400">

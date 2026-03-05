@@ -675,7 +675,7 @@ def process_with_adobe_enhance(audio_path):
         raise Exception(f'Adobe file upload failed: {resp.status_code} - {resp.text[:200]}')
     print("Adobe Enhance: file uploaded successfully")
 
-    # Step 3: Create enhancement job
+    # Step 3: Create enhancement job (v2 model with stem separation)
     track_id = str(uuid.uuid4())
     timestamp_ms = str(int(time.time() * 1000))
     resp = requests.post(
@@ -685,21 +685,21 @@ def process_with_adobe_enhance(audio_path):
         json={
             'id': track_id,
             'track_name': filename,
-            'model_version': 'v1',
+            'model_version': 'v2',
             'signed_id': signed_id,
         },
     )
     if resp.status_code not in (200, 201):
         raise Exception(f'Adobe enhance job creation failed: {resp.status_code} - {resp.text[:200]}')
-    print(f"Adobe Enhance: enhancement job created, track_id={track_id}")
+    print(f"Adobe Enhance: v2 enhancement job created, track_id={track_id}")
 
-    # Step 4: Poll for completion (max 60 attempts x 5s = 5 min)
+    # Step 4: Poll merged_media for completion (max 60 attempts x 5s = 5 min)
     download_url = None
     for attempt in range(60):
         time.sleep(5)
         timestamp_ms = str(int(time.time() * 1000))
         resp = requests.get(
-            f'{ADOBE_API_BASE}/api/v1/enhance_speech_tracks/{track_id}/enhanced_audio',
+            f'{ADOBE_API_BASE}/api/v1/enhance_speech_tracks/{track_id}/merged_media',
             headers=headers,
             params={'time': timestamp_ms},
         )
@@ -716,7 +716,7 @@ def process_with_adobe_enhance(audio_path):
             raise Exception(f'Adobe enhance poll failed: {resp.status_code} - {resp.text[:200]}')
     if not download_url:
         raise Exception('Adobe Enhance Speech timed out after 5 minutes')
-    print(f"Adobe Enhance: processing complete, downloading enhanced audio")
+    print(f"Adobe Enhance: v2 processing complete, downloading merged audio")
 
     # Step 5: Download enhanced file
     resp = requests.get(download_url, stream=True)

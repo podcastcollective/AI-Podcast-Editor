@@ -691,19 +691,17 @@ def process_with_adobe_enhance(audio_path):
     print(f"Adobe Enhance: v2 enhancement job created, track_id={track_id}")
 
     # Step 4: Poll merged_media for completion (max 60 attempts x 5s = 5 min)
-    download_url = None
     for attempt in range(60):
         time.sleep(5)
         timestamp_ms = str(int(time.time() * 1000))
         resp = requests.get(
             f'{ADOBE_API_BASE}/api/v1/enhance_speech_tracks/{track_id}/merged_media',
             headers=headers,
-            params={'time': timestamp_ms, 'esv2': 90, 'bg': 10, 'music': 10},
+            params={'time': timestamp_ms},
         )
         if resp.status_code == 200:
             data = resp.json()
             if data and 'url' in data:
-                download_url = data['url'].replace('\u0026', '&')
                 break
         elif resp.status_code == 204:
             if attempt % 6 == 0:
@@ -711,14 +709,66 @@ def process_with_adobe_enhance(audio_path):
             continue
         else:
             raise Exception(f'Adobe enhance poll failed: {resp.status_code} - {resp.text[:200]}')
-    if not download_url:
+    else:
         raise Exception('Adobe Enhance Speech timed out after 5 minutes')
-    print(f"Adobe Enhance: v2 processing complete, downloading merged audio")
+    print(f"Adobe Enhance: v2 processing complete")
 
-    # Step 5: Download enhanced file
+    # Step 5: Create export with 90/10/10 stem mix
+    # Gains: enhanced_speech 0.9 + isolated_speech 0.1 = 1.0 (full speech)
+    # background and music at ~10% UI slider (logarithmic gain value)
+    BG_MUSIC_GAIN = 0.03483373150360116  # 10% on Adobe UI slider
+    timestamp_ms = str(int(time.time() * 1000))
+    resp = requests.post(
+        f'{ADOBE_API_BASE}/api/v1/enhance_speech_tracks/{track_id}/exports',
+        headers={**headers, 'content-type': 'application/json'},
+        params={'time': timestamp_ms},
+        json={
+            'enhanced_speech_gain': 0.9,
+            'isolated_speech_gain': 0.1,
+            'background_gain': BG_MUSIC_GAIN,
+            'music_gain': BG_MUSIC_GAIN,
+            'enhancement_enabled': True,
+            'track_component': 'full',
+        },
+    )
+    if resp.status_code not in (200, 201):
+        raise Exception(f'Adobe export creation failed: {resp.status_code} - {resp.text[:200]}')
+    export_data = resp.json()
+    export_id = export_data.get('id')
+    if not export_id:
+        raise Exception(f'Adobe export response missing id: {export_data}')
+    print(f"Adobe Enhance: export created with 90/10/10 mix, export_id={export_id}")
+
+    # Step 6: Poll export for download URL (max 60 attempts x 5s = 5 min)
+    download_url = None
+    for attempt in range(60):
+        time.sleep(5)
+        timestamp_ms = str(int(time.time() * 1000))
+        resp = requests.get(
+            f'{ADOBE_API_BASE}/api/v1/enhance_speech_tracks/{track_id}/exports/{export_id}',
+            headers=headers,
+            params={'time': timestamp_ms},
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            url = data.get('url') or data.get('download_url')
+            if url:
+                download_url = url.replace('\u0026', '&')
+                break
+        elif resp.status_code == 204:
+            if attempt % 6 == 0:
+                print(f"Adobe Enhance: export rendering... ({attempt * 5}s elapsed)")
+            continue
+        else:
+            raise Exception(f'Adobe export poll failed: {resp.status_code} - {resp.text[:200]}')
+    if not download_url:
+        raise Exception('Adobe export timed out after 5 minutes')
+    print(f"Adobe Enhance: export ready, downloading")
+
+    # Step 7: Download exported file
     resp = requests.get(download_url, stream=True)
     if resp.status_code != 200:
-        raise Exception(f'Adobe enhanced file download failed: {resp.status_code}')
+        raise Exception(f'Adobe export download failed: {resp.status_code}')
 
     enhanced_path = audio_path.rsplit('.', 1)[0] + '_adobe_enhanced.wav'
     with open(enhanced_path, 'wb') as f:

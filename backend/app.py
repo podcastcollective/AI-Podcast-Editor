@@ -698,7 +698,7 @@ def process_with_adobe_enhance(audio_path):
         resp = requests.get(
             f'{ADOBE_API_BASE}/api/v1/enhance_speech_tracks/{track_id}/merged_media',
             headers=headers,
-            params={'time': timestamp_ms},
+            params={'time': timestamp_ms, 'esv2': 90, 'bg': 10, 'music': 10},
         )
         if resp.status_code == 200:
             data = resp.json()

@@ -1,3 +1,5 @@
+const BACKEND_URL = 'https://ai-podcast-editor-production.up.railway.app';
+
 // Inject token interceptor into Adobe Podcast tabs
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (changeInfo.status === 'complete' && tab.url?.startsWith('https://podcast.adobe.com')) {
@@ -10,19 +12,30 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   }
 });
 
-// Reload Adobe tabs every 10 minutes to keep the token fresh.
-// Adobe tokens expire after a single pipeline run; reloading the page
-// triggers fresh API calls whose tokens the interceptor captures.
-chrome.alarms.create('refreshAdobeToken', { periodInMinutes: 10 });
+// Poll backend every 60s — refresh Adobe tab only when the token was just used.
+// Flow: pipeline uses token → backend sets refresh_needed → extension sees it →
+// reloads Adobe tab → fresh API calls → interceptor captures new token →
+// syncs to backend (which clears refresh_needed).
+chrome.alarms.create('checkTokenStatus', { periodInMinutes: 1 });
 
 chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name !== 'refreshAdobeToken') return;
-  chrome.tabs.query({ url: 'https://podcast.adobe.com/*' }, (tabs) => {
-    for (const tab of tabs) {
-      chrome.tabs.reload(tab.id);
-      console.log('[AdobeTokenSync] Refreshed Adobe tab', tab.id);
-    }
-  });
+  if (alarm.name !== 'checkTokenStatus') return;
+  fetch(`${BACKEND_URL}/api/token-status`)
+    .then((r) => r.json())
+    .then((data) => {
+      if (!data.refresh_needed) return;
+      chrome.tabs.query({ url: 'https://podcast.adobe.com/*' }, (tabs) => {
+        if (tabs.length === 0) {
+          console.log('[AdobeTokenSync] No Adobe tab open — cannot refresh token');
+          return;
+        }
+        for (const tab of tabs) {
+          chrome.tabs.reload(tab.id);
+          console.log('[AdobeTokenSync] Refreshed Adobe tab', tab.id, '(token was used)');
+        }
+      });
+    })
+    .catch(() => {}); // backend unreachable — ignore silently
 });
 
 function injectTokenInterceptor() {

@@ -1,10 +1,13 @@
 {
   "manifest_version": 3,
   "name": "Adobe Token Sync",
-  "version": "1.3",
+  "version": "1.4",
   "description": "Auto-sync Adobe Enhance Speech token to AI Podcast Editor backend",
   "permissions": ["scripting", "alarms", "tabs"],
-  "host_permissions": ["https://podcast.adobe.com/*"],
+  "host_permissions": [
+    "https://podcast.adobe.com/*",
+    "https://ai-podcast-editor-production.up.railway.app/*"
+  ],
   "background": {
     "service_worker": "background.js"
   }

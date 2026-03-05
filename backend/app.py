@@ -28,6 +28,7 @@ ASSEMBLYAI_API_KEY = os.environ.get('ASSEMBLYAI_API_KEY')
 CLAUDE_API_KEY = os.environ.get('CLAUDE_API_KEY')
 _adobe_token_lock = threading.Lock()
 _adobe_token: str | None = os.environ.get('ADOBE_ENHANCE_TOKEN')
+_adobe_token_refresh_needed: bool = False
 
 
 def get_adobe_token():
@@ -36,9 +37,16 @@ def get_adobe_token():
 
 
 def set_adobe_token(token):
-    global _adobe_token
+    global _adobe_token, _adobe_token_refresh_needed
     with _adobe_token_lock:
         _adobe_token = token
+        _adobe_token_refresh_needed = False
+
+
+def _mark_token_used():
+    global _adobe_token_refresh_needed
+    with _adobe_token_lock:
+        _adobe_token_refresh_needed = True
 
 
 if not ASSEMBLYAI_API_KEY or not CLAUDE_API_KEY:
@@ -776,6 +784,7 @@ def process_with_adobe_enhance(audio_path):
             f.write(chunk)
     enhanced_size = os.path.getsize(enhanced_path)
     print(f"Adobe Enhance: saved {enhanced_path} ({enhanced_size // 1024}KB)")
+    _mark_token_used()
     return enhanced_path
 
 
@@ -1305,6 +1314,13 @@ def set_adobe_token_route():
     set_adobe_token(token)
     print(f"Adobe token updated via API ({len(token)} chars)")
     return jsonify({"success": True})
+
+
+@app.route('/api/token-status', methods=['GET'])
+def token_status():
+    """Extension polls this to know when to refresh the Adobe tab."""
+    with _adobe_token_lock:
+        return jsonify({"refresh_needed": _adobe_token_refresh_needed})
 
 
 if __name__ == '__main__':

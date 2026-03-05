@@ -795,7 +795,7 @@ def _finalize_audio(job_id, enhanced_path):
     # Just encode to high-quality MP3.
     result = subprocess.run(
         ['ffmpeg', '-y', '-i', enhanced_path,
-         '-b:a', '192k',
+         '-b:a', '320k',
          '-f', 'mp3', mp3_path],
         capture_output=True, text=True, timeout=600,
     )
@@ -803,7 +803,7 @@ def _finalize_audio(job_id, enhanced_path):
         raise Exception(f"ffmpeg finalize failed: {result.stderr[-500:]}")
 
     size_kb = os.path.getsize(mp3_path) // 1024
-    print(f"Finalize: {mp3_path} ({size_kb}KB, 192kbps MP3)")
+    print(f"Finalize: {mp3_path} ({size_kb}KB, 320kbps MP3)")
 
     with _edit_jobs_lock:
         _edit_jobs[job_id]['status'] = 'completed'

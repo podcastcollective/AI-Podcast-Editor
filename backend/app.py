@@ -471,38 +471,25 @@ Example tool input for reference:
 
 
 # ============================================================================
-# AUDIO EDITING — cuts with crossfade
+# AUDIO EDITING — ffmpeg-based cuts (no pydub, avoids OOM on large files)
 # ============================================================================
-
-def _snap_to_zero_crossing(audio, ms, search_radius_ms=5):
-    """Snap to the nearest zero-crossing within \u00b1search_radius_ms."""
-    samples = audio.get_array_of_samples()
-    sample_rate = audio.frame_rate
-    channels = audio.channels
-    center_sample = int(ms * sample_rate / 1000) * channels
-    radius_samples = int(search_radius_ms * sample_rate / 1000) * channels
-    s_lo = max(0, center_sample - radius_samples)
-    s_hi = min(len(samples) - channels, center_sample + radius_samples)
-    best_idx = center_sample
-    best_val = abs(samples[min(center_sample, len(samples) - 1)])
-    for i in range(s_lo, s_hi, channels):
-        val = abs(samples[i])
-        if val < best_val:
-            best_val = val
-            best_idx = i
-    return int(best_idx / channels * 1000 / sample_rate)
-
 
 def apply_audio_edits(audio_path, cuts_ms, words=None):
     """
-    Remove segments from audio using pydub with crossfade, export as WAV.
+    Remove segments from audio using ffmpeg filter_complex, export as WAV.
+    Streams the file through ffmpeg instead of loading into memory.
     cuts_ms: list of (start_ms, end_ms) tuples to remove.
     words: optional word dicts for snapping cuts to word boundaries.
     """
-    from pydub import AudioSegment
+    import subprocess
 
-    audio = AudioSegment.from_file(audio_path)
-    total_ms = len(audio)
+    # Get audio duration with ffprobe
+    probe = subprocess.run(
+        ['ffprobe', '-v', 'error', '-show_entries', 'format=duration',
+         '-of', 'csv=p=0', audio_path],
+        capture_output=True, text=True, check=True, timeout=30,
+    )
+    total_ms = int(float(probe.stdout.strip()) * 1000)
 
     word_intervals = [
         (w.get('start', 0), w.get('end', 0))
@@ -542,49 +529,72 @@ def apply_audio_edits(audio_path, cuts_ms, words=None):
         else:
             merged.append([s, e])
 
-    # Snap to word boundaries and zero-crossings
+    # Snap to word boundaries (zero-crossing snap removed — 5ms fades prevent clicks)
     if word_intervals:
         for cut in merged:
             cut[0] = _safe_cut_start(cut[0])
             cut[1] = _safe_cut_end(cut[1])
-    for cut in merged:
-        cut[0] = _snap_to_zero_crossing(audio, cut[0])
-        cut[1] = _snap_to_zero_crossing(audio, cut[1])
 
-    # Build kept segments with micro-fade butt-splice
-    # Crossfading causes -6dB volume dips at every cut (sounds like connection drops).
-    # Instead: fade each segment edge to zero independently, then concatenate.
-    FADE_MS = 5  # 5ms micro-fade — prevents clicks, no audible volume change
-    segments = []
+    # Calculate keep segments
+    keeps = []
     pos = 0
     for s, e in merged:
         if s > pos:
-            segments.append(audio[pos:s])
+            keeps.append((pos, s))
         pos = e
     if pos < total_ms:
-        segments.append(audio[pos:])
+        keeps.append((pos, total_ms))
 
-    if segments:
-        # Apply micro-fades only at cut boundaries (not episode start/end)
-        for i in range(len(segments)):
-            seg = segments[i]
-            if i < len(segments) - 1 and len(seg) > FADE_MS:
-                seg = seg.fade_out(FADE_MS)
-            if i > 0 and len(seg) > FADE_MS:
-                seg = seg.fade_in(FADE_MS)
-            segments[i] = seg
-        edited = segments[0]
-        for seg in segments[1:]:
-            edited += seg  # butt-splice — no overlap, no volume dip
-    else:
-        edited = AudioSegment.empty()
+    removed_ms = sum(e - s for s, e in merged)
+    remaining_ms = total_ms - removed_ms
+    print(f"Cuts: {len(merged)} cuts, removed {removed_ms}ms, {remaining_ms}ms remaining")
 
-    removed_ms = total_ms - len(edited)
-    print(f"Cuts: {len(merged)} cuts, removed {removed_ms}ms, {len(edited)}ms remaining")
+    if not keeps:
+        keeps = [(0, min(1000, total_ms))]
 
+    # Build ffmpeg filter_complex: trim each keep segment, apply micro-fades, concat
+    FADE_S = 0.005  # 5ms micro-fade at cut boundaries
+    filter_parts = []
+    for i, (start, end) in enumerate(keeps):
+        start_s = start / 1000
+        end_s = end / 1000
+        duration_s = end_s - start_s
+
+        # atrim extracts segment, asetpts resets timestamps to 0
+        chain = [f"atrim={start_s}:{end_s}", "asetpts=N/SR/TB"]
+
+        # Micro-fades at cut boundaries only (not episode start/end)
+        if i > 0 and duration_s > FADE_S:
+            chain.append(f"afade=t=in:d={FADE_S}")
+        if i < len(keeps) - 1 and duration_s > FADE_S:
+            chain.append(f"afade=t=out:st={duration_s - FADE_S}:d={FADE_S}")
+
+        filter_parts.append(f"[0:a]{','.join(chain)}[s{i}]")
+
+    concat_inputs = "".join(f"[s{i}]" for i in range(len(keeps)))
+    full_filter = ";".join(filter_parts)
+    full_filter += f";{concat_inputs}concat=n={len(keeps)}:v=0:a=1[out]"
+
+    # Write filter to script file to avoid command-line length limits
+    filter_path = audio_path + '_filter.txt'
     wav_path = audio_path.rsplit('.', 1)[0] + '_edited.wav'
-    edited.export(wav_path, format='wav')
-    print(f"Exported: {wav_path} ({len(edited)}ms, {os.path.getsize(wav_path) // 1024}KB)")
+    try:
+        with open(filter_path, 'w') as f:
+            f.write(full_filter)
+
+        result = subprocess.run(
+            ['ffmpeg', '-y', '-i', audio_path,
+             '-filter_complex_script', filter_path,
+             '-map', '[out]', '-f', 'wav', wav_path],
+            capture_output=True, text=True, timeout=600,
+        )
+        if result.returncode != 0:
+            raise Exception(f"ffmpeg edit failed: {result.stderr[-500:]}")
+    finally:
+        if os.path.exists(filter_path):
+            os.remove(filter_path)
+
+    print(f"Exported: {wav_path} ({remaining_ms}ms, {os.path.getsize(wav_path) // 1024}KB)")
     return wav_path
 
 

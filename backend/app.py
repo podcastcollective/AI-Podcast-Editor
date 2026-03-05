@@ -787,20 +787,17 @@ def _run_edit_job(job_id, audio_path, cuts_ms, transcript_id=None):
 
 
 def _finalize_audio(job_id, enhanced_path):
-    """Shared finalization: stereo + peak-normalize + MP3 via ffmpeg (no pydub OOM)."""
+    """Shared finalization: convert Adobe output to MP3 without altering levels."""
     import subprocess
 
     mp3_path = enhanced_path.rsplit('.', 1)[0] + '_final.mp3'
 
-    # Single ffmpeg pass: stereo + peak-normalize to -1dBTP + high-quality MP3
-    # -ac 2: force stereo output
-    # -af loudnorm: EBU R128 loudness normalization (podcast standard -16 LUFS, -1dBTP)
-    # -b:a 320k: high bitrate to preserve richness from Adobe Enhance
+    # Minimal processing — Adobe Enhance output is already well-mastered.
+    # No loudnorm (was clipping at 0dB), no forced stereo (mono is fine for speech).
+    # Just encode to high-quality MP3.
     result = subprocess.run(
         ['ffmpeg', '-y', '-i', enhanced_path,
-         '-ac', '2',
-         '-af', 'loudnorm=I=-16:TP=-1:LRA=11',
-         '-b:a', '320k',
+         '-b:a', '192k',
          '-f', 'mp3', mp3_path],
         capture_output=True, text=True, timeout=600,
     )
@@ -808,7 +805,7 @@ def _finalize_audio(job_id, enhanced_path):
         raise Exception(f"ffmpeg finalize failed: {result.stderr[-500:]}")
 
     size_kb = os.path.getsize(mp3_path) // 1024
-    print(f"Finalize: {mp3_path} ({size_kb}KB, 320kbps MP3, loudnorm -16 LUFS)")
+    print(f"Finalize: {mp3_path} ({size_kb}KB, 192kbps MP3)")
 
     with _edit_jobs_lock:
         _edit_jobs[job_id]['status'] = 'completed'

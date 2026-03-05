@@ -1236,5 +1236,21 @@ def set_adobe_token_route():
     return jsonify({"success": True})
 
 
+@app.route('/api/debug/test-job', methods=['POST'])
+def debug_test_job():
+    """Diagnostic: create a lightweight job to test in-memory store survives."""
+    job_id = str(uuid.uuid4())
+    with _jobs_lock:
+        _jobs[job_id] = {'status': 'pending'}
+
+    def _dummy(jid):
+        time.sleep(5)
+        with _jobs_lock:
+            _jobs[jid] = {'status': 'completed', 'result': {'success': True, 'test': True}}
+
+    threading.Thread(target=_dummy, args=(job_id,), daemon=True).start()
+    return jsonify({"job_id": job_id})
+
+
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)), debug=False)

@@ -787,27 +787,28 @@ def _run_edit_job(job_id, audio_path, cuts_ms, transcript_id=None):
 
 
 def _finalize_audio(job_id, enhanced_path):
-    """Shared finalization: stereo -> peak-normalize -> MP3 export. Updates job status."""
-    from pydub import AudioSegment
-    audio = AudioSegment.from_file(enhanced_path)
-    print(f"Finalize: channels={audio.channels}, duration={len(audio)}ms")
+    """Shared finalization: stereo + peak-normalize + MP3 via ffmpeg (no pydub OOM)."""
+    import subprocess
 
-    # Always export stereo — standard for podcast distribution
-    if audio.channels == 1:
-        print("Converting mono to stereo for podcast output")
-        audio = AudioSegment.from_mono_audiosegments(audio, audio)
-
-    # Peak-normalize to -1 dBFS (standard podcast mastering)
-    gain = -1.0 - audio.max_dBFS
-    if gain > 0:
-        audio = audio.apply_gain(gain)
-        print(f"Peak-normalized: gain {gain:+.1f}dB \u2192 peaks at {audio.max_dBFS:.1f} dBFS, avg {audio.dBFS:.1f} dBFS")
-    else:
-        print(f"Audio already loud enough: peaks at {audio.max_dBFS:.1f} dBFS, avg {audio.dBFS:.1f} dBFS")
-
-    # Export as MP3
     mp3_path = enhanced_path.rsplit('.', 1)[0] + '_final.mp3'
-    audio.export(mp3_path, format='mp3', bitrate='192k')
+
+    # Single ffmpeg pass: stereo + peak-normalize to -1dBTP + high-quality MP3
+    # -ac 2: force stereo output
+    # -af loudnorm: EBU R128 loudness normalization (podcast standard -16 LUFS, -1dBTP)
+    # -b:a 320k: high bitrate to preserve richness from Adobe Enhance
+    result = subprocess.run(
+        ['ffmpeg', '-y', '-i', enhanced_path,
+         '-ac', '2',
+         '-af', 'loudnorm=I=-16:TP=-1:LRA=11',
+         '-b:a', '320k',
+         '-f', 'mp3', mp3_path],
+        capture_output=True, text=True, timeout=600,
+    )
+    if result.returncode != 0:
+        raise Exception(f"ffmpeg finalize failed: {result.stderr[-500:]}")
+
+    size_kb = os.path.getsize(mp3_path) // 1024
+    print(f"Finalize: {mp3_path} ({size_kb}KB, 320kbps MP3, loudnorm -16 LUFS)")
 
     with _edit_jobs_lock:
         _edit_jobs[job_id]['status'] = 'completed'

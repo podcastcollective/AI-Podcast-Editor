@@ -1,3 +1,4 @@
+// Inject token interceptor into Adobe Podcast tabs
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (changeInfo.status === 'complete' && tab.url?.startsWith('https://podcast.adobe.com')) {
     chrome.scripting.executeScript({
@@ -7,6 +8,21 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
     });
     console.log('[AdobeTokenSync] Injected into tab', tabId);
   }
+});
+
+// Reload Adobe tabs every 10 minutes to keep the token fresh.
+// Adobe tokens expire after a single pipeline run; reloading the page
+// triggers fresh API calls whose tokens the interceptor captures.
+chrome.alarms.create('refreshAdobeToken', { periodInMinutes: 10 });
+
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name !== 'refreshAdobeToken') return;
+  chrome.tabs.query({ url: 'https://podcast.adobe.com/*' }, (tabs) => {
+    for (const tab of tabs) {
+      chrome.tabs.reload(tab.id);
+      console.log('[AdobeTokenSync] Refreshed Adobe tab', tab.id);
+    }
+  });
 });
 
 function injectTokenInterceptor() {

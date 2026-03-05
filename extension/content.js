@@ -1,18 +1,4 @@
-chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
-  if (changeInfo.status === 'complete' && tab.url?.startsWith('https://podcast.adobe.com')) {
-    chrome.scripting.executeScript({
-      target: { tabId },
-      world: 'MAIN',
-      func: injectTokenInterceptor,
-    });
-    console.log('[AdobeTokenSync] Injected into tab', tabId);
-  }
-});
-
-function injectTokenInterceptor() {
-  if (window.__adobeTokenSyncInjected) return;
-  window.__adobeTokenSyncInjected = true;
-
+(function () {
   const BACKEND_URL = 'https://ai-podcast-editor-production.up.railway.app';
   let lastSentToken = null;
   const _fetch = window.fetch.bind(window);
@@ -51,4 +37,4 @@ function injectTokenInterceptor() {
   };
 
   console.log('[AdobeTokenSync] Monitoring Adobe API requests');
-}
+})();

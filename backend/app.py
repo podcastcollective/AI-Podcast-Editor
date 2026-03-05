@@ -948,6 +948,99 @@ def _run_finalize_job(job_id, enhanced_path):
 
 
 # ============================================================================
+# SHOW NOTES — on-demand episode summary via Claude
+# ============================================================================
+
+def generate_show_notes(transcript_data):
+    """Call Claude to generate show notes from transcript."""
+    print("Generating show notes with Claude...")
+    client = anthropic.Anthropic(api_key=CLAUDE_API_KEY)
+
+    utterances = transcript_data.get('utterances', [])
+    utt_lines = []
+    for utt in utterances[:120]:
+        start = format_timestamp(utt.get('start', 0))
+        speaker = utt.get('speaker', '?')
+        text = utt.get('text', '')
+        utt_lines.append(f"[{start}] Speaker {speaker}: {text}")
+    utt_text = "\n".join(utt_lines) if utt_lines else transcript_data.get('text', '')[:6000]
+
+    duration_ms = transcript_data.get('audio_duration', 0)
+    duration_str = format_timestamp(duration_ms) if duration_ms else 'unknown'
+
+    prompt = f"""You are a podcast producer writing show notes for an episode. Based on the transcript below, generate concise, well-structured show notes.
+
+TRANSCRIPT:
+{utt_text}
+
+EPISODE DURATION: {duration_str}
+
+Generate the following sections:
+
+## Summary
+2-3 sentences summarizing the episode.
+
+## Key Topics
+- Bulleted list of the main topics discussed
+
+## Notable Quotes
+Pick 2-4 standout quotes (with speaker attribution and approximate timestamp).
+
+## Chapters
+Timestamp-based chapter markers for the episode. Format each as:
+- [HH:MM:SS] Chapter title
+
+Keep the tone professional but approachable. Be concise."""
+
+    models = ["claude-sonnet-4-6", "claude-haiku-4-5-20251001"]
+    max_retries = 3
+    response = None
+    for model in models:
+        for attempt in range(max_retries):
+            try:
+                response = client.messages.create(
+                    model=model,
+                    max_tokens=4000,
+                    messages=[{"role": "user", "content": prompt}],
+                )
+                print(f"Show notes generated with {model}")
+                break
+            except anthropic.APIStatusError as e:
+                if e.status_code in (429, 529) and attempt < max_retries - 1:
+                    wait = min(10 * (2 ** attempt), 30)
+                    print(f"{model} API {e.status_code}, retrying in {wait}s")
+                    time.sleep(wait)
+                elif e.status_code in (429, 529):
+                    break
+                else:
+                    raise
+        if response is not None:
+            break
+    if response is None:
+        raise Exception("Claude API failed — all models overloaded")
+
+    text_blocks = [b.text for b in response.content if hasattr(b, 'text')]
+    return "\n".join(text_blocks)
+
+
+def _run_show_notes_job(job_id, transcript_id):
+    """Background thread: fetch transcript and generate show notes."""
+    try:
+        transcript_data = get_transcription(transcript_id)
+        if transcript_data.get('status') != 'completed':
+            raise Exception(f"Transcript not ready (status: {transcript_data.get('status')})")
+        notes = generate_show_notes(transcript_data)
+        with _jobs_lock:
+            _jobs[job_id] = {'status': 'completed', 'result': {'show_notes': notes}}
+        print(f"Show notes job {job_id} complete")
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        with _jobs_lock:
+            _jobs[job_id] = {'status': 'error', 'error': str(e)}
+
+
+# ============================================================================
 # REPORT
 # ============================================================================
 
@@ -1198,6 +1291,49 @@ def process_status(job_id):
         return jsonify(job['result'])
     if job['status'] == 'error':
         return jsonify({"error": job['error'], "retryable": job.get('retryable', False)}), 500
+    return jsonify({"status": job['status']})
+
+
+@app.route('/api/show-notes', methods=['POST', 'OPTIONS'])
+def show_notes():
+    """Generate show notes for a completed transcript."""
+    if request.method == 'OPTIONS':
+        return '', 204
+    try:
+        if not CLAUDE_API_KEY:
+            return jsonify({"error": "CLAUDE_API_KEY not configured"}), 500
+        data = request.json
+        transcript_id = data.get('transcript_id')
+        if not transcript_id:
+            return jsonify({"error": "No transcript_id provided"}), 400
+
+        job_id = str(uuid.uuid4())
+        with _jobs_lock:
+            _jobs[job_id] = {'status': 'pending'}
+
+        threading.Thread(
+            target=_run_show_notes_job,
+            args=(job_id, transcript_id),
+            daemon=True,
+        ).start()
+
+        return jsonify({"success": True, "job_id": job_id})
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/show-notes-status/<job_id>', methods=['GET'])
+def show_notes_status(job_id):
+    with _jobs_lock:
+        job = _jobs.get(job_id)
+    if not job:
+        return jsonify({"error": "Job not found"}), 404
+    if job['status'] == 'completed':
+        return jsonify({"status": "completed", "show_notes": job['result']['show_notes']})
+    if job['status'] == 'error':
+        return jsonify({"error": job['error']}), 500
     return jsonify({"status": job['status']})
 
 

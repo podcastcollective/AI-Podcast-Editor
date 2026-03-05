@@ -13,7 +13,7 @@
     <div id="root"></div>
 
     <script type="text/babel">
-        const { useState, useRef } = React;
+        const { useState, useRef, useEffect } = React;
 
         // Icons
         const UploadIcon = ({className}) => (
@@ -83,7 +83,7 @@
 
         function PodcastEditor() {
             const [screen, setScreen] = useState('upload');
-            const [file, setFile] = useState(null);
+            const [files, setFiles] = useState([]);
             const [introFile, setIntroFile] = useState(null);
             const [outroFile, setOutroFile] = useState(null);
             const [preset, setPreset] = useState('auto');
@@ -96,156 +96,258 @@
             const transcriptIdRef = useRef(null);
             const editJobIdRef = useRef(null);
 
+            // Batch state
+            const [batchIndex, setBatchIndex] = useState(0);
+            const [batchResults, setBatchResults] = useState([]);
+
+            // Show notes state
+            const [showNotes, setShowNotes] = useState(null);
+            const [showNotesLoading, setShowNotesLoading] = useState(false);
+
+            // Show profiles state
+            const [profiles, setProfiles] = useState(() => {
+                try { return JSON.parse(localStorage.getItem('showProfiles') || '[]'); }
+                catch { return []; }
+            });
+            const [selectedProfile, setSelectedProfile] = useState(null);
+            const [showProfileManager, setShowProfileManager] = useState(false);
+            const [editingProfileName, setEditingProfileName] = useState(null);
+
+            useEffect(() => {
+                localStorage.setItem('showProfiles', JSON.stringify(profiles));
+            }, [profiles]);
+
+            const selectProfile = (profile) => {
+                setSelectedProfile(profile.id);
+                setPreset(profile.preset);
+                setCustomInstructions(profile.customInstructions || '');
+            };
+
+            const saveProfile = () => {
+                const name = prompt('Show name:');
+                if (!name) return;
+                const newProfile = {
+                    id: crypto.randomUUID(),
+                    name,
+                    preset,
+                    customInstructions,
+                    createdAt: Date.now(),
+                };
+                setProfiles(prev => [...prev, newProfile]);
+                setSelectedProfile(newProfile.id);
+            };
+
+            const deleteProfile = (id) => {
+                setProfiles(prev => prev.filter(p => p.id !== id));
+                if (selectedProfile === id) setSelectedProfile(null);
+            };
+
+            const renameProfile = (id, newName) => {
+                if (!newName) return;
+                setProfiles(prev => prev.map(p => p.id === id ? { ...p, name: newName } : p));
+                setEditingProfileName(null);
+            };
+
             const handleFileUpload = (e) => {
-                const uploadedFile = e.target.files[0];
-                if (uploadedFile && uploadedFile.type.includes('audio')) {
-                    setFile(uploadedFile);
+                const uploaded = Array.from(e.target.files).filter(f => f.type.includes('audio'));
+                if (uploaded.length > 0) setFiles(prev => [...prev, ...uploaded]);
+            };
+
+            const removeFile = (index) => {
+                setFiles(prev => prev.filter((_, i) => i !== index));
+            };
+
+            const processOneEpisode = async (file) => {
+                setPipelineError(null);
+                setPipelineStage('uploading');
+
+                // Stage 1: Upload
+                const formData = new FormData();
+                formData.append('file', file);
+                const uploadRes = await fetch(`${API_URL}/api/upload`, { method: 'POST', body: formData });
+                if (!uploadRes.ok) {
+                    const err = await uploadRes.json();
+                    throw { stage: 'uploading', message: err.error || 'Upload failed' };
+                }
+                const uploadData = await uploadRes.json();
+                const { transcript_id, filename } = uploadData;
+                transcriptIdRef.current = transcript_id;
+
+                // Stage 2: Transcribe (poll)
+                setPipelineStage('transcribing');
+                while (true) {
+                    await new Promise(r => setTimeout(r, 5000));
+                    let statusRes;
+                    try { statusRes = await fetch(`${API_URL}/api/transcription-status/${transcript_id}`); }
+                    catch { throw { stage: 'transcribing', message: 'Server unreachable — it may be restarting. Please retry.' }; }
+                    const statusData = await statusRes.json();
+                    if (statusData.status === 'completed') break;
+                    if (statusData.status === 'error') {
+                        throw { stage: 'transcribing', message: statusData.error || 'Transcription failed' };
+                    }
+                }
+
+                // Stage 3: Claude analysis (with frontend-level retry on overload)
+                setPipelineStage('analyzing');
+                let editDecisions = [];
+                let resolvedPreset = preset;
+                let lastError = '';
+                const analysisBody = JSON.stringify({
+                    transcript_id,
+                    filename,
+                    preset,
+                    customInstructions
+                });
+
+                for (let analysisAttempt = 0; analysisAttempt < 3; analysisAttempt++) {
+                    const processRes = await fetch(`${API_URL}/api/process`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: analysisBody
+                    });
+                    const processData = await processRes.json();
+                    if (!processRes.ok) throw { stage: 'analyzing', message: processData.error || 'Analysis failed to start' };
+                    const analysisJobId = processData.job_id;
+                    if (!analysisJobId) throw { stage: 'analyzing', message: 'No job_id returned' };
+
+                    let retryable = false;
+                    while (true) {
+                        await new Promise(r => setTimeout(r, 3000));
+                        let pollRes;
+                        try { pollRes = await fetch(`${API_URL}/api/process-status/${analysisJobId}`); }
+                        catch { throw { stage: 'analyzing', message: 'Server unreachable — it may be restarting. Please retry.' }; }
+                        if (pollRes.status === 404) throw { stage: 'analyzing', message: 'Server restarted during processing. Please retry.' };
+                        const pollData = await pollRes.json();
+                        if (!pollRes.ok) {
+                            console.error(`Analysis poll error (${pollRes.status}):`, pollData);
+                            if (pollData.retryable) { lastError = pollData.error || 'API overloaded'; retryable = true; break; }
+                            throw { stage: 'analyzing', message: pollData.error || 'Analysis failed' };
+                        }
+                        if (pollData.status === 'detecting') setPipelineStage('detecting');
+                        if (pollData.status === 'analyzing') setPipelineStage('analyzing');
+                        if (pollData.success) {
+                            editDecisions = pollData.edit_decisions || [];
+                            if (pollData.detected_preset) {
+                                resolvedPreset = pollData.detected_preset;
+                                console.log(`Auto-detected preset: ${resolvedPreset}`, pollData.detection_metrics);
+                            }
+                            break;
+                        }
+                    }
+                    if (editDecisions.length > 0 || !retryable) break;
+                    if (analysisAttempt < 2) {
+                        console.log(`Claude API error, frontend retry ${analysisAttempt + 1}/3 in 30s: ${lastError}`);
+                        await new Promise(r => setTimeout(r, 30000));
+                    }
+                }
+                if (editDecisions.length === 0) throw { stage: 'analyzing', message: lastError || 'No edit decisions were generated. Try again or adjust your recording type.' };
+
+                // Stage 4: Apply cuts (+ optional intro/outro merge) → auto-enhance or manual enhance
+                setPipelineStage('cutting');
+                const cuts = editDecisions.filter(d => d.start_ms != null && d.end_ms != null);
+                const editFormData = new FormData();
+                editFormData.append('transcript_id', transcript_id);
+                editFormData.append('cuts', JSON.stringify(cuts));
+                editFormData.append('preset', resolvedPreset);
+                if (introFile) editFormData.append('intro', introFile);
+                if (outroFile) editFormData.append('outro', outroFile);
+                const editRes = await fetch(`${API_URL}/api/edit-audio`, {
+                    method: 'POST',
+                    body: editFormData
+                });
+                const editData = await editRes.json();
+                if (!editRes.ok) throw { stage: 'cutting', message: editData.error || 'Edit job failed to start' };
+                const editJobId = editData.job_id;
+                editJobIdRef.current = editJobId;
+
+                let autoEnhanced = false;
+                while (true) {
+                    await new Promise(r => setTimeout(r, 3000));
+                    let statusRes;
+                    try { statusRes = await fetch(`${API_URL}/api/edit-audio-status/${editJobId}`); }
+                    catch { throw { stage: 'cutting', message: 'Server unreachable — it may be restarting. Please retry.' }; }
+                    if (statusRes.status === 404) throw { stage: 'cutting', message: 'Server restarted during processing. Please retry.' };
+                    const statusData = await statusRes.json();
+                    if (statusData.status === 'cutting')         setPipelineStage('cutting');
+                    if (statusData.status === 'merging')         setPipelineStage('merging');
+                    if (statusData.status === 'enhancing')       setPipelineStage('enhancing');
+                    if (statusData.status === 'finalizing')      setPipelineStage('finalizing');
+                    if (statusData.status === 'cuts_completed')  break;
+                    if (statusData.status === 'completed') {
+                        autoEnhanced = true;
+                        break;
+                    }
+                    if (!statusRes.ok) {
+                        throw { stage: statusData.failed_step || 'cutting', message: statusData.error || 'Audio processing failed' };
+                    }
+                }
+
+                if (autoEnhanced) {
+                    const dlRes = await fetch(`${API_URL}/api/edit-audio-download/${editJobId}`);
+                    if (!dlRes.ok) {
+                        const err = await dlRes.json();
+                        throw { stage: 'finalizing', message: err.error || 'Download failed' };
+                    }
+                    return { blob: await dlRes.blob(), transcriptId: transcript_id, autoEnhanced: true };
+                } else {
+                    return { transcriptId: transcript_id, editJobId, autoEnhanced: false };
                 }
             };
 
             const runFullPipeline = async () => {
-                if (!file) return;
+                if (files.length === 0) return;
                 setScreen('progress');
                 setPipelineError(null);
-                setPipelineStage('uploading');
+                setBatchResults([]);
+                const isBatch = files.length > 1;
 
                 try {
-                    // Stage 1: Upload
-                    const formData = new FormData();
-                    formData.append('file', file);
-                    const uploadRes = await fetch(`${API_URL}/api/upload`, { method: 'POST', body: formData });
-                    if (!uploadRes.ok) {
-                        const err = await uploadRes.json();
-                        throw { stage: 'uploading', message: err.error || 'Upload failed' };
-                    }
-                    const uploadData = await uploadRes.json();
-                    const { transcript_id, filename } = uploadData;
-                    transcriptIdRef.current = transcript_id;
+                    for (let i = 0; i < files.length; i++) {
+                        setBatchIndex(i);
+                        setBatchResults(prev => [...prev.slice(0, i), { filename: files[i].name, status: 'processing' }]);
 
-                    // Stage 2: Transcribe (poll)
-                    setPipelineStage('transcribing');
-                    while (true) {
-                        await new Promise(r => setTimeout(r, 5000));
-                        let statusRes;
-                        try { statusRes = await fetch(`${API_URL}/api/transcription-status/${transcript_id}`); }
-                        catch { throw { stage: 'transcribing', message: 'Server unreachable — it may be restarting. Please retry.' }; }
-                        const statusData = await statusRes.json();
-                        if (statusData.status === 'completed') break;
-                        if (statusData.status === 'error') {
-                            throw { stage: 'transcribing', message: statusData.error || 'Transcription failed' };
-                        }
-                    }
+                        try {
+                            const result = await processOneEpisode(files[i]);
 
-                    // Stage 3: Claude analysis (with frontend-level retry on overload)
-                    setPipelineStage('analyzing');
-                    let editDecisions = [];
-                    let resolvedPreset = preset;
-                    let lastError = '';
-                    const analysisBody = JSON.stringify({
-                        transcript_id,
-                        filename,
-                        preset,
-                        customInstructions
-                    });
-
-                    for (let analysisAttempt = 0; analysisAttempt < 3; analysisAttempt++) {
-                        const processRes = await fetch(`${API_URL}/api/process`, {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: analysisBody
-                        });
-                        const processData = await processRes.json();
-                        if (!processRes.ok) throw { stage: 'analyzing', message: processData.error || 'Analysis failed to start' };
-                        const analysisJobId = processData.job_id;
-                        if (!analysisJobId) throw { stage: 'analyzing', message: 'No job_id returned' };
-
-                        let retryable = false;
-                        while (true) {
-                            await new Promise(r => setTimeout(r, 3000));
-                            let pollRes;
-                            try { pollRes = await fetch(`${API_URL}/api/process-status/${analysisJobId}`); }
-                            catch { throw { stage: 'analyzing', message: 'Server unreachable — it may be restarting. Please retry.' }; }
-                            if (pollRes.status === 404) throw { stage: 'analyzing', message: 'Server restarted during processing. Please retry.' };
-                            const pollData = await pollRes.json();
-                            if (!pollRes.ok) {
-                                console.error(`Analysis poll error (${pollRes.status}):`, pollData);
-                                if (pollData.retryable) { lastError = pollData.error || 'API overloaded'; retryable = true; break; }
-                                throw { stage: 'analyzing', message: pollData.error || 'Analysis failed' };
-                            }
-                            if (pollData.status === 'detecting') setPipelineStage('detecting');
-                            if (pollData.status === 'analyzing') setPipelineStage('analyzing');
-                            if (pollData.success) {
-                                editDecisions = pollData.edit_decisions || [];
-                                if (pollData.detected_preset) {
-                                    resolvedPreset = pollData.detected_preset;
-                                    console.log(`Auto-detected preset: ${resolvedPreset}`, pollData.detection_metrics);
+                            if (result.autoEnhanced) {
+                                setBatchResults(prev => {
+                                    const next = [...prev];
+                                    next[i] = { filename: files[i].name, status: 'completed', downloadBlob: result.blob, transcriptId: result.transcriptId };
+                                    return next;
+                                });
+                            } else {
+                                // Manual enhance path — for batch, this stops the whole batch at this episode
+                                if (isBatch) {
+                                    // Can't do manual enhance mid-batch; mark remaining as skipped
+                                    setBatchResults(prev => {
+                                        const next = [...prev];
+                                        next[i] = { filename: files[i].name, status: 'needs_enhance', transcriptId: result.transcriptId, editJobId: result.editJobId };
+                                        return next;
+                                    });
+                                    setPipelineStage('done');
+                                    setScreen('enhance');
+                                    return;
+                                } else {
+                                    setPipelineStage('done');
+                                    setScreen('enhance');
+                                    return;
                                 }
-                                break;
                             }
-                        }
-                        if (editDecisions.length > 0 || !retryable) break;
-                        if (analysisAttempt < 2) {
-                            console.log(`Claude API error, frontend retry ${analysisAttempt + 1}/3 in 30s: ${lastError}`);
-                            await new Promise(r => setTimeout(r, 30000));
-                        }
-                    }
-                    if (editDecisions.length === 0) throw { stage: 'analyzing', message: lastError || 'No edit decisions were generated. Try again or adjust your recording type.' };
-
-                    // Stage 4: Apply cuts (+ optional intro/outro merge) → auto-enhance or manual enhance
-                    setPipelineStage('cutting');
-                    const cuts = editDecisions.filter(d => d.start_ms != null && d.end_ms != null);
-                    const editFormData = new FormData();
-                    editFormData.append('transcript_id', transcript_id);
-                    editFormData.append('cuts', JSON.stringify(cuts));
-                    editFormData.append('preset', resolvedPreset);
-                    if (introFile) editFormData.append('intro', introFile);
-                    if (outroFile) editFormData.append('outro', outroFile);
-                    const editRes = await fetch(`${API_URL}/api/edit-audio`, {
-                        method: 'POST',
-                        body: editFormData
-                    });
-                    const editData = await editRes.json();
-                    if (!editRes.ok) throw { stage: 'cutting', message: editData.error || 'Edit job failed to start' };
-                    const editJobId = editData.job_id;
-                    editJobIdRef.current = editJobId;
-
-                    let autoEnhanced = false;
-                    while (true) {
-                        await new Promise(r => setTimeout(r, 3000));
-                        let statusRes;
-                        try { statusRes = await fetch(`${API_URL}/api/edit-audio-status/${editJobId}`); }
-                        catch { throw { stage: 'cutting', message: 'Server unreachable — it may be restarting. Please retry.' }; }
-                        if (statusRes.status === 404) throw { stage: 'cutting', message: 'Server restarted during processing. Please retry.' };
-                        const statusData = await statusRes.json();
-                        if (statusData.status === 'cutting')         setPipelineStage('cutting');
-                        if (statusData.status === 'merging')         setPipelineStage('merging');
-                        if (statusData.status === 'enhancing')       setPipelineStage('enhancing');
-                        if (statusData.status === 'finalizing')      setPipelineStage('finalizing');
-                        if (statusData.status === 'cuts_completed')  break;
-                        if (statusData.status === 'completed') {
-                            autoEnhanced = true;
-                            break;
-                        }
-                        if (!statusRes.ok) {
-                            throw { stage: statusData.failed_step || 'cutting', message: statusData.error || 'Audio processing failed' };
+                        } catch (err) {
+                            setBatchResults(prev => {
+                                const next = [...prev];
+                                next[i] = { filename: files[i].name, status: 'error', error: err.message || String(err) };
+                                return next;
+                            });
+                            if (!isBatch) throw err;
+                            // In batch mode, continue to next episode
+                            console.error(`Batch episode ${i + 1} failed:`, err);
                         }
                     }
 
-                    if (autoEnhanced) {
-                        // Auto path: download final MP3 blob directly
-                        const dlRes = await fetch(`${API_URL}/api/edit-audio-download/${editJobId}`);
-                        if (!dlRes.ok) {
-                            const err = await dlRes.json();
-                            throw { stage: 'finalizing', message: err.error || 'Download failed' };
-                        }
-                        downloadBlobRef.current = await dlRes.blob();
-                        setPipelineStage('done');
-                        setScreen('download');
-                    } else {
-                        // Manual path: show enhance screen
-                        setPipelineStage('done');
-                        setScreen('enhance');
-                    }
+                    // All done
+                    setPipelineStage('done');
+                    setScreen('download');
 
                 } catch (err) {
                     console.error('Pipeline error:', err);
@@ -326,20 +428,22 @@
                 }
             };
 
-            const handleDownload = () => {
-                if (!downloadBlobRef.current) return;
-                const url = URL.createObjectURL(downloadBlobRef.current);
+            const handleDownload = (blob, filename) => {
+                const b = blob || downloadBlobRef.current;
+                if (!b) return;
+                const url = URL.createObjectURL(b);
                 const a = document.createElement('a');
                 a.href = url;
-                a.download = 'edited_podcast.mp3';
+                a.download = filename || 'edited_podcast.mp3';
                 a.click();
                 URL.revokeObjectURL(url);
             };
 
-            const handleTranscriptDownload = async () => {
-                if (!transcriptIdRef.current) return;
+            const handleTranscriptDownload = async (tid) => {
+                const id = tid || transcriptIdRef.current;
+                if (!id) return;
                 try {
-                    const res = await fetch(`${API_URL}/api/transcript-download/${transcriptIdRef.current}`);
+                    const res = await fetch(`${API_URL}/api/transcript-download/${id}`);
                     if (!res.ok) throw new Error('Failed to fetch transcript');
                     const blob = await res.blob();
                     const url = URL.createObjectURL(blob);
@@ -353,17 +457,80 @@
                 }
             };
 
+            const handleDownloadAll = () => {
+                batchResults.forEach(r => {
+                    if (r.status === 'completed' && r.downloadBlob) {
+                        const baseName = r.filename.replace(/\.[^.]+$/, '');
+                        handleDownload(r.downloadBlob, `${baseName}_edited.mp3`);
+                    }
+                });
+            };
+
+            const handleGenerateShowNotes = async (tid) => {
+                const id = tid || transcriptIdRef.current;
+                if (!id) return;
+                setShowNotesLoading(true);
+                setShowNotes(null);
+                try {
+                    const res = await fetch(`${API_URL}/api/show-notes`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ transcript_id: id }),
+                    });
+                    const data = await res.json();
+                    if (!res.ok) throw new Error(data.error || 'Failed to start show notes');
+                    const jobId = data.job_id;
+
+                    while (true) {
+                        await new Promise(r => setTimeout(r, 3000));
+                        const pollRes = await fetch(`${API_URL}/api/show-notes-status/${jobId}`);
+                        const pollData = await pollRes.json();
+                        if (pollData.status === 'completed') {
+                            setShowNotes(pollData.show_notes);
+                            break;
+                        }
+                        if (!pollRes.ok) throw new Error(pollData.error || 'Show notes generation failed');
+                    }
+                } catch (e) {
+                    console.error('Show notes error:', e);
+                    setShowNotes(`Error: ${e.message}`);
+                } finally {
+                    setShowNotesLoading(false);
+                }
+            };
+
+            const copyShowNotes = () => {
+                if (showNotes) navigator.clipboard.writeText(showNotes);
+            };
+
+            const downloadShowNotes = () => {
+                if (!showNotes) return;
+                const blob = new Blob([showNotes], { type: 'text/markdown' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = 'show_notes.md';
+                a.click();
+                URL.revokeObjectURL(url);
+            };
+
             const resetToUpload = () => {
                 setScreen('upload');
                 setPipelineStage(null);
                 setPipelineError(null);
-                setFile(null);
+                setFiles([]);
                 setIntroFile(null);
                 setOutroFile(null);
-                setPreset('auto');
-                setCustomInstructions('');
+                if (!selectedProfile) {
+                    setPreset('auto');
+                    setCustomInstructions('');
+                }
                 setEnhanceUploading(false);
                 setFinalizing(false);
+                setBatchIndex(0);
+                setBatchResults([]);
+                setShowNotes(null);
+                setShowNotesLoading(false);
                 downloadBlobRef.current = null;
                 transcriptIdRef.current = null;
                 editJobIdRef.current = null;
@@ -388,26 +555,91 @@
                             <div className="bg-white/10 backdrop-blur-lg rounded-2xl border border-white/20 p-8">
                                 <h2 className="text-xl font-semibold text-white mb-6">Upload Episode</h2>
 
-                                {/* Drop zone */}
-                                <div className="border-2 border-dashed border-purple-400/50 rounded-xl p-8 text-center mb-6 bg-white/5 hover:bg-white/10 transition-all cursor-pointer">
-                                    <input type="file" accept="audio/*" onChange={handleFileUpload} className="hidden" id="file-upload" />
+                                {/* Profile bar */}
+                                <div className="flex items-center gap-2 mb-4 flex-wrap">
+                                    {profiles.length > 0 && (
+                                        <select
+                                            value={selectedProfile || ''}
+                                            onChange={e => {
+                                                const p = profiles.find(p => p.id === e.target.value);
+                                                if (p) selectProfile(p);
+                                                else { setSelectedProfile(null); }
+                                            }}
+                                            className="bg-white/10 border border-white/20 text-white text-sm rounded-lg px-3 py-2 appearance-none cursor-pointer"
+                                        >
+                                            <option value="" className="bg-slate-800">No profile</option>
+                                            {profiles.map(p => (
+                                                <option key={p.id} value={p.id} className="bg-slate-800">{p.name}</option>
+                                            ))}
+                                        </select>
+                                    )}
+                                    <button
+                                        onClick={saveProfile}
+                                        className="text-xs bg-purple-500/20 border border-purple-400/40 text-purple-300 px-3 py-2 rounded-lg hover:bg-purple-500/30 transition-all"
+                                    >
+                                        + Save Profile
+                                    </button>
+                                    {profiles.length > 0 && (
+                                        <button
+                                            onClick={() => setShowProfileManager(!showProfileManager)}
+                                            className="text-xs text-purple-300/60 hover:text-purple-300 px-2 py-2 transition-all"
+                                        >
+                                            Manage
+                                        </button>
+                                    )}
+                                </div>
+
+                                {/* Profile manager */}
+                                {showProfileManager && profiles.length > 0 && (
+                                    <div className="mb-4 bg-white/5 rounded-lg border border-white/10 p-3 space-y-2">
+                                        {profiles.map(p => (
+                                            <div key={p.id} className="flex items-center gap-2 text-sm">
+                                                {editingProfileName === p.id ? (
+                                                    <input
+                                                        autoFocus
+                                                        defaultValue={p.name}
+                                                        onBlur={e => renameProfile(p.id, e.target.value)}
+                                                        onKeyDown={e => { if (e.key === 'Enter') renameProfile(p.id, e.target.value); }}
+                                                        className="flex-1 bg-white/10 border border-white/20 text-white px-2 py-1 rounded text-sm"
+                                                    />
+                                                ) : (
+                                                    <span className="flex-1 text-white truncate">{p.name}</span>
+                                                )}
+                                                <span className="text-purple-300/50 text-xs">{p.preset}</span>
+                                                <button onClick={() => setEditingProfileName(p.id)} className="text-purple-300/60 hover:text-purple-300 text-xs transition-all">Rename</button>
+                                                <button onClick={() => deleteProfile(p.id)} className="text-red-400/60 hover:text-red-400 text-xs transition-all">Delete</button>
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
+
+                                {/* Drop zone (multi-file) */}
+                                <div className="border-2 border-dashed border-purple-400/50 rounded-xl p-8 text-center mb-4 bg-white/5 hover:bg-white/10 transition-all cursor-pointer">
+                                    <input type="file" accept="audio/*" multiple onChange={handleFileUpload} className="hidden" id="file-upload" />
                                     <label htmlFor="file-upload" className="cursor-pointer">
                                         <div className="w-12 h-12 mx-auto mb-3 text-purple-300 flex items-center justify-center">
                                             <FileAudio />
                                         </div>
-                                        {file ? (
-                                            <div className="text-white">
-                                                <p className="font-semibold">{file.name}</p>
-                                                <p className="text-sm text-purple-200">{(file.size / 1024 / 1024).toFixed(2)} MB</p>
-                                            </div>
-                                        ) : (
-                                            <div>
-                                                <p className="text-white font-semibold mb-1">Drop your podcast file here</p>
-                                                <p className="text-purple-200 text-sm">or click to browse</p>
-                                            </div>
-                                        )}
+                                        <div>
+                                            <p className="text-white font-semibold mb-1">Drop your podcast files here</p>
+                                            <p className="text-purple-200 text-sm">or click to browse (multiple files supported)</p>
+                                        </div>
                                     </label>
                                 </div>
+
+                                {/* File list */}
+                                {files.length > 0 && (
+                                    <div className="mb-4 space-y-1">
+                                        {files.map((f, i) => (
+                                            <div key={i} className="flex items-center gap-2 bg-white/5 rounded-lg px-3 py-2 text-sm">
+                                                <span className="text-purple-300/50 w-5 text-right">{i + 1}.</span>
+                                                <span className="text-white flex-1 truncate">{f.name}</span>
+                                                <span className="text-purple-300/50 text-xs">{(f.size / 1024 / 1024).toFixed(1)} MB</span>
+                                                <button onClick={() => removeFile(i)} className="text-red-400/50 hover:text-red-400 text-xs transition-all">x</button>
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
 
                                 {/* Intro / Outro (optional) */}
                                 <div className="grid grid-cols-2 gap-3 mb-6">
@@ -501,11 +733,11 @@
 
                                 <button
                                     onClick={runFullPipeline}
-                                    disabled={!file}
+                                    disabled={files.length === 0}
                                     className="w-full bg-gradient-to-r from-purple-500 to-pink-500 text-white font-semibold py-4 rounded-xl hover:from-purple-600 hover:to-pink-600 transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
                                 >
                                     <Sparkles className="w-5 h-5" />
-                                    Edit Audio
+                                    {files.length > 1 ? `Edit ${files.length} Episodes` : 'Edit Audio'}
                                 </button>
                             </div>
                         )}
@@ -514,6 +746,33 @@
                         {screen === 'progress' && (
                             <div className="bg-white/10 backdrop-blur-lg rounded-2xl border border-white/20 p-8">
                                 <h2 className="text-xl font-semibold text-white mb-6">Editing in progress</h2>
+
+                                {/* Batch progress indicator */}
+                                {files.length > 1 && (
+                                    <div className="mb-4 space-y-2">
+                                        <p className="text-purple-200 text-sm font-medium">
+                                            Episode {batchIndex + 1} of {files.length}: <span className="text-white">{files[batchIndex]?.name}</span>
+                                        </p>
+                                        <div className="space-y-1">
+                                            {files.map((f, i) => {
+                                                const result = batchResults[i];
+                                                const isCurrent = i === batchIndex && (!result || result.status === 'processing');
+                                                let icon, textColor;
+                                                if (result?.status === 'completed') { icon = '\u2713'; textColor = 'text-green-400'; }
+                                                else if (result?.status === 'error') { icon = '\u2717'; textColor = 'text-red-400'; }
+                                                else if (isCurrent) { icon = '\u27F3'; textColor = 'text-white'; }
+                                                else { icon = '\u25CB'; textColor = 'text-white/30'; }
+                                                return (
+                                                    <div key={i} className={`flex items-center gap-2 text-sm ${textColor}`}>
+                                                        <span className="w-4 text-center">{icon}</span>
+                                                        <span className="truncate">{f.name}</span>
+                                                    </div>
+                                                );
+                                            })}
+                                        </div>
+                                        <div className="h-px bg-white/10 my-2" />
+                                    </div>
+                                )}
 
                                 <div className="space-y-2">
                                     {STAGES.map((stage, i) => {
@@ -687,36 +946,129 @@
 
                         {/* Screen 4: Download */}
                         {screen === 'download' && (
-                            <div className="bg-white/10 backdrop-blur-lg rounded-2xl border border-white/20 p-8 text-center">
-                                <div className="w-16 h-16 mx-auto mb-4 text-green-400">
-                                    <CheckCircle className="w-16 h-16" />
-                                </div>
-                                <h2 className="text-2xl font-bold text-white mb-2">Your podcast is ready</h2>
-                                <p className="text-purple-200 mb-8">All editing stages completed successfully.</p>
-
-                                <div className="flex flex-col sm:flex-row items-center justify-center gap-3">
-                                    <button
-                                        onClick={handleDownload}
-                                        className="bg-gradient-to-r from-green-500 to-emerald-500 text-white font-semibold py-4 px-8 rounded-xl hover:from-green-600 hover:to-emerald-600 transition-all flex items-center justify-center gap-2"
-                                    >
-                                        <Download className="w-5 h-5" />
-                                        Download Edited Audio
-                                    </button>
-                                    <button
-                                        onClick={handleTranscriptDownload}
-                                        className="bg-white/10 border border-white/20 text-white font-semibold py-4 px-8 rounded-xl hover:bg-white/20 transition-all flex items-center justify-center gap-2"
-                                    >
-                                        <FileAudio className="w-5 h-5" />
-                                        Download Transcript
-                                    </button>
+                            <div className="bg-white/10 backdrop-blur-lg rounded-2xl border border-white/20 p-8">
+                                <div className="text-center">
+                                    <div className="w-16 h-16 mx-auto mb-4 text-green-400">
+                                        <CheckCircle className="w-16 h-16" />
+                                    </div>
+                                    {batchResults.length > 1 ? (
+                                        <div>
+                                            <h2 className="text-2xl font-bold text-white mb-2">
+                                                Your podcasts are ready ({batchResults.filter(r => r.status === 'completed').length} of {batchResults.length})
+                                            </h2>
+                                            <p className="text-purple-200 mb-6">Batch processing complete.</p>
+                                        </div>
+                                    ) : (
+                                        <div>
+                                            <h2 className="text-2xl font-bold text-white mb-2">Your podcast is ready</h2>
+                                            <p className="text-purple-200 mb-6">All editing stages completed successfully.</p>
+                                        </div>
+                                    )}
                                 </div>
 
-                                <button
-                                    onClick={resetToUpload}
-                                    className="mt-4 text-purple-300 hover:text-white text-sm transition-all"
-                                >
-                                    Edit another episode
-                                </button>
+                                {/* Batch results list */}
+                                {batchResults.length > 1 ? (
+                                    <div className="space-y-2 mb-6">
+                                        {batchResults.map((r, i) => (
+                                            <div key={i} className="flex items-center gap-3 bg-white/5 rounded-lg px-4 py-3 border border-white/10">
+                                                <span className="text-purple-300/50 text-sm w-5 text-right">{i + 1}.</span>
+                                                <span className={`flex-1 truncate text-sm ${r.status === 'completed' ? 'text-white' : r.status === 'error' ? 'text-red-300' : 'text-white/50'}`}>
+                                                    {r.filename}
+                                                </span>
+                                                {r.status === 'error' && <span className="text-red-400/70 text-xs truncate max-w-[120px]">{r.error}</span>}
+                                                {r.status === 'completed' && (
+                                                    <div className="flex items-center gap-2">
+                                                        <button
+                                                            onClick={() => handleDownload(r.downloadBlob, r.filename.replace(/\.[^.]+$/, '') + '_edited.mp3')}
+                                                            className="text-xs bg-green-500/20 text-green-300 px-3 py-1.5 rounded-lg hover:bg-green-500/30 transition-all"
+                                                        >
+                                                            Download
+                                                        </button>
+                                                        <button
+                                                            onClick={() => handleGenerateShowNotes(r.transcriptId)}
+                                                            disabled={showNotesLoading}
+                                                            className="text-xs bg-purple-500/20 text-purple-300 px-3 py-1.5 rounded-lg hover:bg-purple-500/30 transition-all disabled:opacity-50"
+                                                        >
+                                                            Show Notes
+                                                        </button>
+                                                    </div>
+                                                )}
+                                            </div>
+                                        ))}
+                                        <div className="flex justify-center gap-3 mt-4">
+                                            <button
+                                                onClick={handleDownloadAll}
+                                                className="bg-gradient-to-r from-green-500 to-emerald-500 text-white font-semibold py-3 px-6 rounded-xl hover:from-green-600 hover:to-emerald-600 transition-all flex items-center gap-2"
+                                            >
+                                                <Download className="w-4 h-4" />
+                                                Download All
+                                            </button>
+                                        </div>
+                                    </div>
+                                ) : (
+                                    <div className="flex flex-col sm:flex-row items-center justify-center gap-3 mb-6">
+                                        <button
+                                            onClick={() => {
+                                                const r = batchResults[0];
+                                                handleDownload(r?.downloadBlob || downloadBlobRef.current);
+                                            }}
+                                            className="bg-gradient-to-r from-green-500 to-emerald-500 text-white font-semibold py-4 px-8 rounded-xl hover:from-green-600 hover:to-emerald-600 transition-all flex items-center justify-center gap-2"
+                                        >
+                                            <Download className="w-5 h-5" />
+                                            Download Edited Audio
+                                        </button>
+                                        <button
+                                            onClick={() => handleTranscriptDownload(batchResults[0]?.transcriptId)}
+                                            className="bg-white/10 border border-white/20 text-white font-semibold py-4 px-8 rounded-xl hover:bg-white/20 transition-all flex items-center justify-center gap-2"
+                                        >
+                                            <FileAudio className="w-5 h-5" />
+                                            Download Transcript
+                                        </button>
+                                        <button
+                                            onClick={() => handleGenerateShowNotes(batchResults[0]?.transcriptId)}
+                                            disabled={showNotesLoading}
+                                            className="bg-white/10 border border-white/20 text-white font-semibold py-4 px-8 rounded-xl hover:bg-white/20 transition-all flex items-center justify-center gap-2 disabled:opacity-50"
+                                        >
+                                            <Sparkles className="w-5 h-5" />
+                                            {showNotesLoading ? 'Generating...' : 'Generate Show Notes'}
+                                        </button>
+                                    </div>
+                                )}
+
+                                {/* Show notes display */}
+                                {(showNotes || showNotesLoading) && (
+                                    <div className="mb-4">
+                                        {showNotesLoading && !showNotes && (
+                                            <div className="flex items-center gap-2 text-purple-300 text-sm justify-center py-4">
+                                                <svg className="w-4 h-4 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                                    <path d="M21 12a9 9 0 1 1-6.219-8.56" />
+                                                </svg>
+                                                Generating show notes...
+                                            </div>
+                                        )}
+                                        {showNotes && (
+                                            <div>
+                                                <div className="flex items-center justify-between mb-2">
+                                                    <h3 className="text-sm font-semibold text-purple-200 uppercase tracking-wide">Show Notes</h3>
+                                                    <div className="flex gap-2">
+                                                        <button onClick={copyShowNotes} className="text-xs text-purple-300 hover:text-white transition-all">Copy</button>
+                                                        <button onClick={downloadShowNotes} className="text-xs text-purple-300 hover:text-white transition-all">Download</button>
+                                                    </div>
+                                                </div>
+                                                <pre className="bg-black/20 rounded-lg border border-white/10 p-4 text-purple-100 text-sm whitespace-pre-wrap max-h-80 overflow-y-auto">{showNotes}</pre>
+                                            </div>
+                                        )}
+                                    </div>
+                                )}
+
+                                <div className="text-center">
+                                    <button
+                                        onClick={resetToUpload}
+                                        className="text-purple-300 hover:text-white text-sm transition-all"
+                                    >
+                                        {batchResults.length > 1 ? 'Edit another batch' : 'Edit another episode'}
+                                    </button>
+                                </div>
                             </div>
                         )}
                     </div>

@@ -72,6 +72,7 @@
         const STAGES = [
             { key: 'uploading',    label: 'Uploading audio' },
             { key: 'transcribing', label: 'Transcribing with AssemblyAI' },
+            { key: 'detecting',    label: 'Detecting preset...' },
             { key: 'analyzing',    label: 'Analysing with Claude AI' },
             { key: 'cutting',      label: 'Applying edits' },
             { key: 'enhancing',    label: 'Enhancing with Adobe Enhance Speech' },
@@ -89,7 +90,6 @@
             const [enhanceUploading, setEnhanceUploading] = useState(false);
             const [finalizing, setFinalizing] = useState(false);
             const downloadBlobRef = useRef(null);
-            const downloadExtRef = useRef('mp3');
             const transcriptIdRef = useRef(null);
             const editJobIdRef = useRef(null);
 
@@ -169,6 +169,8 @@
                                 if (pollData.retryable) { lastError = pollData.error || 'API overloaded'; retryable = true; break; }
                                 throw { stage: 'analyzing', message: pollData.error || 'Analysis failed' };
                             }
+                            if (pollData.status === 'detecting') setPipelineStage('detecting');
+                            if (pollData.status === 'analyzing') setPipelineStage('analyzing');
                             if (pollData.success) {
                                 editDecisions = pollData.edit_decisions || [];
                                 if (pollData.detected_preset) {
@@ -201,7 +203,7 @@
 
                     let autoEnhanced = false;
                     while (true) {
-                        await new Promise(r => setTimeout(r, 4000));
+                        await new Promise(r => setTimeout(r, 3000));
                         let statusRes;
                         try { statusRes = await fetch(`${API_URL}/api/edit-audio-status/${editJobId}`); }
                         catch { throw { stage: 'cutting', message: 'Server unreachable — it may be restarting. Please retry.' }; }
@@ -228,7 +230,6 @@
                             throw { stage: 'finalizing', message: err.error || 'Download failed' };
                         }
                         downloadBlobRef.current = await dlRes.blob();
-                        downloadExtRef.current = 'mp3';
                         setPipelineStage('done');
                         setScreen('download');
                     } else {
@@ -300,7 +301,6 @@
                         throw new Error(err.error || 'Download failed');
                     }
                     downloadBlobRef.current = await dlRes.blob();
-                    downloadExtRef.current = 'mp3';
 
                     setEnhanceUploading(false);
                     setFinalizing(false);
@@ -322,7 +322,7 @@
                 const url = URL.createObjectURL(downloadBlobRef.current);
                 const a = document.createElement('a');
                 a.href = url;
-                a.download = `edited_podcast.${downloadExtRef.current}`;
+                a.download = 'edited_podcast.mp3';
                 a.click();
                 URL.revokeObjectURL(url);
             };

@@ -6,7 +6,7 @@ Handles file uploads, transcription, Claude analysis, and audio editing.
 from flask import Flask, request, jsonify, send_file, Response
 from flask_cors import CORS
 import os
-import json
+import subprocess
 import time
 import threading
 import uuid
@@ -166,7 +166,6 @@ def _analyze_audio(audio_path, transcript_data):
     Returns (preset_name, metrics_dict).
     Uses ffmpeg to extract a short sample to avoid OOM on large files.
     """
-    import subprocess
     from pydub import AudioSegment
 
     # Extract first 5 min as mono 16kHz WAV (~9MB) instead of loading full file (~600MB)
@@ -481,8 +480,6 @@ def apply_audio_edits(audio_path, cuts_ms, words=None):
     cuts_ms: list of (start_ms, end_ms) tuples to remove.
     words: optional word dicts for snapping cuts to word boundaries.
     """
-    import subprocess
-
     # Get audio duration with ffprobe
     probe = subprocess.run(
         ['ffprobe', '-v', 'error', '-show_entries', 'format=duration',
@@ -742,6 +739,7 @@ def _run_edit_job(job_id, audio_path, cuts_ms, transcript_id=None):
     - ADOBE_ENHANCE_TOKEN set: cuts → Adobe enhance → finalize → completed
     - Token not set: cuts → cuts_completed (user enhances manually, re-uploads)
     """
+    current_step = 'cutting'
     try:
         # Fetch word timestamps for smart cut snapping
         words = None
@@ -766,11 +764,13 @@ def _run_edit_job(job_id, audio_path, cuts_ms, transcript_id=None):
             return
 
         # Auto-enhance with Adobe Enhance Speech
+        current_step = 'enhancing'
         with _edit_jobs_lock:
             _edit_jobs[job_id]['status'] = 'enhancing'
         enhanced_path = process_with_adobe_enhance(wav_path)
 
         # Finalize: stereo + peak-normalize + MP3
+        current_step = 'finalizing'
         with _edit_jobs_lock:
             _edit_jobs[job_id]['status'] = 'finalizing'
         _finalize_audio(job_id, enhanced_path)
@@ -782,14 +782,12 @@ def _run_edit_job(job_id, audio_path, cuts_ms, transcript_id=None):
             _edit_jobs[job_id] = {
                 'status': 'error',
                 'error': str(e),
-                'failed_step': 'enhancing' if _edit_jobs.get(job_id, {}).get('status') == 'enhancing' else 'cutting',
+                'failed_step': current_step,
             }
 
 
 def _finalize_audio(job_id, enhanced_path):
     """Shared finalization: convert Adobe output to MP3 without altering levels."""
-    import subprocess
-
     mp3_path = enhanced_path.rsplit('.', 1)[0] + '_final.mp3'
 
     # Minimal processing — Adobe Enhance output is already well-mastered.
@@ -898,7 +896,7 @@ def index():
     return jsonify({
         "status": "online",
         "service": "AI Podcast Editor API",
-        "version": "6.0.0",
+        "version": "7.0.0",
     })
 
 

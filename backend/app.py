@@ -164,10 +164,25 @@ def _analyze_audio(audio_path, transcript_data):
     """
     Analyze audio + transcript metadata to auto-detect the best preset.
     Returns (preset_name, metrics_dict).
+    Uses ffmpeg to extract a short sample to avoid OOM on large files.
     """
+    import subprocess
     from pydub import AudioSegment
 
-    audio = AudioSegment.from_file(audio_path)
+    # Extract first 5 min as mono 16kHz WAV (~9MB) instead of loading full file (~600MB)
+    MAX_ANALYSIS_S = 300
+    MAX_ANALYSIS_MS = MAX_ANALYSIS_S * 1000
+    sample_path = audio_path + '_analysis_sample.wav'
+    try:
+        subprocess.run(
+            ['ffmpeg', '-y', '-i', audio_path, '-t', str(MAX_ANALYSIS_S),
+             '-ac', '1', '-ar', '16000', '-f', 'wav', sample_path],
+            capture_output=True, check=True, timeout=60,
+        )
+        audio = AudioSegment.from_file(sample_path)
+    finally:
+        if os.path.exists(sample_path):
+            os.remove(sample_path)
 
     # Speaker count from utterances
     utterances = transcript_data.get('utterances', [])
@@ -181,7 +196,7 @@ def _analyze_audio(audio_path, transcript_data):
         gap_start = words[i].get('end', 0)
         gap_end = words[i + 1].get('start', 0)
         gap_ms = gap_end - gap_start
-        if gap_ms >= 200:  # only measure gaps >= 200ms
+        if gap_ms >= 200 and gap_end <= MAX_ANALYSIS_MS:
             segment = audio[gap_start:gap_end]
             if len(segment) > 0:
                 gap_dbfs_values.append(segment.dBFS)
@@ -1234,22 +1249,6 @@ def set_adobe_token_route():
     set_adobe_token(token)
     print(f"Adobe token updated via API ({len(token)} chars)")
     return jsonify({"success": True})
-
-
-@app.route('/api/debug/test-job', methods=['POST'])
-def debug_test_job():
-    """Diagnostic: create a lightweight job to test in-memory store survives."""
-    job_id = str(uuid.uuid4())
-    with _jobs_lock:
-        _jobs[job_id] = {'status': 'pending'}
-
-    def _dummy(jid):
-        time.sleep(5)
-        with _jobs_lock:
-            _jobs[jid] = {'status': 'completed', 'result': {'success': True, 'test': True}}
-
-    threading.Thread(target=_dummy, args=(job_id,), daemon=True).start()
-    return jsonify({"job_id": job_id})
 
 
 if __name__ == '__main__':

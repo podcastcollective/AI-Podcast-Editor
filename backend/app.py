@@ -604,6 +604,58 @@ def apply_audio_edits(audio_path, cuts_ms, words=None):
 
 
 # ============================================================================
+# INTRO/OUTRO MERGE — ffmpeg crossfade concatenation
+# ============================================================================
+
+def _concat_with_crossfade(episode_path, intro_path=None, outro_path=None, crossfade_s=2.0):
+    """
+    Concatenate intro + episode + outro with crossfades using ffmpeg acrossfade.
+    Returns path to merged WAV. Skips segments that are None.
+    """
+    segments = []
+    if intro_path:
+        segments.append(intro_path)
+    segments.append(episode_path)
+    if outro_path:
+        segments.append(outro_path)
+
+    if len(segments) == 1:
+        return episode_path  # nothing to merge
+
+    print(f"Merging {len(segments)} segments with {crossfade_s}s crossfade")
+
+    # Build ffmpeg filter chain: sequential acrossfade between adjacent segments
+    inputs = []
+    for seg in segments:
+        inputs.extend(['-i', seg])
+
+    if len(segments) == 2:
+        # Simple case: one crossfade between two inputs
+        filter_str = f'[0:a][1:a]acrossfade=d={crossfade_s}:c1=tri:c2=tri[out]'
+    else:
+        # Three segments: intro→episode crossfade, then result→outro crossfade
+        filter_str = (
+            f'[0:a][1:a]acrossfade=d={crossfade_s}:c1=tri:c2=tri[mid];'
+            f'[mid][2:a]acrossfade=d={crossfade_s}:c1=tri:c2=tri[out]'
+        )
+
+    merged_path = episode_path.rsplit('.', 1)[0] + '_merged.wav'
+    result = subprocess.run(
+        ['ffmpeg', '-y'] + inputs + [
+            '-filter_complex', filter_str,
+            '-map', '[out]', '-f', 'wav', merged_path,
+        ],
+        capture_output=True, text=True, timeout=600,
+    )
+    if result.returncode != 0:
+        raise Exception(f"ffmpeg merge failed: {result.stderr[-500:]}")
+
+    size_kb = os.path.getsize(merged_path) // 1024
+    print(f"Merged: {merged_path} ({size_kb}KB)")
+    return merged_path
+
+
+# ============================================================================
 # ADOBE ENHANCE SPEECH — reverse-engineered API
 # ============================================================================
 
@@ -792,11 +844,13 @@ def process_with_adobe_enhance(audio_path):
 # EDIT PIPELINE — two-phase background jobs
 # ============================================================================
 
-def _run_edit_job(job_id, audio_path, cuts_ms, transcript_id=None):
+def _run_edit_job(job_id, audio_path, cuts_ms, transcript_id=None,
+                  intro_path=None, outro_path=None):
     """
-    Background thread: apply cuts, then either auto-enhance or stop for manual enhance.
-    - ADOBE_ENHANCE_TOKEN set: cuts → Adobe enhance → finalize → completed
-    - Token not set: cuts → cuts_completed (user enhances manually, re-uploads)
+    Background thread: apply cuts, optionally merge intro/outro, then either
+    auto-enhance or stop for manual enhance.
+    Pipeline: cuts → merge (if intro/outro) → Adobe enhance → finalize → completed
+    Without token: cuts → merge → cuts_completed (user enhances manually)
     """
     current_step = 'cutting'
     try:
@@ -813,6 +867,13 @@ def _run_edit_job(job_id, audio_path, cuts_ms, transcript_id=None):
         with _edit_jobs_lock:
             _edit_jobs[job_id]['status'] = 'cutting'
         wav_path = apply_audio_edits(audio_path, cuts_ms, words=words)
+
+        # Merge intro/outro if provided
+        if intro_path or outro_path:
+            current_step = 'merging'
+            with _edit_jobs_lock:
+                _edit_jobs[job_id]['status'] = 'merging'
+            wav_path = _concat_with_crossfade(wav_path, intro_path=intro_path, outro_path=outro_path)
 
         # If no Adobe token, stop here for manual enhancement
         if not get_adobe_token():
@@ -1142,14 +1203,21 @@ def process_status(job_id):
 
 @app.route('/api/edit-audio', methods=['POST', 'OPTIONS'])
 def edit_audio():
-    """Step 3: Start async audio editing job (cuts only)."""
+    """Step 3: Start async audio editing job (cuts, optional intro/outro merge)."""
     if request.method == 'OPTIONS':
         return '', 204
 
     try:
-        data = request.json
-        transcript_id = data.get('transcript_id')
-        cuts = data.get('cuts', [])
+        # Accept both JSON and multipart form data for backwards compatibility
+        import json as _json
+        if request.content_type and 'multipart' in request.content_type:
+            transcript_id = request.form.get('transcript_id')
+            cuts_raw = request.form.get('cuts', '[]')
+            cuts = _json.loads(cuts_raw)
+        else:
+            data = request.json
+            transcript_id = data.get('transcript_id')
+            cuts = data.get('cuts', [])
 
         if not transcript_id:
             return jsonify({"error": "No transcript_id provided"}), 400
@@ -1168,15 +1236,35 @@ def edit_audio():
             for c in cuts
             if 'start_ms' in c and 'end_ms' in c
         ]
-        print(f"Edit job: {len(cuts_ms)} cuts")
 
         job_id = str(uuid.uuid4())
+
+        # Save optional intro/outro files
+        intro_path = None
+        outro_path = None
+        if request.files:
+            if 'intro' in request.files and request.files['intro'].filename:
+                intro_file = request.files['intro']
+                intro_ext = intro_file.filename.rsplit('.', 1)[1].lower() if '.' in intro_file.filename else 'wav'
+                intro_path = f"/tmp/{job_id}_intro.{intro_ext}"
+                intro_file.save(intro_path)
+                print(f"Intro saved: {intro_path} ({os.path.getsize(intro_path) // 1024}KB)")
+            if 'outro' in request.files and request.files['outro'].filename:
+                outro_file = request.files['outro']
+                outro_ext = outro_file.filename.rsplit('.', 1)[1].lower() if '.' in outro_file.filename else 'wav'
+                outro_path = f"/tmp/{job_id}_outro.{outro_ext}"
+                outro_file.save(outro_path)
+                print(f"Outro saved: {outro_path} ({os.path.getsize(outro_path) // 1024}KB)")
+
+        print(f"Edit job: {len(cuts_ms)} cuts, intro={'yes' if intro_path else 'no'}, outro={'yes' if outro_path else 'no'}")
+
         with _edit_jobs_lock:
             _edit_jobs[job_id] = {'status': 'pending'}
 
         threading.Thread(
             target=_run_edit_job,
             args=(job_id, audio_path, cuts_ms, transcript_id),
+            kwargs={'intro_path': intro_path, 'outro_path': outro_path},
             daemon=True,
         ).start()
 
@@ -1203,7 +1291,7 @@ def edit_audio_status(job_id):
         return jsonify({"status": "cuts_completed"})
     if job['status'] == 'error':
         return jsonify({"error": job['error'], "failed_step": job.get('failed_step')}), 500
-    # enhancing, finalizing, cutting, pending
+    # merging, enhancing, finalizing, cutting, pending
     return jsonify({"status": job['status']})
 
 

@@ -157,6 +157,11 @@
                 setFiles(prev => prev.filter((_, i) => i !== index));
             };
 
+            const safeJson = async (res) => {
+                try { return await res.json(); }
+                catch { return null; }
+            };
+
             const processOneEpisode = async (file) => {
                 setPipelineError(null);
                 setPipelineStage('uploading');
@@ -166,10 +171,11 @@
                 formData.append('file', file);
                 const uploadRes = await fetch(`${API_URL}/api/upload`, { method: 'POST', body: formData });
                 if (!uploadRes.ok) {
-                    const err = await uploadRes.json();
-                    throw { stage: 'uploading', message: err.error || 'Upload failed' };
+                    const err = await safeJson(uploadRes);
+                    throw { stage: 'uploading', message: err?.error || `Upload failed (${uploadRes.status})` };
                 }
-                const uploadData = await uploadRes.json();
+                const uploadData = await safeJson(uploadRes);
+                if (!uploadData?.transcript_id) throw { stage: 'uploading', message: 'Invalid server response — please retry' };
                 const { transcript_id, filename } = uploadData;
                 transcriptIdRef.current = transcript_id;
 
@@ -205,8 +211,8 @@
                         headers: { 'Content-Type': 'application/json' },
                         body: analysisBody
                     });
-                    const processData = await processRes.json();
-                    if (!processRes.ok) throw { stage: 'analyzing', message: processData.error || 'Analysis failed to start' };
+                    const processData = await safeJson(processRes);
+                    if (!processRes.ok) throw { stage: 'analyzing', message: processData?.error || `Analysis failed (${processRes.status})` };
                     const analysisJobId = processData.job_id;
                     if (!analysisJobId) throw { stage: 'analyzing', message: 'No job_id returned' };
 
@@ -255,8 +261,8 @@
                     method: 'POST',
                     body: editFormData
                 });
-                const editData = await editRes.json();
-                if (!editRes.ok) throw { stage: 'cutting', message: editData.error || 'Edit job failed to start' };
+                const editData = await safeJson(editRes);
+                if (!editRes.ok) throw { stage: 'cutting', message: editData?.error || `Edit job failed (${editRes.status})` };
                 const editJobId = editData.job_id;
                 editJobIdRef.current = editJobId;
 
@@ -285,8 +291,8 @@
                 if (autoEnhanced) {
                     const dlRes = await fetch(`${API_URL}/api/edit-audio-download/${editJobId}`);
                     if (!dlRes.ok) {
-                        const err = await dlRes.json();
-                        throw { stage: 'finalizing', message: err.error || 'Download failed' };
+                        const err = await safeJson(dlRes);
+                        throw { stage: 'finalizing', message: err?.error || 'Download failed' };
                     }
                     return { blob: await dlRes.blob(), transcriptId: transcript_id, autoEnhanced: true };
                 } else {

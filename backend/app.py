@@ -621,15 +621,22 @@ def _detect_speech_onset(audio_path):
          'silencedetect=noise=-35dB:d=0.3', '-f', 'null', '-'],
         capture_output=True, text=True, timeout=120,
     )
-    # Parse stderr for first silence_end (= where speech begins)
+    # Parse stderr for silence events in order.
+    # If audio starts with silence: first event is silence_end (onset = that value).
+    # If audio starts with speech: first event is silence_start (onset = 0).
     for line in result.stderr.split('\n'):
-        m = re.search(r'silence_end:\s*([\d.]+)', line)
-        if m:
-            onset_s = float(m.group(1))
+        m_start = re.search(r'silence_start:\s*([\d.]+)', line)
+        if m_start:
+            # First event is silence_start — audio starts with speech
+            print(f"Speech onset in {os.path.basename(audio_path)}: 0ms (starts with speech)")
+            return 0
+        m_end = re.search(r'silence_end:\s*([\d.]+)', line)
+        if m_end:
+            onset_s = float(m_end.group(1))
             print(f"Speech onset in {os.path.basename(audio_path)}: {onset_s:.3f}s")
             return int(onset_s * 1000)
-    # No silence detected at start — speech begins immediately
-    print(f"Speech onset in {os.path.basename(audio_path)}: 0ms (no leading silence)")
+    # No silence detected at all — speech throughout
+    print(f"Speech onset in {os.path.basename(audio_path)}: 0ms (no silence detected)")
     return 0
 
 

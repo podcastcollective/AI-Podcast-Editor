@@ -514,11 +514,23 @@
 
             const downloadShowNotes = () => {
                 if (!showNotes) return;
-                const blob = new Blob([showNotes], { type: 'text/markdown' });
+                // Convert markdown to HTML for Google Docs compatibility
+                const html = showNotes
+                    .replace(/^## (.+)$/gm, '<h2>$1</h2>')
+                    .replace(/^### (.+)$/gm, '<h3>$1</h3>')
+                    .replace(/^# (.+)$/gm, '<h1>$1</h1>')
+                    .replace(/^\- \[(\d{2}:\d{2}:\d{2})\] (.+)$/gm, '<li><b>[$1]</b> $2</li>')
+                    .replace(/^\- (.+)$/gm, '<li>$1</li>')
+                    .replace(/(<li>.*<\/li>\n?)+/g, '<ul>$&</ul>')
+                    .replace(/\*\*(.+?)\*\*/g, '<b>$1</b>')
+                    .replace(/\n{2,}/g, '<br><br>')
+                    .replace(/\n/g, '<br>');
+                const doc = `<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w="urn:schemas-microsoft-com:office:word" xmlns="http://www.w3.org/TR/REC-html40"><head><meta charset="utf-8"><style>body{font-family:Arial,sans-serif;font-size:11pt;line-height:1.5}h1{font-size:18pt}h2{font-size:14pt;margin-top:16pt}h3{font-size:12pt}ul{margin:4pt 0}li{margin:2pt 0}</style></head><body>${html}</body></html>`;
+                const blob = new Blob([doc], { type: 'application/msword' });
                 const url = URL.createObjectURL(blob);
                 const a = document.createElement('a');
                 a.href = url;
-                a.download = 'show_notes.md';
+                a.download = 'show_notes.doc';
                 a.click();
                 URL.revokeObjectURL(url);
             };

@@ -685,7 +685,7 @@ def _adobe_headers():
     }
 
 
-def process_with_adobe_enhance(audio_path):
+def process_with_adobe_enhance(audio_path, enhance_mix=None):
     """Upload audio to Adobe Enhance Speech API and download enhanced result."""
     headers = _adobe_headers()
 
@@ -776,20 +776,29 @@ def process_with_adobe_enhance(audio_path):
         raise Exception('Adobe Enhance Speech timed out after 15 minutes')
     print(f"Adobe Enhance: v2 processing complete")
 
-    # Step 5: Create export with 90/10/10 stem mix
-    # Gains: enhanced_speech 0.9 + isolated_speech 0.1 = 1.0 (full speech)
-    # background and music at ~10% UI slider (logarithmic gain value)
-    BG_MUSIC_GAIN = 0.03483373150360116  # 10% on Adobe UI slider
+    # Step 5: Create export with stem mix (configurable via enhance_mix)
+    # enhanced_speech + isolated_speech = 1.0 (enhanced vs original speech balance)
+    # background and music are gain multipliers (0.0 - 1.0)
+    mix = enhance_mix or {}
+    speech_pct = mix.get('speech', 90)
+    bg_pct = mix.get('background', 10)
+    music_pct = mix.get('music', 10)
+    enhanced_speech_gain = speech_pct / 100.0
+    isolated_speech_gain = 1.0 - enhanced_speech_gain
+    background_gain = bg_pct / 100.0
+    music_gain = music_pct / 100.0
+    mix_label = f"{speech_pct}/{bg_pct}/{music_pct}"
+    print(f"Adobe Enhance: using {mix_label} mix (speech={enhanced_speech_gain}, bg={background_gain}, music={music_gain})")
     timestamp_ms = str(int(time.time() * 1000))
     resp = requests.post(
         f'{ADOBE_API_BASE}/api/v1/enhance_speech_tracks/{track_id}/exports',
         headers={**headers, 'content-type': 'application/json'},
         params={'time': timestamp_ms},
         json={
-            'enhanced_speech_gain': 0.9,
-            'isolated_speech_gain': 0.1,
-            'background_gain': BG_MUSIC_GAIN,
-            'music_gain': BG_MUSIC_GAIN,
+            'enhanced_speech_gain': enhanced_speech_gain,
+            'isolated_speech_gain': isolated_speech_gain,
+            'background_gain': background_gain,
+            'music_gain': music_gain,
             'enhancement_enabled': True,
             'track_component': 'full',
         },
@@ -800,7 +809,7 @@ def process_with_adobe_enhance(audio_path):
     export_id = export_data.get('id')
     if not export_id:
         raise Exception(f'Adobe export response missing id: {export_data}')
-    print(f"Adobe Enhance: export created with 90/10/10 mix, export_id={export_id}")
+    print(f"Adobe Enhance: export created with {mix_label} mix, export_id={export_id}")
 
     # Step 6: Poll export for download URL (max 180 attempts x 5s = 15 min)
     download_url = None
@@ -848,7 +857,7 @@ def process_with_adobe_enhance(audio_path):
 # ============================================================================
 
 def _run_edit_job(job_id, audio_path, cuts_ms, transcript_id=None,
-                  intro_path=None, outro_path=None):
+                  intro_path=None, outro_path=None, enhance_mix=None):
     """
     Background thread: apply cuts, optionally merge intro/outro, then either
     auto-enhance or stop for manual enhance.
@@ -890,7 +899,7 @@ def _run_edit_job(job_id, audio_path, cuts_ms, transcript_id=None,
         current_step = 'enhancing'
         with _edit_jobs_lock:
             _edit_jobs[job_id]['status'] = 'enhancing'
-        enhanced_path = process_with_adobe_enhance(wav_path)
+        enhanced_path = process_with_adobe_enhance(wav_path, enhance_mix=enhance_mix)
 
         # Finalize: stereo + peak-normalize + MP3
         current_step = 'finalizing'
@@ -1395,7 +1404,19 @@ def edit_audio():
                 outro_file.save(outro_path)
                 print(f"Outro saved: {outro_path} ({os.path.getsize(outro_path) // 1024}KB)")
 
-        print(f"Edit job: {len(cuts_ms)} cuts, intro={'yes' if intro_path else 'no'}, outro={'yes' if outro_path else 'no'}")
+        # Parse optional Adobe enhance mix ratios
+        enhance_mix = None
+        if request.content_type and 'multipart' in request.content_type:
+            enhance_mix_raw = request.form.get('enhance_mix')
+        else:
+            enhance_mix_raw = data.get('enhance_mix')
+        if enhance_mix_raw:
+            try:
+                enhance_mix = _json.loads(enhance_mix_raw) if isinstance(enhance_mix_raw, str) else enhance_mix_raw
+            except Exception:
+                pass
+
+        print(f"Edit job: {len(cuts_ms)} cuts, intro={'yes' if intro_path else 'no'}, outro={'yes' if outro_path else 'no'}, mix={enhance_mix}")
 
         with _edit_jobs_lock:
             _edit_jobs[job_id] = {'status': 'pending'}
@@ -1403,7 +1424,7 @@ def edit_audio():
         threading.Thread(
             target=_run_edit_job,
             args=(job_id, audio_path, cuts_ms, transcript_id),
-            kwargs={'intro_path': intro_path, 'outro_path': outro_path},
+            kwargs={'intro_path': intro_path, 'outro_path': outro_path, 'enhance_mix': enhance_mix},
             daemon=True,
         ).start()
 

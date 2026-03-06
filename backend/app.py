@@ -12,6 +12,7 @@ import threading
 import uuid
 from datetime import datetime
 from werkzeug.utils import secure_filename
+import re
 import hashlib
 import base64
 import urllib.parse
@@ -607,6 +608,96 @@ def apply_audio_edits(audio_path, cuts_ms, words=None):
 
 
 # ============================================================================
+# MULTI-TRACK — align and combine separate speaker tracks
+# ============================================================================
+
+def _detect_speech_onset(audio_path):
+    """
+    Detect where speech begins in an audio track using ffmpeg silencedetect.
+    Returns onset in milliseconds. Returns 0 if speech starts immediately.
+    """
+    result = subprocess.run(
+        ['ffmpeg', '-i', audio_path, '-af',
+         'silencedetect=noise=-35dB:d=0.3', '-f', 'null', '-'],
+        capture_output=True, text=True, timeout=120,
+    )
+    # Parse stderr for first silence_end (= where speech begins)
+    for line in result.stderr.split('\n'):
+        m = re.search(r'silence_end:\s*([\d.]+)', line)
+        if m:
+            onset_s = float(m.group(1))
+            print(f"Speech onset in {os.path.basename(audio_path)}: {onset_s:.3f}s")
+            return int(onset_s * 1000)
+    # No silence detected at start — speech begins immediately
+    print(f"Speech onset in {os.path.basename(audio_path)}: 0ms (no leading silence)")
+    return 0
+
+
+def _combine_tracks(track_paths, labels=None):
+    """
+    Align multiple audio tracks by speech onset and mix into a single WAV.
+    Returns (combined_path, alignment_info).
+    """
+    n = len(track_paths)
+    if n < 2:
+        raise ValueError("Need at least 2 tracks to combine")
+
+    # Detect speech onset in each track
+    onsets = [_detect_speech_onset(p) for p in track_paths]
+    min_onset = min(onsets)
+    delays = [onset - min_onset for onset in onsets]
+
+    alignment_info = []
+    for i, (path, onset, delay) in enumerate(zip(track_paths, onsets, delays)):
+        label = (labels[i] if labels and i < len(labels) else None) or f"Track {i + 1}"
+        alignment_info.append({
+            'track': i,
+            'label': label,
+            'onset_ms': onset,
+            'delay_ms': delay,
+        })
+        print(f"Track {i} ({label}): onset={onset}ms, delay={delay}ms")
+
+    # Build ffmpeg filter_complex
+    filter_parts = []
+    for i in range(n):
+        # Normalize format: mono 48kHz
+        chain = f'[{i}:a]aformat=sample_rates=48000:channel_layouts=mono'
+        if delays[i] > 0:
+            d = delays[i]
+            chain += f',adelay={d}|{d}'
+        chain += f'[t{i}]'
+        filter_parts.append(chain)
+
+    mix_inputs = ''.join(f'[t{i}]' for i in range(n))
+    filter_parts.append(
+        f'{mix_inputs}amix=inputs={n}:duration=longest:dropout_transition=0:normalize=0[out]'
+    )
+    filter_str = ';'.join(filter_parts)
+
+    combine_id = str(uuid.uuid4())[:8]
+    combined_path = f'/tmp/combined_{combine_id}.wav'
+
+    inputs = []
+    for p in track_paths:
+        inputs.extend(['-i', p])
+
+    result = subprocess.run(
+        ['ffmpeg', '-y'] + inputs + [
+            '-filter_complex', filter_str,
+            '-map', '[out]', '-f', 'wav', combined_path,
+        ],
+        capture_output=True, text=True, timeout=600,
+    )
+    if result.returncode != 0:
+        raise Exception(f"ffmpeg combine failed: {result.stderr[-500:]}")
+
+    size_kb = os.path.getsize(combined_path) // 1024
+    print(f"Combined {n} tracks: {combined_path} ({size_kb}KB)")
+    return combined_path, alignment_info
+
+
+# ============================================================================
 # INTRO/OUTRO MERGE — ffmpeg crossfade concatenation
 # ============================================================================
 
@@ -1164,6 +1255,80 @@ def upload_file():
     except Exception as e:
         import traceback
         traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/upload-multitrack', methods=['POST', 'OPTIONS'])
+def upload_multitrack():
+    """Upload multiple tracks, align by speech onset, combine, and start transcription."""
+    if request.method == 'OPTIONS':
+        return '', 204
+
+    if not ASSEMBLYAI_API_KEY:
+        return jsonify({"error": "ASSEMBLYAI_API_KEY not configured"}), 500
+
+    # Collect track files and labels from form data
+    track_paths = []
+    labels = []
+    i = 0
+    while f'track_{i}' in request.files:
+        f = request.files[f'track_{i}']
+        if f.filename == '':
+            i += 1
+            continue
+        if not allowed_file(f.filename):
+            # Clean up already-saved tracks
+            for p in track_paths:
+                if os.path.exists(p):
+                    os.remove(p)
+            return jsonify({"error": f"File type not allowed for {f.filename}. Use MP3, WAV, M4A, AAC, or OGG"}), 400
+        ext = f.filename.rsplit('.', 1)[1].lower() if '.' in f.filename else 'wav'
+        combine_id = str(uuid.uuid4())[:8]
+        path = f'/tmp/{combine_id}_track{i}.{ext}'
+        f.save(path)
+        track_paths.append(path)
+        labels.append(request.form.get(f'label_{i}', f'Track {i + 1}'))
+        i += 1
+
+    if len(track_paths) < 2:
+        for p in track_paths:
+            if os.path.exists(p):
+                os.remove(p)
+        return jsonify({"error": "At least 2 tracks are required"}), 400
+
+    try:
+        print(f"Multi-track upload: {len(track_paths)} tracks")
+        combined_path, alignment_info = _combine_tracks(track_paths, labels)
+
+        # Upload combined audio to AssemblyAI
+        with open(combined_path, 'rb') as f:
+            combined_data = f.read()
+        upload_url = stream_bytes_to_assemblyai(combined_data)
+        transcript_id = start_transcription(upload_url)
+
+        # Save combined file with transcript_id (matches existing pattern)
+        final_path = f'/tmp/{transcript_id}.wav'
+        os.rename(combined_path, final_path)
+
+        # Clean up individual track files
+        for p in track_paths:
+            if os.path.exists(p):
+                os.remove(p)
+
+        return jsonify({
+            "success": True,
+            "transcript_id": transcript_id,
+            "track_count": len(track_paths),
+            "alignment": alignment_info,
+        })
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        # Clean up on error
+        for p in track_paths:
+            if os.path.exists(p):
+                os.remove(p)
         return jsonify({"error": str(e)}), 500
 
 

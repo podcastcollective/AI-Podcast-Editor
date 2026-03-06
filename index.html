@@ -71,6 +71,7 @@
 
         const STAGES = [
             { key: 'uploading',    label: 'Uploading audio' },
+            { key: 'combining',    label: 'Aligning & mixing tracks' },
             { key: 'transcribing', label: 'Transcribing with AssemblyAI' },
             { key: 'detecting',    label: 'Detecting preset...' },
             { key: 'analyzing',    label: 'Analysing with Claude AI' },
@@ -83,6 +84,8 @@
 
         function PodcastEditor() {
             const [screen, setScreen] = useState('upload');
+            const [uploadMode, setUploadMode] = useState('single'); // 'single' | 'multi'
+            const [tracks, setTracks] = useState([]); // [{file, label}]
             const [files, setFiles] = useState([]);
             const [introFile, setIntroFile] = useState(null);
             const [outroFile, setOutroFile] = useState(null);
@@ -160,26 +163,70 @@
                 setFiles(prev => prev.filter((_, i) => i !== index));
             };
 
+            const addTrack = (e) => {
+                const file = e.target.files[0];
+                if (!file || !file.type.includes('audio')) return;
+                const defaultLabels = ['Host', 'Guest 1', 'Guest 2', 'Guest 3'];
+                const label = defaultLabels[tracks.length] || `Track ${tracks.length + 1}`;
+                setTracks(prev => [...prev, { file, label }]);
+                e.target.value = '';
+            };
+
+            const removeTrack = (index) => {
+                setTracks(prev => prev.filter((_, i) => i !== index));
+            };
+
+            const updateTrackLabel = (index, label) => {
+                setTracks(prev => prev.map((t, i) => i === index ? { ...t, label } : t));
+            };
+
+            const uploadMultiTrack = async () => {
+                setPipelineStage('combining');
+                const formData = new FormData();
+                tracks.forEach((t, i) => {
+                    formData.append(`track_${i}`, t.file);
+                    formData.append(`label_${i}`, t.label);
+                });
+                const res = await fetch(`${API_URL}/api/upload-multitrack`, { method: 'POST', body: formData });
+                if (!res.ok) {
+                    const err = await safeJson(res);
+                    throw { stage: 'combining', message: err?.error || `Multi-track upload failed (${res.status})` };
+                }
+                const data = await safeJson(res);
+                if (!data?.transcript_id) throw { stage: 'combining', message: 'Invalid server response' };
+                console.log(`Multi-track combined: ${data.track_count} tracks`, data.alignment);
+                return data.transcript_id;
+            };
+
             const safeJson = async (res) => {
                 try { return await res.json(); }
                 catch { return null; }
             };
 
-            const processOneEpisode = async (file) => {
+            const processOneEpisode = async (file, existingTranscriptId) => {
                 setPipelineError(null);
-                setPipelineStage('uploading');
 
-                // Stage 1: Upload
-                const formData = new FormData();
-                formData.append('file', file);
-                const uploadRes = await fetch(`${API_URL}/api/upload`, { method: 'POST', body: formData });
-                if (!uploadRes.ok) {
-                    const err = await safeJson(uploadRes);
-                    throw { stage: 'uploading', message: err?.error || `Upload failed (${uploadRes.status})` };
+                let transcript_id, filename;
+
+                if (existingTranscriptId) {
+                    // Multi-track: upload+combine already done
+                    transcript_id = existingTranscriptId;
+                    filename = 'combined_tracks';
+                } else {
+                    // Single track: upload now
+                    setPipelineStage('uploading');
+                    const formData = new FormData();
+                    formData.append('file', file);
+                    const uploadRes = await fetch(`${API_URL}/api/upload`, { method: 'POST', body: formData });
+                    if (!uploadRes.ok) {
+                        const err = await safeJson(uploadRes);
+                        throw { stage: 'uploading', message: err?.error || `Upload failed (${uploadRes.status})` };
+                    }
+                    const uploadData = await safeJson(uploadRes);
+                    if (!uploadData?.transcript_id) throw { stage: 'uploading', message: 'Invalid server response — please retry' };
+                    transcript_id = uploadData.transcript_id;
+                    filename = uploadData.filename;
                 }
-                const uploadData = await safeJson(uploadRes);
-                if (!uploadData?.transcript_id) throw { stage: 'uploading', message: 'Invalid server response — please retry' };
-                const { transcript_id, filename } = uploadData;
                 transcriptIdRef.current = transcript_id;
 
                 // Stage 2: Transcribe (poll)
@@ -308,13 +355,35 @@
             };
 
             const runFullPipeline = async () => {
-                if (files.length === 0) return;
+                const isMulti = uploadMode === 'multi';
+                if (!isMulti && files.length === 0) return;
+                if (isMulti && tracks.length < 2) return;
                 setScreen('progress');
                 setPipelineError(null);
                 setBatchResults([]);
-                const isBatch = files.length > 1;
 
                 try {
+                    if (isMulti) {
+                        // Multi-track: combine first, then process as single episode
+                        const multiFilename = tracks.map(t => t.label).join(' + ');
+                        setBatchResults([{ filename: multiFilename, status: 'processing' }]);
+                        const transcriptId = await uploadMultiTrack();
+                        const result = await processOneEpisode(null, transcriptId);
+                        if (result.autoEnhanced) {
+                            setBatchResults([{ filename: multiFilename, status: 'completed', downloadBlob: result.blob, transcriptId: result.transcriptId }]);
+                        } else {
+                            setBatchResults([{ filename: multiFilename, status: 'needs_enhance', transcriptId: result.transcriptId, editJobId: result.editJobId }]);
+                            setPipelineStage('done');
+                            setScreen('enhance');
+                            return;
+                        }
+                        setPipelineStage('done');
+                        setScreen('download');
+                        return;
+                    }
+
+                    // Single-track (batch) flow
+                    const isBatch = files.length > 1;
                     for (let i = 0; i < files.length; i++) {
                         setBatchIndex(i);
                         setBatchResults(prev => [...prev.slice(0, i), { filename: files[i].name, status: 'processing' }]);
@@ -544,6 +613,7 @@
                 setPipelineStage(null);
                 setPipelineError(null);
                 setFiles([]);
+                setTracks([]);
                 setIntroFile(null);
                 setOutroFile(null);
                 if (!selectedProfile) {
@@ -638,32 +708,86 @@
                                     </div>
                                 )}
 
-                                {/* Drop zone (multi-file) */}
-                                <div className="border-2 border-dashed border-purple-400/50 rounded-xl p-8 text-center mb-4 bg-white/5 hover:bg-white/10 transition-all cursor-pointer">
-                                    <input type="file" accept="audio/*" multiple onChange={handleFileUpload} className="hidden" id="file-upload" />
-                                    <label htmlFor="file-upload" className="cursor-pointer">
-                                        <div className="w-12 h-12 mx-auto mb-3 text-purple-300 flex items-center justify-center">
-                                            <FileAudio />
-                                        </div>
-                                        <div>
-                                            <p className="text-white font-semibold mb-1">Drop your podcast files here</p>
-                                            <p className="text-purple-200 text-sm">or click to browse (multiple files supported)</p>
-                                        </div>
-                                    </label>
+                                {/* Mode toggle */}
+                                <div className="flex gap-2 mb-4">
+                                    <button
+                                        onClick={() => setUploadMode('single')}
+                                        className={`flex-1 py-2 px-4 rounded-lg text-sm font-medium transition-all ${
+                                            uploadMode === 'single'
+                                                ? 'bg-purple-500/30 border border-purple-400 text-white'
+                                                : 'bg-white/5 border border-white/10 text-purple-300/70 hover:bg-white/10'
+                                        }`}
+                                    >
+                                        Single Track
+                                    </button>
+                                    <button
+                                        onClick={() => setUploadMode('multi')}
+                                        className={`flex-1 py-2 px-4 rounded-lg text-sm font-medium transition-all ${
+                                            uploadMode === 'multi'
+                                                ? 'bg-purple-500/30 border border-purple-400 text-white'
+                                                : 'bg-white/5 border border-white/10 text-purple-300/70 hover:bg-white/10'
+                                        }`}
+                                    >
+                                        Multi-Track
+                                    </button>
                                 </div>
 
-                                {/* File list */}
-                                {files.length > 0 && (
-                                    <div className="mb-4 space-y-1">
-                                        {files.map((f, i) => (
-                                            <div key={i} className="flex items-center gap-2 bg-white/5 rounded-lg px-3 py-2 text-sm">
-                                                <span className="text-purple-300/50 w-5 text-right">{i + 1}.</span>
-                                                <span className="text-white flex-1 truncate">{f.name}</span>
-                                                <span className="text-purple-300/50 text-xs">{(f.size / 1024 / 1024).toFixed(1)} MB</span>
-                                                <button onClick={() => removeFile(i)} className="text-red-400/50 hover:text-red-400 text-xs transition-all">x</button>
+                                {uploadMode === 'single' ? (
+                                    <>
+                                        {/* Drop zone (multi-file) */}
+                                        <div className="border-2 border-dashed border-purple-400/50 rounded-xl p-8 text-center mb-4 bg-white/5 hover:bg-white/10 transition-all cursor-pointer">
+                                            <input type="file" accept="audio/*" multiple onChange={handleFileUpload} className="hidden" id="file-upload" />
+                                            <label htmlFor="file-upload" className="cursor-pointer">
+                                                <div className="w-12 h-12 mx-auto mb-3 text-purple-300 flex items-center justify-center">
+                                                    <FileAudio />
+                                                </div>
+                                                <div>
+                                                    <p className="text-white font-semibold mb-1">Drop your podcast files here</p>
+                                                    <p className="text-purple-200 text-sm">or click to browse (multiple files supported)</p>
+                                                </div>
+                                            </label>
+                                        </div>
+
+                                        {/* File list */}
+                                        {files.length > 0 && (
+                                            <div className="mb-4 space-y-1">
+                                                {files.map((f, i) => (
+                                                    <div key={i} className="flex items-center gap-2 bg-white/5 rounded-lg px-3 py-2 text-sm">
+                                                        <span className="text-purple-300/50 w-5 text-right">{i + 1}.</span>
+                                                        <span className="text-white flex-1 truncate">{f.name}</span>
+                                                        <span className="text-purple-300/50 text-xs">{(f.size / 1024 / 1024).toFixed(1)} MB</span>
+                                                        <button onClick={() => removeFile(i)} className="text-red-400/50 hover:text-red-400 text-xs transition-all">x</button>
+                                                    </div>
+                                                ))}
                                             </div>
-                                        ))}
-                                    </div>
+                                        )}
+                                    </>
+                                ) : (
+                                    <>
+                                        {/* Multi-track: track list */}
+                                        <div className="mb-4 space-y-2">
+                                            <p className="text-purple-200/70 text-xs">Upload separate tracks (e.g. host and guest recordings). They will be auto-aligned by speech onset and mixed together.</p>
+                                            {tracks.map((t, i) => (
+                                                <div key={i} className="flex items-center gap-2 bg-white/5 rounded-lg px-3 py-2 text-sm">
+                                                    <input
+                                                        type="text"
+                                                        value={t.label}
+                                                        onChange={e => updateTrackLabel(i, e.target.value)}
+                                                        className="w-24 bg-white/10 border border-white/20 text-white px-2 py-1 rounded text-xs"
+                                                    />
+                                                    <span className="text-white flex-1 truncate">{t.file.name}</span>
+                                                    <span className="text-purple-300/50 text-xs">{(t.file.size / 1024 / 1024).toFixed(1)} MB</span>
+                                                    <button onClick={() => removeTrack(i)} className="text-red-400/50 hover:text-red-400 text-xs transition-all">x</button>
+                                                </div>
+                                            ))}
+                                            <div>
+                                                <input type="file" accept="audio/*" onChange={addTrack} className="hidden" id="add-track" />
+                                                <label htmlFor="add-track" className="inline-flex items-center gap-2 cursor-pointer text-sm text-purple-300 hover:text-white bg-white/5 border border-dashed border-white/20 rounded-lg px-4 py-2 hover:bg-white/10 transition-all">
+                                                    + Add track
+                                                </label>
+                                            </div>
+                                        </div>
+                                    </>
                                 )}
 
                                 {/* Intro / Outro (optional) */}
@@ -805,11 +929,11 @@
 
                                 <button
                                     onClick={runFullPipeline}
-                                    disabled={files.length === 0}
+                                    disabled={uploadMode === 'single' ? files.length === 0 : tracks.length < 2}
                                     className="w-full bg-gradient-to-r from-purple-500 to-pink-500 text-white font-semibold py-4 rounded-xl hover:from-purple-600 hover:to-pink-600 transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
                                 >
                                     <Sparkles className="w-5 h-5" />
-                                    {files.length > 1 ? `Edit ${files.length} Episodes` : 'Edit Audio'}
+                                    {uploadMode === 'multi' ? `Combine & Edit ${tracks.length} Tracks` : files.length > 1 ? `Edit ${files.length} Episodes` : 'Edit Audio'}
                                 </button>
                             </div>
                         )}
@@ -847,8 +971,8 @@
                                 )}
 
                                 <div className="space-y-2">
-                                    {STAGES.map((stage, i) => {
-                                        const currentIdx = STAGES.findIndex(s => s.key === pipelineStage);
+                                    {STAGES.filter(s => uploadMode === 'multi' || s.key !== 'combining').map((stage, i, filteredStages) => {
+                                        const currentIdx = filteredStages.findIndex(s => s.key === pipelineStage);
                                         const failedStage = pipelineError && pipelineError.stage === stage.key;
                                         const done = !failedStage && currentIdx > i;
                                         const active = !failedStage && pipelineStage === stage.key && stage.key !== 'done';

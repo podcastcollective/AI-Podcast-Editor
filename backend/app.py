@@ -753,8 +753,8 @@ def process_with_adobe_enhance(audio_path):
         raise Exception(f'Adobe enhance job creation failed: {resp.status_code} - {resp.text[:200]}')
     print(f"Adobe Enhance: v2 enhancement job created, track_id={track_id}")
 
-    # Step 4: Poll merged_media for completion (max 60 attempts x 5s = 5 min)
-    for attempt in range(60):
+    # Step 4: Poll merged_media for completion (max 180 attempts x 5s = 15 min)
+    for attempt in range(180):
         time.sleep(5)
         timestamp_ms = str(int(time.time() * 1000))
         resp = requests.get(
@@ -773,7 +773,7 @@ def process_with_adobe_enhance(audio_path):
         else:
             raise Exception(f'Adobe enhance poll failed: {resp.status_code} - {resp.text[:200]}')
     else:
-        raise Exception('Adobe Enhance Speech timed out after 5 minutes')
+        raise Exception('Adobe Enhance Speech timed out after 15 minutes')
     print(f"Adobe Enhance: v2 processing complete")
 
     # Step 5: Create export with 90/10/10 stem mix
@@ -802,9 +802,9 @@ def process_with_adobe_enhance(audio_path):
         raise Exception(f'Adobe export response missing id: {export_data}')
     print(f"Adobe Enhance: export created with 90/10/10 mix, export_id={export_id}")
 
-    # Step 6: Poll export for download URL (max 60 attempts x 5s = 5 min)
+    # Step 6: Poll export for download URL (max 180 attempts x 5s = 15 min)
     download_url = None
-    for attempt in range(60):
+    for attempt in range(180):
         time.sleep(5)
         timestamp_ms = str(int(time.time() * 1000))
         resp = requests.get(
@@ -825,7 +825,7 @@ def process_with_adobe_enhance(audio_path):
         else:
             raise Exception(f'Adobe export poll failed: {resp.status_code} - {resp.text[:200]}')
     if not download_url:
-        raise Exception('Adobe export timed out after 5 minutes')
+        raise Exception('Adobe export timed out after 15 minutes')
     print(f"Adobe Enhance: export ready, downloading")
 
     # Step 7: Download exported file

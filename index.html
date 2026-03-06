@@ -70,22 +70,23 @@
         const API_URL = 'https://ai-podcast-editor-production.up.railway.app';
 
         const STAGES = [
-            { key: 'uploading',    label: 'Uploading audio' },
-            { key: 'combining',    label: 'Aligning & mixing tracks' },
-            { key: 'transcribing', label: 'Transcribing with AssemblyAI' },
-            { key: 'detecting',    label: 'Detecting preset...' },
-            { key: 'analyzing',    label: 'Analysing with Claude AI' },
-            { key: 'cutting',      label: 'Applying edits' },
-            { key: 'merging',      label: 'Merging intro & outro' },
-            { key: 'enhancing',    label: 'Enhancing with Adobe Enhance Speech' },
-            { key: 'finalizing',   label: 'Finalizing audio' },
-            { key: 'done',         label: 'Complete' },
+            { key: 'uploading',         label: 'Uploading audio' },
+            { key: 'enhancing_tracks',  label: 'Enhancing individual tracks' },
+            { key: 'combining',         label: 'Aligning & mixing tracks' },
+            { key: 'transcribing',      label: 'Transcribing with AssemblyAI' },
+            { key: 'detecting',         label: 'Detecting preset...' },
+            { key: 'analyzing',         label: 'Analysing with Claude AI' },
+            { key: 'cutting',           label: 'Applying edits' },
+            { key: 'merging',           label: 'Merging intro & outro' },
+            { key: 'enhancing',         label: 'Enhancing with Adobe Enhance Speech' },
+            { key: 'finalizing',        label: 'Finalizing audio' },
+            { key: 'done',              label: 'Complete' },
         ];
 
         function PodcastEditor() {
             const [screen, setScreen] = useState('upload');
             const [uploadMode, setUploadMode] = useState('single'); // 'single' | 'multi'
-            const [tracks, setTracks] = useState([]); // [{file, label}]
+            const [tracks, setTracks] = useState([]); // [{file, label, enhanceMix}]
             const [files, setFiles] = useState([]);
             const [introFile, setIntroFile] = useState(null);
             const [outroFile, setOutroFile] = useState(null);
@@ -93,12 +94,14 @@
             const [customInstructions, setCustomInstructions] = useState('');
             const [enhanceMix, setEnhanceMix] = useState({ speech: 90, background: 10, music: 10 });
             const [pipelineStage, setPipelineStage] = useState(null);
+            const [pipelineProgress, setPipelineProgress] = useState(null);
             const [pipelineError, setPipelineError] = useState(null);
             const [enhanceUploading, setEnhanceUploading] = useState(false);
             const [finalizing, setFinalizing] = useState(false);
             const downloadBlobRef = useRef(null);
             const transcriptIdRef = useRef(null);
             const editJobIdRef = useRef(null);
+            const tracksEnhancedRef = useRef(false);
 
             // Batch state
             const [batchIndex, setBatchIndex] = useState(0);
@@ -168,7 +171,7 @@
                 if (!file || !file.type.includes('audio')) return;
                 const defaultLabels = ['Host', 'Guest 1', 'Guest 2', 'Guest 3'];
                 const label = defaultLabels[tracks.length] || `Track ${tracks.length + 1}`;
-                setTracks(prev => [...prev, { file, label }]);
+                setTracks(prev => [...prev, { file, label, enhanceMix: { speech: 90, background: 10, music: 10 } }]);
                 e.target.value = '';
             };
 
@@ -180,22 +183,50 @@
                 setTracks(prev => prev.map((t, i) => i === index ? { ...t, label } : t));
             };
 
+            const updateTrackEnhanceMix = (index, mix) => {
+                setTracks(prev => prev.map((t, i) => i === index ? { ...t, enhanceMix: { ...t.enhanceMix, ...mix } } : t));
+            };
+
             const uploadMultiTrack = async () => {
-                setPipelineStage('combining');
+                setPipelineStage('uploading');
                 const formData = new FormData();
                 tracks.forEach((t, i) => {
                     formData.append(`track_${i}`, t.file);
                     formData.append(`label_${i}`, t.label);
+                    formData.append(`enhance_mix_${i}`, JSON.stringify(t.enhanceMix));
                 });
                 const res = await fetch(`${API_URL}/api/upload-multitrack`, { method: 'POST', body: formData });
                 if (!res.ok) {
                     const err = await safeJson(res);
-                    throw { stage: 'combining', message: err?.error || `Multi-track upload failed (${res.status})` };
+                    throw { stage: 'uploading', message: err?.error || `Multi-track upload failed (${res.status})` };
                 }
                 const data = await safeJson(res);
-                if (!data?.transcript_id) throw { stage: 'combining', message: 'Invalid server response' };
-                console.log(`Multi-track combined: ${data.track_count} tracks`, data.alignment);
-                return data.transcript_id;
+                if (!data?.job_id) throw { stage: 'uploading', message: 'Invalid server response' };
+                const jobId = data.job_id;
+
+                // Poll multitrack status
+                while (true) {
+                    await new Promise(r => setTimeout(r, 3000));
+                    let statusRes;
+                    try { statusRes = await fetch(`${API_URL}/api/multitrack-status/${jobId}`); }
+                    catch { throw { stage: 'combining', message: 'Server unreachable — it may be restarting. Please retry.' }; }
+                    if (statusRes.status === 404) throw { stage: 'combining', message: 'Server restarted during processing. Please retry.' };
+                    const statusData = await safeJson(statusRes);
+                    if (!statusData) continue;
+                    if (!statusRes.ok) throw { stage: statusData.status || 'combining', message: statusData.error || 'Multi-track processing failed' };
+
+                    if (statusData.status === 'enhancing_tracks') {
+                        setPipelineStage('enhancing_tracks');
+                        if (statusData.progress) setPipelineProgress(statusData.progress);
+                    }
+                    if (statusData.status === 'combining') { setPipelineStage('combining'); setPipelineProgress(null); }
+                    if (statusData.status === 'uploading') setPipelineStage('uploading');
+                    if (statusData.status === 'transcribing' && statusData.transcript_id) {
+                        tracksEnhancedRef.current = statusData.tracks_enhanced || false;
+                        console.log(`Multi-track ready: ${statusData.transcript_id}, enhanced=${tracksEnhancedRef.current}`, statusData.alignment);
+                        return statusData.transcript_id;
+                    }
+                }
             };
 
             const safeJson = async (res) => {
@@ -203,7 +234,7 @@
                 catch { return null; }
             };
 
-            const processOneEpisode = async (file, existingTranscriptId) => {
+            const processOneEpisode = async (file, existingTranscriptId, skipEnhance = false) => {
                 setPipelineError(null);
 
                 let transcript_id, filename;
@@ -308,6 +339,7 @@
                 editFormData.append('cuts', JSON.stringify(cuts));
                 editFormData.append('preset', resolvedPreset);
                 editFormData.append('enhance_mix', JSON.stringify(enhanceMix));
+                if (skipEnhance) editFormData.append('skip_enhance', 'true');
                 if (introFile) editFormData.append('intro', introFile);
                 if (outroFile) editFormData.append('outro', outroFile);
                 const editRes = await fetch(`${API_URL}/api/edit-audio`, {
@@ -364,11 +396,11 @@
 
                 try {
                     if (isMulti) {
-                        // Multi-track: combine first, then process as single episode
+                        // Multi-track: enhance per-track, combine, then process as single episode
                         const multiFilename = tracks.map(t => t.label).join(' + ');
                         setBatchResults([{ filename: multiFilename, status: 'processing' }]);
                         const transcriptId = await uploadMultiTrack();
-                        const result = await processOneEpisode(null, transcriptId);
+                        const result = await processOneEpisode(null, transcriptId, tracksEnhancedRef.current);
                         if (result.autoEnhanced) {
                             setBatchResults([{ filename: multiFilename, status: 'completed', downloadBlob: result.blob, transcriptId: result.transcriptId }]);
                         } else {
@@ -611,6 +643,7 @@
             const resetToUpload = () => {
                 setScreen('upload');
                 setPipelineStage(null);
+                setPipelineProgress(null);
                 setPipelineError(null);
                 setFiles([]);
                 setTracks([]);
@@ -629,6 +662,7 @@
                 downloadBlobRef.current = null;
                 transcriptIdRef.current = null;
                 editJobIdRef.current = null;
+                tracksEnhancedRef.current = false;
             };
 
             // --- Render ---
@@ -768,16 +802,56 @@
                                         <div className="mb-4 space-y-2">
                                             <p className="text-purple-200/70 text-xs">Upload separate tracks (e.g. host and guest recordings). They will be auto-aligned by speech onset and mixed together.</p>
                                             {tracks.map((t, i) => (
-                                                <div key={i} className="flex items-center gap-2 bg-white/5 rounded-lg px-3 py-2 text-sm">
-                                                    <input
-                                                        type="text"
-                                                        value={t.label}
-                                                        onChange={e => updateTrackLabel(i, e.target.value)}
-                                                        className="w-24 bg-white/10 border border-white/20 text-white px-2 py-1 rounded text-xs"
-                                                    />
-                                                    <span className="text-white flex-1 truncate">{t.file.name}</span>
-                                                    <span className="text-purple-300/50 text-xs">{(t.file.size / 1024 / 1024).toFixed(1)} MB</span>
-                                                    <button onClick={() => removeTrack(i)} className="text-red-400/50 hover:text-red-400 text-xs transition-all">x</button>
+                                                <div key={i} className="bg-white/5 rounded-lg px-3 py-2 text-sm">
+                                                    <div className="flex items-center gap-2">
+                                                        <input
+                                                            type="text"
+                                                            value={t.label}
+                                                            onChange={e => updateTrackLabel(i, e.target.value)}
+                                                            className="w-24 bg-white/10 border border-white/20 text-white px-2 py-1 rounded text-xs"
+                                                        />
+                                                        <span className="text-white flex-1 truncate">{t.file.name}</span>
+                                                        <span className="text-purple-300/50 text-xs">{(t.file.size / 1024 / 1024).toFixed(1)} MB</span>
+                                                        <span className="text-purple-300/40 text-xs">{t.enhanceMix.speech}/{t.enhanceMix.background}/{t.enhanceMix.music}</span>
+                                                        <button onClick={() => removeTrack(i)} className="text-red-400/50 hover:text-red-400 text-xs transition-all">x</button>
+                                                    </div>
+                                                    <div className="mt-2 pl-0">
+                                                        <div className="flex items-center gap-2">
+                                                            {[
+                                                                { key: 'speech', label: 'Speech' },
+                                                                { key: 'background', label: 'BG' },
+                                                                { key: 'music', label: 'Music' },
+                                                            ].map(({ key, label }) => (
+                                                                <div key={key} className="flex items-center gap-1">
+                                                                    <label className="text-xs text-purple-300/50">{label}</label>
+                                                                    <input
+                                                                        type="number"
+                                                                        min="0" max="100" step="5"
+                                                                        value={t.enhanceMix[key]}
+                                                                        onChange={e => updateTrackEnhanceMix(i, { [key]: Math.max(0, Math.min(100, parseInt(e.target.value) || 0)) })}
+                                                                        className="w-12 p-1 rounded bg-white/10 border border-white/20 text-white text-xs text-center"
+                                                                    />
+                                                                </div>
+                                                            ))}
+                                                            {[
+                                                                { label: '90/10/10', s: 90, b: 10, m: 10 },
+                                                                { label: '40/10/10', s: 40, b: 10, m: 10 },
+                                                                { label: '100/0/0', s: 100, b: 0, m: 0 },
+                                                            ].map(p => (
+                                                                <button
+                                                                    key={p.label}
+                                                                    onClick={() => updateTrackEnhanceMix(i, { speech: p.s, background: p.b, music: p.m })}
+                                                                    className={`text-xs px-1.5 py-0.5 rounded border transition-all ${
+                                                                        t.enhanceMix.speech === p.s && t.enhanceMix.background === p.b && t.enhanceMix.music === p.m
+                                                                            ? 'bg-purple-500/20 border-purple-400 text-purple-200'
+                                                                            : 'bg-white/5 border-white/10 text-purple-300/40 hover:bg-white/10'
+                                                                    }`}
+                                                                >
+                                                                    {p.label}
+                                                                </button>
+                                                            ))}
+                                                        </div>
+                                                    </div>
                                                 </div>
                                             ))}
                                             <div>
@@ -880,7 +954,8 @@
                                     />
                                 </div>
 
-                                {/* Adobe Enhance Mix */}
+                                {/* Adobe Enhance Mix (single-track only — multi-track has per-track controls) */}
+                                {uploadMode === 'single' && (
                                 <div className="mb-6">
                                     <h3 className="text-sm font-semibold text-purple-200 uppercase tracking-wide mb-3">
                                         Adobe Enhance Mix
@@ -926,6 +1001,7 @@
                                         ))}
                                     </div>
                                 </div>
+                                )}
 
                                 <button
                                     onClick={runFullPipeline}
@@ -971,7 +1047,10 @@
                                 )}
 
                                 <div className="space-y-2">
-                                    {STAGES.filter(s => uploadMode === 'multi' || s.key !== 'combining').map((stage, i, filteredStages) => {
+                                    {STAGES.filter(s => {
+                                        if (uploadMode === 'multi') return s.key !== 'enhancing';
+                                        return s.key !== 'combining' && s.key !== 'enhancing_tracks';
+                                    }).map((stage, i, filteredStages) => {
                                         const currentIdx = filteredStages.findIndex(s => s.key === pipelineStage);
                                         const failedStage = pipelineError && pipelineError.stage === stage.key;
                                         const done = !failedStage && currentIdx > i;
@@ -1003,7 +1082,12 @@
                                         return (
                                             <div key={stage.key} className={`flex items-center gap-3 rounded-lg px-4 py-3 border ${bgColor}`}>
                                                 <div className="shrink-0">{icon}</div>
-                                                <span className={`font-medium text-sm ${textColor}`}>{stage.label}</span>
+                                                <div>
+                                                    <span className={`font-medium text-sm ${textColor}`}>{stage.label}</span>
+                                                    {active && pipelineProgress && stage.key === 'enhancing_tracks' && (
+                                                        <span className="block text-xs text-purple-300/70 mt-0.5">{pipelineProgress}</span>
+                                                    )}
+                                                </div>
                                             </div>
                                         );
                                     })}

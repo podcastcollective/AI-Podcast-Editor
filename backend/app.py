@@ -674,36 +674,64 @@ def _detect_speech_onset(audio_path):
     return 0
 
 
+def _get_track_duration(audio_path):
+    """Get track duration in seconds via ffprobe."""
+    probe = subprocess.run(
+        ['ffprobe', '-v', 'error', '-show_entries', 'format=duration',
+         '-of', 'csv=p=0', audio_path],
+        capture_output=True, text=True, check=True, timeout=30,
+    )
+    return float(probe.stdout.strip())
+
+
 def _combine_tracks(track_paths, labels=None):
     """
-    Align multiple audio tracks by speech onset and mix into a single WAV.
+    Normalize levels, optionally align, and mix multiple audio tracks into WAV.
+    Only aligns when track durations differ by >2s (different recording start
+    times). Same-duration tracks are assumed to be from the same session and
+    are mixed as-is.
     Returns (combined_path, alignment_info).
     """
     n = len(track_paths)
     if n < 2:
         raise ValueError("Need at least 2 tracks to combine")
 
-    # Detect speech onset in each track
-    onsets = [_detect_speech_onset(p) for p in track_paths]
-    min_onset = min(onsets)
-    delays = [onset - min_onset for onset in onsets]
+    # Check if tracks need alignment (different start times vs same session)
+    durations = [_get_track_duration(p) for p in track_paths]
+    duration_spread = max(durations) - min(durations)
+    needs_alignment = duration_spread > 2.0
+    print(f"Track durations: {[f'{d:.1f}s' for d in durations]}, "
+          f"spread={duration_spread:.1f}s, alignment={'yes' if needs_alignment else 'no (same session)'}")
+
+    onsets = []
+    delays = []
+    if needs_alignment:
+        onsets = [_detect_speech_onset(p) for p in track_paths]
+        max_onset = max(onsets)
+        delays = [max_onset - onset for onset in onsets]
+    else:
+        onsets = [0] * n
+        delays = [0] * n
 
     alignment_info = []
-    for i, (path, onset, delay) in enumerate(zip(track_paths, onsets, delays)):
+    for i in range(n):
         label = (labels[i] if labels and i < len(labels) else None) or f"Track {i + 1}"
         alignment_info.append({
             'track': i,
             'label': label,
-            'onset_ms': onset,
-            'delay_ms': delay,
+            'onset_ms': onsets[i],
+            'delay_ms': delays[i],
+            'aligned': needs_alignment,
         })
-        print(f"Track {i} ({label}): onset={onset}ms, delay={delay}ms")
+        if needs_alignment:
+            print(f"Track {i} ({label}): onset={onsets[i]}ms, delay={delays[i]}ms")
 
     # Build ffmpeg filter_complex
+    # Per-track: normalize format → loudnorm to -16 LUFS → optional delay
     filter_parts = []
     for i in range(n):
-        # Normalize format: mono 48kHz
         chain = f'[{i}:a]aformat=sample_rates=48000:channel_layouts=mono'
+        chain += ',loudnorm=I=-16:TP=-1.5:LRA=11'
         if delays[i] > 0:
             d = delays[i]
             chain += f',adelay={d}|{d}'
@@ -711,8 +739,10 @@ def _combine_tracks(track_paths, labels=None):
         filter_parts.append(chain)
 
     mix_inputs = ''.join(f'[t{i}]' for i in range(n))
+    # amix sums signals; add -3dB headroom then limiter to prevent clipping
     filter_parts.append(
-        f'{mix_inputs}amix=inputs={n}:duration=longest:dropout_transition=0:normalize=0[out]'
+        f'{mix_inputs}amix=inputs={n}:duration=longest:dropout_transition=0:normalize=0,'
+        f'volume=-3dB,alimiter=limit=0.95:attack=0.1:release=50[out]'
     )
     filter_str = ';'.join(filter_parts)
 

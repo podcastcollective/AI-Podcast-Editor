@@ -206,7 +206,8 @@ def _analyze_audio(audio_path, transcript_data):
         if gap_ms >= 200 and gap_end <= MAX_ANALYSIS_MS:
             segment = audio[gap_start:gap_end]
             if len(segment) > 0:
-                gap_dbfs_values.append(segment.dBFS)
+                if segment.dBFS != float('-inf'):
+                    gap_dbfs_values.append(segment.dBFS)
             if len(gap_dbfs_values) >= 30:  # sample up to 30 gaps
                 break
     noise_floor = sum(gap_dbfs_values) / len(gap_dbfs_values) if gap_dbfs_values else -35.0
@@ -227,11 +228,13 @@ def _analyze_audio(audio_path, transcript_data):
     else:
         preset_name = 'zoom'
 
+    import math
+    _safe = lambda v, default=0: default if (math.isinf(v) or math.isnan(v)) else v
     metrics = {
         'speakers': speaker_count,
-        'noise_floor': round(noise_floor, 1),
-        'confidence': round(confidence, 3),
-        'dynamic_range': round(dynamic_range, 1),
+        'noise_floor': round(_safe(noise_floor, -35.0), 1),
+        'confidence': round(_safe(confidence), 3),
+        'dynamic_range': round(_safe(dynamic_range), 1),
     }
     print(f"Auto-detect: speakers={speaker_count}, noise_floor={noise_floor:.1f}dB, "
           f"confidence={confidence:.3f}, dynamic_range={dynamic_range:.1f}dB \u2192 {preset_name}")

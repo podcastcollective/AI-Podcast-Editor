@@ -1112,7 +1112,7 @@ def index():
     return jsonify({
         "status": "online",
         "service": "AI Podcast Editor API",
-        "version": "7.0.0",
+        "version": "7.1.0",
     })
 
 

@@ -611,32 +611,66 @@ def apply_audio_edits(audio_path, cuts_ms, words=None):
 # MULTI-TRACK — align and combine separate speaker tracks
 # ============================================================================
 
+def _measure_noise_floor(audio_path, duration_s=2):
+    """Measure RMS level of the first N seconds to estimate noise floor."""
+    result = subprocess.run(
+        ['ffmpeg', '-i', audio_path, '-t', str(duration_s),
+         '-af', 'volumedetect', '-f', 'null', '-'],
+        capture_output=True, text=True, timeout=30,
+    )
+    for line in result.stderr.split('\n'):
+        m = re.search(r'mean_volume:\s*([-\d.]+)', line)
+        if m:
+            return float(m.group(1))
+    return -35.0  # fallback
+
+
 def _detect_speech_onset(audio_path):
     """
     Detect where speech begins in an audio track using ffmpeg silencedetect.
+    Uses adaptive threshold: measures noise floor of first 2s, then sets
+    silence threshold 5dB above it so crosstalk/room tone doesn't mask silence.
     Returns onset in milliseconds. Returns 0 if speech starts immediately.
     """
+    # Adaptive threshold: noise floor + 5dB, clamped to [-40, -20] range
+    noise_floor = _measure_noise_floor(audio_path)
+    threshold = max(-40, min(-20, noise_floor + 5))
+    print(f"Speech onset detection for {os.path.basename(audio_path)}: "
+          f"noise_floor={noise_floor:.1f}dB, threshold={threshold:.1f}dB")
+
     result = subprocess.run(
         ['ffmpeg', '-i', audio_path, '-af',
-         'silencedetect=noise=-35dB:d=0.3', '-f', 'null', '-'],
+         f'silencedetect=noise={threshold}dB:d=0.5', '-f', 'null', '-'],
         capture_output=True, text=True, timeout=120,
     )
-    # Parse stderr for silence events in order.
-    # If audio starts with silence: first event is silence_end (onset = that value).
-    # If audio starts with speech: first event is silence_start (onset = 0).
+    # Parse silence events to find speech onset.
+    # silence_start near 0 + silence_end = audio starts with silence, onset = silence_end.
+    # silence_start well above 0 = audio starts with speech, onset = 0.
+    first_start = None
+    first_end = None
     for line in result.stderr.split('\n'):
-        m_start = re.search(r'silence_start:\s*([\d.]+)', line)
-        if m_start:
-            # First event is silence_start — audio starts with speech
-            print(f"Speech onset in {os.path.basename(audio_path)}: 0ms (starts with speech)")
-            return 0
-        m_end = re.search(r'silence_end:\s*([\d.]+)', line)
-        if m_end:
-            onset_s = float(m_end.group(1))
-            print(f"Speech onset in {os.path.basename(audio_path)}: {onset_s:.3f}s")
-            return int(onset_s * 1000)
-    # No silence detected at all — speech throughout
-    print(f"Speech onset in {os.path.basename(audio_path)}: 0ms (no silence detected)")
+        if first_start is None:
+            m = re.search(r'silence_start:\s*([\d.]+)', line)
+            if m:
+                first_start = float(m.group(1))
+        if first_end is None:
+            m = re.search(r'silence_end:\s*([\d.]+)', line)
+            if m:
+                first_end = float(m.group(1))
+        if first_start is not None and first_end is not None:
+            break
+
+    fname = os.path.basename(audio_path)
+    if first_start is not None and first_start < 0.1 and first_end is not None:
+        # Audio starts with silence; speech begins at silence_end
+        print(f"Speech onset in {fname}: {first_end:.3f}s (after {first_end:.1f}s leading silence)")
+        return int(first_end * 1000)
+    if first_start is not None and first_start >= 0.1:
+        # First silence is well into the track — speech starts at 0
+        print(f"Speech onset in {fname}: 0ms (starts with speech)")
+        return 0
+    # No silence detected at all
+    print(f"Speech onset in {fname}: 0ms (no silence detected)")
     return 0
 
 

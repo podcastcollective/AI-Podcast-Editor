@@ -338,6 +338,7 @@
                 editFormData.append('cuts', JSON.stringify(cuts));
                 editFormData.append('preset', resolvedPreset);
                 editFormData.append('enhance_mix', JSON.stringify(enhanceMix));
+                console.log(`edit-audio: skipEnhance=${skipEnhance}, transcript_id=${transcript_id}`);
                 if (skipEnhance) editFormData.append('skip_enhance', 'true');
                 if (introFile) editFormData.append('intro', introFile);
                 if (outroFile) editFormData.append('outro', outroFile);

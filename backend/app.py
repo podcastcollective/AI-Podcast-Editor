@@ -62,6 +62,9 @@ _jobs: dict = {}
 _jobs_lock = threading.Lock()
 _edit_jobs: dict = {}
 _edit_jobs_lock = threading.Lock()
+# Track which transcript_ids had pre-enhanced tracks (survives within same process)
+_pre_enhanced: set = set()
+_pre_enhanced_lock = threading.Lock()
 
 
 def allowed_file(filename):
@@ -792,7 +795,9 @@ def _run_multitrack_job(job_id, track_paths, labels, enhance_mixes):
         tracks_enhanced = False
 
         # Per-track Adobe enhancement (if token available)
-        if get_adobe_token():
+        has_token = bool(get_adobe_token())
+        print(f"Multitrack job {job_id}: {n} tracks, adobe_token={has_token}")
+        if has_token:
             with _edit_jobs_lock:
                 _edit_jobs[job_id]['status'] = 'enhancing_tracks'
             for i, path in enumerate(track_paths):
@@ -822,10 +827,13 @@ def _run_multitrack_job(job_id, track_paths, labels, enhance_mixes):
         final_path = f'/tmp/{transcript_id}.wav'
         os.rename(combined_path, final_path)
 
-        # Leave marker so edit-audio knows to skip post-cut enhancement
+        # Mark transcript as pre-enhanced (in-memory + file marker)
         if tracks_enhanced:
+            with _pre_enhanced_lock:
+                _pre_enhanced.add(transcript_id)
             with open(f'/tmp/{transcript_id}.pre_enhanced', 'w') as f:
                 f.write('1')
+            print(f"Marked {transcript_id} as pre-enhanced (memory + file)")
 
         # Clean up temp files
         for p in track_paths:
@@ -1138,6 +1146,7 @@ def _run_edit_job(job_id, audio_path, cuts_ms, transcript_id=None,
             wav_path = _concat_with_crossfade(wav_path, intro_path=intro_path, outro_path=outro_path)
 
         # If tracks were pre-enhanced, skip post-cut enhancement
+        print(f"Edit job {job_id}: skip_enhance={skip_enhance}, has_token={bool(get_adobe_token())}")
         if skip_enhance:
             current_step = 'finalizing'
             with _edit_jobs_lock:
@@ -1755,10 +1764,15 @@ def edit_audio():
         else:
             enhance_mix_raw = data.get('enhance_mix')
             skip_enhance = data.get('skip_enhance', False)
-        # Server-side fallback: check marker file left by multitrack job
+        # Server-side fallback: check in-memory set and marker file
+        if not skip_enhance:
+            with _pre_enhanced_lock:
+                if transcript_id in _pre_enhanced:
+                    skip_enhance = True
+                    print(f"skip_enhance set from in-memory set for {transcript_id}")
         if not skip_enhance and os.path.exists(f'/tmp/{transcript_id}.pre_enhanced'):
             skip_enhance = True
-            print(f"skip_enhance set from server-side marker for {transcript_id}")
+            print(f"skip_enhance set from marker file for {transcript_id}")
         if enhance_mix_raw:
             try:
                 enhance_mix = _json.loads(enhance_mix_raw) if isinstance(enhance_mix_raw, str) else enhance_mix_raw

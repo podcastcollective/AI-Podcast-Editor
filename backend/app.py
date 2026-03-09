@@ -822,6 +822,11 @@ def _run_multitrack_job(job_id, track_paths, labels, enhance_mixes):
         final_path = f'/tmp/{transcript_id}.wav'
         os.rename(combined_path, final_path)
 
+        # Leave marker so edit-audio knows to skip post-cut enhancement
+        if tracks_enhanced:
+            with open(f'/tmp/{transcript_id}.pre_enhanced', 'w') as f:
+                f.write('1')
+
         # Clean up temp files
         for p in track_paths:
             if os.path.exists(p):
@@ -1750,6 +1755,10 @@ def edit_audio():
         else:
             enhance_mix_raw = data.get('enhance_mix')
             skip_enhance = data.get('skip_enhance', False)
+        # Server-side fallback: check marker file left by multitrack job
+        if not skip_enhance and os.path.exists(f'/tmp/{transcript_id}.pre_enhanced'):
+            skip_enhance = True
+            print(f"skip_enhance set from server-side marker for {transcript_id}")
         if enhance_mix_raw:
             try:
                 enhance_mix = _json.loads(enhance_mix_raw) if isinstance(enhance_mix_raw, str) else enhance_mix_raw

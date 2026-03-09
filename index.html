@@ -71,12 +71,13 @@
 
         const STAGES = [
             { key: 'uploading',         label: 'Uploading audio' },
-            { key: 'enhancing_tracks',  label: 'Enhancing individual tracks' },
             { key: 'combining',         label: 'Aligning & mixing tracks' },
             { key: 'transcribing',      label: 'Transcribing with AssemblyAI' },
             { key: 'detecting',         label: 'Detecting preset...' },
             { key: 'analyzing',         label: 'Analysing with Claude AI' },
             { key: 'cutting',           label: 'Applying edits' },
+            { key: 'enhancing_tracks',  label: 'Enhancing individual tracks' },
+            { key: 'combining_final',   label: 'Mixing enhanced tracks' },
             { key: 'merging',           label: 'Merging intro & outro' },
             { key: 'enhancing',         label: 'Enhancing with Adobe Enhance Speech' },
             { key: 'finalizing',        label: 'Finalizing audio' },
@@ -101,7 +102,6 @@
             const downloadBlobRef = useRef(null);
             const transcriptIdRef = useRef(null);
             const editJobIdRef = useRef(null);
-            const tracksEnhancedRef = useRef(false);
 
             // Batch state
             const [batchIndex, setBatchIndex] = useState(0);
@@ -213,15 +213,10 @@
                     if (!statusData) continue;
                     if (!statusRes.ok) throw { stage: statusData.status || 'combining', message: statusData.error || 'Multi-track processing failed' };
 
-                    if (statusData.status === 'enhancing_tracks') {
-                        setPipelineStage('enhancing_tracks');
-                        if (statusData.progress) setPipelineProgress(statusData.progress);
-                    }
                     if (statusData.status === 'combining') { setPipelineStage('combining'); setPipelineProgress(null); }
                     if (statusData.status === 'uploading') setPipelineStage('uploading');
                     if (statusData.status === 'transcribing' && statusData.transcript_id) {
-                        tracksEnhancedRef.current = statusData.tracks_enhanced || false;
-                        console.log(`Multi-track ready: ${statusData.transcript_id}, enhanced=${tracksEnhancedRef.current}`, statusData.alignment);
+                        console.log(`Multi-track ready: ${statusData.transcript_id}`, statusData.alignment);
                         return statusData.transcript_id;
                     }
                 }
@@ -232,7 +227,7 @@
                 catch { return null; }
             };
 
-            const processOneEpisode = async (file, existingTranscriptId, skipEnhance = false) => {
+            const processOneEpisode = async (file, existingTranscriptId, isMultitrack = false) => {
                 setPipelineError(null);
 
                 let transcript_id, filename;
@@ -283,7 +278,7 @@
                     filename,
                     preset,
                     customInstructions,
-                    isMultitrack: skipEnhance,
+                    isMultitrack: isMultitrack,
                 });
 
                 for (let analysisAttempt = 0; analysisAttempt < 3; analysisAttempt++) {
@@ -338,8 +333,8 @@
                 editFormData.append('cuts', JSON.stringify(cuts));
                 editFormData.append('preset', resolvedPreset);
                 editFormData.append('enhance_mix', JSON.stringify(enhanceMix));
-                console.log(`edit-audio: skipEnhance=${skipEnhance}, transcript_id=${transcript_id}`);
-                if (skipEnhance) editFormData.append('skip_enhance', 'true');
+                console.log(`edit-audio: isMultitrack=${isMultitrack}, transcript_id=${transcript_id}`);
+                if (isMultitrack) editFormData.append('is_multitrack', 'true');
                 if (introFile) editFormData.append('intro', introFile);
                 if (outroFile) editFormData.append('outro', outroFile);
                 const editRes = await fetch(`${API_URL}/api/edit-audio`, {
@@ -360,10 +355,12 @@
                     if (statusRes.status === 404) throw { stage: 'cutting', message: 'Server restarted during processing. Please retry.' };
                     const statusData = await safeJson(statusRes);
                     if (!statusData) continue;
-                    if (statusData.status === 'cutting')         setPipelineStage('cutting');
-                    if (statusData.status === 'merging')         setPipelineStage('merging');
-                    if (statusData.status === 'enhancing')       setPipelineStage('enhancing');
-                    if (statusData.status === 'finalizing')      setPipelineStage('finalizing');
+                    if (statusData.status === 'cutting')           setPipelineStage('cutting');
+                    if (statusData.status === 'enhancing_tracks') { setPipelineStage('enhancing_tracks'); if (statusData.progress) setPipelineProgress(statusData.progress); }
+                    if (statusData.status === 'combining')        { setPipelineStage('combining_final'); setPipelineProgress(null); }
+                    if (statusData.status === 'merging')           setPipelineStage('merging');
+                    if (statusData.status === 'enhancing')         setPipelineStage('enhancing');
+                    if (statusData.status === 'finalizing')        setPipelineStage('finalizing');
                     if (statusData.status === 'cuts_completed')  break;
                     if (statusData.status === 'completed') {
                         autoEnhanced = true;
@@ -396,19 +393,12 @@
 
                 try {
                     if (isMulti) {
-                        // Multi-track: enhance per-track, combine, then process as single episode
+                        // Multi-track: combine raw → transcribe → analyse → per-track cuts → per-track enhance → combine → finalize
                         const multiFilename = tracks.map(t => t.label).join(' + ');
                         setBatchResults([{ filename: multiFilename, status: 'processing' }]);
                         const transcriptId = await uploadMultiTrack();
-                        const result = await processOneEpisode(null, transcriptId, tracksEnhancedRef.current);
-                        if (result.autoEnhanced) {
-                            setBatchResults([{ filename: multiFilename, status: 'completed', downloadBlob: result.blob, transcriptId: result.transcriptId }]);
-                        } else {
-                            setBatchResults([{ filename: multiFilename, status: 'needs_enhance', transcriptId: result.transcriptId, editJobId: result.editJobId }]);
-                            setPipelineStage('done');
-                            setScreen('enhance');
-                            return;
-                        }
+                        const result = await processOneEpisode(null, transcriptId, true);
+                        setBatchResults([{ filename: multiFilename, status: 'completed', downloadBlob: result.blob, transcriptId: result.transcriptId }]);
                         setPipelineStage('done');
                         setScreen('download');
                         return;
@@ -661,7 +651,6 @@
                 downloadBlobRef.current = null;
                 transcriptIdRef.current = null;
                 editJobIdRef.current = null;
-                tracksEnhancedRef.current = false;
             };
 
             // --- Render ---
@@ -1004,7 +993,7 @@
                                 <div className="space-y-2">
                                     {STAGES.filter(s => {
                                         if (uploadMode === 'multi') return s.key !== 'enhancing';
-                                        return s.key !== 'combining' && s.key !== 'enhancing_tracks';
+                                        return s.key !== 'combining' && s.key !== 'enhancing_tracks' && s.key !== 'combining_final';
                                     }).map((stage, i, filteredStages) => {
                                         const currentIdx = filteredStages.findIndex(s => s.key === pipelineStage);
                                         const failedStage = pipelineError && pipelineError.stage === stage.key;

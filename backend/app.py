@@ -62,9 +62,9 @@ _jobs: dict = {}
 _jobs_lock = threading.Lock()
 _edit_jobs: dict = {}
 _edit_jobs_lock = threading.Lock()
-# Track which transcript_ids had pre-enhanced tracks (survives within same process)
-_pre_enhanced: set = set()
-_pre_enhanced_lock = threading.Lock()
+# Multi-track metadata: preserved between upload and edit phases for per-track cutting
+_multitrack_meta: dict = {}  # transcript_id → {track_paths, labels, enhance_mixes, alignment_info}
+_multitrack_meta_lock = threading.Lock()
 
 
 def allowed_file(filename):
@@ -826,39 +826,16 @@ def _combine_tracks(track_paths, labels=None):
 
 
 def _run_multitrack_job(job_id, track_paths, labels, enhance_mixes):
-    """Background thread: optionally enhance each track, combine, upload to AssemblyAI."""
+    """Background thread: combine raw tracks, upload to AssemblyAI, preserve tracks for per-track cutting later."""
     try:
         n = len(track_paths)
-        enhanced_paths = list(track_paths)
-        tracks_enhanced = False
+        print(f"Multitrack job {job_id}: {n} tracks")
 
-        # Per-track Adobe enhancement (if token available)
-        has_token = bool(get_adobe_token())
-        print(f"Multitrack job {job_id}: {n} tracks, adobe_token={has_token}")
-        if has_token:
-            with _edit_jobs_lock:
-                _edit_jobs[job_id]['status'] = 'enhancing_tracks'
-            # Log original track durations for drift diagnosis
-            orig_durations = [_get_track_duration(p) for p in track_paths]
-            print(f"Original track durations: {[f'{d:.3f}s' for d in orig_durations]}")
-            for i, path in enumerate(track_paths):
-                with _edit_jobs_lock:
-                    _edit_jobs[job_id]['progress'] = f'Enhancing track {i + 1} of {n}'
-                mix = enhance_mixes[i] if i < len(enhance_mixes) else None
-                print(f"Enhancing track {i + 1}/{n}: {os.path.basename(path)}, mix={mix}")
-                enhanced_paths[i] = process_with_adobe_enhance(path, enhance_mix=mix)
-            # Log enhanced track durations — drift shows up as different duration changes
-            enh_durations = [_get_track_duration(p) for p in enhanced_paths]
-            for i in range(n):
-                delta = enh_durations[i] - orig_durations[i]
-                print(f"Track {i} duration: {orig_durations[i]:.3f}s → {enh_durations[i]:.3f}s (delta={delta:+.3f}s)")
-            tracks_enhanced = True
-
-        # Combine tracks
+        # Combine raw tracks for transcription
         with _edit_jobs_lock:
             _edit_jobs[job_id]['status'] = 'combining'
             _edit_jobs[job_id]['progress'] = 'Mixing tracks together'
-        combined_path, alignment_info = _combine_tracks(enhanced_paths, labels)
+        combined_path, alignment_info = _combine_tracks(track_paths, labels)
 
         # Upload to AssemblyAI
         with _edit_jobs_lock:
@@ -873,31 +850,23 @@ def _run_multitrack_job(job_id, track_paths, labels, enhance_mixes):
         final_path = f'/tmp/{transcript_id}.wav'
         os.rename(combined_path, final_path)
 
-        # Mark transcript as pre-enhanced (in-memory + file marker)
-        if tracks_enhanced:
-            with _pre_enhanced_lock:
-                _pre_enhanced.add(transcript_id)
-            with open(f'/tmp/{transcript_id}.pre_enhanced', 'w') as f:
-                f.write('1')
-            print(f"Marked {transcript_id} as pre-enhanced (memory + file)")
-
-        # Clean up temp files
-        for p in track_paths:
-            if os.path.exists(p):
-                os.remove(p)
-        if tracks_enhanced:
-            for p in enhanced_paths:
-                if p not in track_paths and os.path.exists(p):
-                    os.remove(p)
+        # Preserve raw track files and metadata for per-track cutting in edit phase
+        with _multitrack_meta_lock:
+            _multitrack_meta[transcript_id] = {
+                'track_paths': list(track_paths),
+                'labels': list(labels),
+                'enhance_mixes': list(enhance_mixes),
+                'alignment_info': alignment_info,
+            }
+        print(f"Stored multitrack meta for {transcript_id}: {n} tracks preserved")
 
         with _edit_jobs_lock:
             _edit_jobs[job_id]['status'] = 'transcribing'
             _edit_jobs[job_id]['transcript_id'] = transcript_id
-            _edit_jobs[job_id]['tracks_enhanced'] = tracks_enhanced
             _edit_jobs[job_id]['alignment'] = alignment_info
             _edit_jobs[job_id]['progress'] = 'Waiting for transcription'
 
-        print(f"Multitrack job {job_id} ready: transcript_id={transcript_id}, enhanced={tracks_enhanced}")
+        print(f"Multitrack job {job_id} ready: transcript_id={transcript_id}")
 
     except Exception as e:
         import traceback
@@ -907,6 +876,110 @@ def _run_multitrack_job(job_id, track_paths, labels, enhance_mixes):
                 os.remove(p)
         with _edit_jobs_lock:
             _edit_jobs[job_id] = {'status': 'error', 'error': str(e)}
+
+
+def _cleanup_multitrack_files(transcript_id):
+    """Clean up raw track files and multitrack metadata after editing."""
+    with _multitrack_meta_lock:
+        meta = _multitrack_meta.pop(transcript_id, None)
+    if meta:
+        for p in meta['track_paths']:
+            if os.path.exists(p):
+                os.remove(p)
+                print(f"Cleaned up: {p}")
+
+
+def _run_multitrack_edit_job(job_id, audio_path, cuts_ms, transcript_id,
+                              intro_path=None, outro_path=None):
+    """
+    Background thread: Option C multi-track edit pipeline.
+    Cut each raw track → enhance each → combine → merge intro/outro → finalize.
+    Requires ADOBE_ENHANCE_TOKEN — fails if not available.
+    """
+    current_step = 'cutting'
+    try:
+        # Load multitrack metadata
+        with _multitrack_meta_lock:
+            meta = _multitrack_meta.get(transcript_id)
+        if not meta:
+            raise Exception(f"No multitrack metadata found for {transcript_id}")
+
+        track_paths = meta['track_paths']
+        labels = meta['labels']
+        enhance_mixes = meta['enhance_mixes']
+        alignment_info = meta['alignment_info']
+        n = len(track_paths)
+        print(f"Multitrack edit {job_id}: {n} tracks, {len(cuts_ms)} cuts")
+
+        # Fetch word timestamps for smart cut snapping
+        words = None
+        if transcript_id:
+            try:
+                transcript_data = get_transcription(transcript_id)
+                words = transcript_data.get('words', [])
+                print(f"Fetched {len(words)} word timestamps for cut snapping")
+            except Exception as e:
+                print(f"Warning: could not fetch word timestamps: {e}")
+
+        # Step 1: Cut each raw track
+        with _edit_jobs_lock:
+            _edit_jobs[job_id]['status'] = 'cutting'
+        cut_track_paths = []
+        for i, track_path in enumerate(track_paths):
+            delay_ms = alignment_info[i].get('delay_ms', 0)
+            # Adjust cuts from combined timeline to track-local timeline
+            adjusted_cuts = [(max(0, s - delay_ms), max(0, e - delay_ms)) for s, e in cuts_ms]
+            adjusted_cuts = [(s, e) for s, e in adjusted_cuts if e > s]
+            print(f"Track {i} ({labels[i]}): delay={delay_ms}ms, {len(adjusted_cuts)} adjusted cuts")
+            cut_path = apply_audio_edits(track_path, adjusted_cuts, words=words)
+            cut_track_paths.append(cut_path)
+
+        # Step 2: Enhance each cut track
+        current_step = 'enhancing_tracks'
+        with _edit_jobs_lock:
+            _edit_jobs[job_id]['status'] = 'enhancing_tracks'
+        enhanced_cut_paths = []
+        for i, cut_path in enumerate(cut_track_paths):
+            with _edit_jobs_lock:
+                _edit_jobs[job_id]['progress'] = f'Enhancing track {i + 1} of {n}'
+            mix = enhance_mixes[i] if i < len(enhance_mixes) else None
+            print(f"Enhancing cut track {i + 1}/{n}: {os.path.basename(cut_path)}, mix={mix}")
+            enhanced_path = process_with_adobe_enhance(cut_path, enhance_mix=mix)
+            enhanced_cut_paths.append(enhanced_path)
+
+        # Step 3: Combine enhanced+cut tracks
+        current_step = 'combining'
+        with _edit_jobs_lock:
+            _edit_jobs[job_id]['status'] = 'combining'
+            _edit_jobs[job_id]['progress'] = 'Mixing enhanced tracks'
+        combined_path, _ = _combine_tracks(enhanced_cut_paths, labels)
+
+        # Step 4: Merge intro/outro if provided
+        if intro_path or outro_path:
+            current_step = 'merging'
+            with _edit_jobs_lock:
+                _edit_jobs[job_id]['status'] = 'merging'
+            combined_path = _concat_with_crossfade(combined_path, intro_path=intro_path, outro_path=outro_path)
+
+        # Step 5: Finalize
+        current_step = 'finalizing'
+        with _edit_jobs_lock:
+            _edit_jobs[job_id]['status'] = 'finalizing'
+        _finalize_audio(job_id, combined_path)
+
+        # Cleanup
+        _cleanup_multitrack_files(transcript_id)
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        _cleanup_multitrack_files(transcript_id)
+        with _edit_jobs_lock:
+            _edit_jobs[job_id] = {
+                'status': 'error',
+                'error': str(e),
+                'failed_step': current_step,
+            }
 
 
 # ============================================================================
@@ -1160,13 +1233,12 @@ def process_with_adobe_enhance(audio_path, enhance_mix=None):
 # ============================================================================
 
 def _run_edit_job(job_id, audio_path, cuts_ms, transcript_id=None,
-                  intro_path=None, outro_path=None, enhance_mix=None, skip_enhance=False):
+                  intro_path=None, outro_path=None, enhance_mix=None):
     """
     Background thread: apply cuts, optionally merge intro/outro, then either
     auto-enhance or stop for manual enhance.
     Pipeline: cuts → merge (if intro/outro) → Adobe enhance → finalize → completed
     Without token: cuts → merge → cuts_completed (user enhances manually)
-    With skip_enhance: cuts → merge → finalize (tracks already enhanced)
     """
     current_step = 'cutting'
     try:
@@ -1190,15 +1262,6 @@ def _run_edit_job(job_id, audio_path, cuts_ms, transcript_id=None,
             with _edit_jobs_lock:
                 _edit_jobs[job_id]['status'] = 'merging'
             wav_path = _concat_with_crossfade(wav_path, intro_path=intro_path, outro_path=outro_path)
-
-        # If tracks were pre-enhanced, skip post-cut enhancement
-        print(f"Edit job {job_id}: skip_enhance={skip_enhance}, has_token={bool(get_adobe_token())}")
-        if skip_enhance:
-            current_step = 'finalizing'
-            with _edit_jobs_lock:
-                _edit_jobs[job_id]['status'] = 'finalizing'
-            _finalize_audio(job_id, wav_path)
-            return
 
         # If no Adobe token, stop here for manual enhancement
         if not get_adobe_token():
@@ -1434,7 +1497,7 @@ def index():
     return jsonify({
         "status": "online",
         "service": "AI Podcast Editor API",
-        "version": "7.2.0",
+        "version": "8.0.0",
     })
 
 
@@ -1556,8 +1619,6 @@ def multitrack_status(job_id):
         result['progress'] = job['progress']
     if 'transcript_id' in job:
         result['transcript_id'] = job['transcript_id']
-    if 'tracks_enhanced' in job:
-        result['tracks_enhanced'] = job['tracks_enhanced']
     if 'alignment' in job:
         result['alignment'] = job['alignment']
     return jsonify(result)
@@ -1801,41 +1862,43 @@ def edit_audio():
                 outro_file.save(outro_path)
                 print(f"Outro saved: {outro_path} ({os.path.getsize(outro_path) // 1024}KB)")
 
-        # Parse optional Adobe enhance mix ratios
+        # Parse optional Adobe enhance mix ratios and multitrack flag
         enhance_mix = None
-        skip_enhance = False
+        is_multitrack = False
         if request.content_type and 'multipart' in request.content_type:
             enhance_mix_raw = request.form.get('enhance_mix')
-            skip_enhance = request.form.get('skip_enhance') == 'true'
+            is_multitrack = request.form.get('is_multitrack') == 'true'
         else:
             enhance_mix_raw = data.get('enhance_mix')
-            skip_enhance = data.get('skip_enhance', False)
-        # Server-side fallback: check in-memory set and marker file
-        if not skip_enhance:
-            with _pre_enhanced_lock:
-                if transcript_id in _pre_enhanced:
-                    skip_enhance = True
-                    print(f"skip_enhance set from in-memory set for {transcript_id}")
-        if not skip_enhance and os.path.exists(f'/tmp/{transcript_id}.pre_enhanced'):
-            skip_enhance = True
-            print(f"skip_enhance set from marker file for {transcript_id}")
+            is_multitrack = data.get('is_multitrack', False)
         if enhance_mix_raw:
             try:
                 enhance_mix = _json.loads(enhance_mix_raw) if isinstance(enhance_mix_raw, str) else enhance_mix_raw
             except Exception:
                 pass
 
-        print(f"Edit job: {len(cuts_ms)} cuts, intro={'yes' if intro_path else 'no'}, outro={'yes' if outro_path else 'no'}, mix={enhance_mix}, skip_enhance={skip_enhance}")
+        print(f"Edit job: {len(cuts_ms)} cuts, intro={'yes' if intro_path else 'no'}, outro={'yes' if outro_path else 'no'}, mix={enhance_mix}, is_multitrack={is_multitrack}")
 
         with _edit_jobs_lock:
             _edit_jobs[job_id] = {'status': 'pending'}
 
-        threading.Thread(
-            target=_run_edit_job,
-            args=(job_id, audio_path, cuts_ms, transcript_id),
-            kwargs={'intro_path': intro_path, 'outro_path': outro_path, 'enhance_mix': enhance_mix, 'skip_enhance': skip_enhance},
-            daemon=True,
-        ).start()
+        if is_multitrack:
+            # Multi-track: per-track cuts → per-track enhance → combine
+            if not get_adobe_token():
+                return jsonify({"error": "ADOBE_ENHANCE_TOKEN is required for multi-track editing"}), 400
+            threading.Thread(
+                target=_run_multitrack_edit_job,
+                args=(job_id, audio_path, cuts_ms, transcript_id),
+                kwargs={'intro_path': intro_path, 'outro_path': outro_path},
+                daemon=True,
+            ).start()
+        else:
+            threading.Thread(
+                target=_run_edit_job,
+                args=(job_id, audio_path, cuts_ms, transcript_id),
+                kwargs={'intro_path': intro_path, 'outro_path': outro_path, 'enhance_mix': enhance_mix},
+                daemon=True,
+            ).start()
 
         return jsonify({
             "success": True,
@@ -1860,8 +1923,11 @@ def edit_audio_status(job_id):
         return jsonify({"status": "cuts_completed"})
     if job['status'] == 'error':
         return jsonify({"error": job['error'], "failed_step": job.get('failed_step')}), 500
-    # merging, enhancing, finalizing, cutting, pending
-    return jsonify({"status": job['status']})
+    # merging, enhancing, enhancing_tracks, combining, finalizing, cutting, pending
+    result = {"status": job['status']}
+    if 'progress' in job:
+        result['progress'] = job['progress']
+    return jsonify(result)
 
 
 @app.route('/api/edit-audio-download/<job_id>', methods=['GET'])

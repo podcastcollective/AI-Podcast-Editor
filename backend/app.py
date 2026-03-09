@@ -934,7 +934,7 @@ def _run_multitrack_edit_job(job_id, audio_path, cuts_ms, transcript_id,
             cut_path = apply_audio_edits(track_path, adjusted_cuts, words=words)
             cut_track_paths.append(cut_path)
 
-        # Step 2: Enhance each cut track
+        # Step 2: Enhance each cut track, then normalize duration to prevent drift
         current_step = 'enhancing_tracks'
         with _edit_jobs_lock:
             _edit_jobs[job_id]['status'] = 'enhancing_tracks'
@@ -943,8 +943,30 @@ def _run_multitrack_edit_job(job_id, audio_path, cuts_ms, transcript_id,
             with _edit_jobs_lock:
                 _edit_jobs[job_id]['progress'] = f'Enhancing track {i + 1} of {n}'
             mix = enhance_mixes[i] if i < len(enhance_mixes) else None
-            print(f"Enhancing cut track {i + 1}/{n}: {os.path.basename(cut_path)}, mix={mix}")
+            orig_dur = _get_track_duration(cut_path)
+            print(f"Enhancing cut track {i + 1}/{n}: {os.path.basename(cut_path)}, mix={mix}, dur={orig_dur:.3f}s")
             enhanced_path = process_with_adobe_enhance(cut_path, enhance_mix=mix)
+            # Adobe enhancement changes track duration slightly differently per track.
+            # This causes inter-track drift when combined. Fix: use atempo to restore
+            # each track to its pre-enhancement duration. The adjustment is typically
+            # <1%, so the tempo change is imperceptible.
+            enh_dur = _get_track_duration(enhanced_path)
+            drift_ms = abs(enh_dur - orig_dur) * 1000
+            if drift_ms > 50:  # >50ms difference — worth correcting
+                ratio = enh_dur / orig_dur
+                normalized_path = enhanced_path.rsplit('.', 1)[0] + '_normalized.wav'
+                norm_result = subprocess.run(
+                    ['ffmpeg', '-y', '-i', enhanced_path, '-af', f'atempo={ratio}',
+                     '-f', 'wav', normalized_path],
+                    capture_output=True, text=True, timeout=600,
+                )
+                if norm_result.returncode == 0:
+                    print(f"Track {i}: duration {orig_dur:.3f}s → {enh_dur:.3f}s (drift={drift_ms:.0f}ms), normalized with atempo={ratio:.6f}")
+                    enhanced_path = normalized_path
+                else:
+                    print(f"Track {i}: atempo normalization failed, using raw enhanced (drift={drift_ms:.0f}ms)")
+            else:
+                print(f"Track {i}: duration {orig_dur:.3f}s → {enh_dur:.3f}s (drift={drift_ms:.0f}ms, within tolerance)")
             enhanced_cut_paths.append(enhanced_path)
 
         # Step 3: Combine enhanced+cut tracks

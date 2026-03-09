@@ -288,12 +288,17 @@ def _find_pauses(words, min_ms=1000):
         gap_end = words[i + 1].get('start', 0)
         gap_ms = gap_end - gap_start
         if gap_ms >= min_ms:
+            speaker_before = words[i].get('speaker', '?')
+            speaker_after = words[i + 1].get('speaker', '?')
             pauses.append({
                 'start_ms': gap_start,
                 'end_ms': gap_end,
                 'duration_ms': gap_ms,
                 'before': words[i].get('text', ''),
                 'after': words[i + 1].get('text', ''),
+                'speaker_before': speaker_before,
+                'speaker_after': speaker_after,
+                'speaker_change': speaker_before != speaker_after,
             })
     return pauses
 
@@ -306,7 +311,7 @@ def format_timestamp(milliseconds):
     return f"{hours:02d}:{minutes:02d}:{secs:02d}"
 
 
-def analyze_transcript_with_claude(transcript_data, preset_cfg, custom_instructions=""):
+def analyze_transcript_with_claude(transcript_data, preset_cfg, custom_instructions="", is_multitrack=False):
     """Pre-detect fillers/pauses, then ask Claude for editorial decisions."""
     print("Analyzing transcript with Claude...")
     client = anthropic.Anthropic(api_key=CLAUDE_API_KEY)
@@ -335,10 +340,12 @@ def analyze_transcript_with_claude(transcript_data, preset_cfg, custom_instructi
     pause_min_ms = preset_cfg.get('pause_min_ms', 2000)
     pause_target_ms = preset_cfg.get('pause_target_ms', 800)
     pauses = _find_pauses(words, min_ms=pause_min_ms) if remove_pauses else []
-    pause_lines = [
-        f'{p["start_ms"]} {p["end_ms"]} {p["duration_ms"]}ms  ("{p["before"]}" \u2192 "{p["after"]}")'
-        for p in pauses[:100]
-    ]
+    pause_lines = []
+    for p in pauses[:100]:
+        line = f'{p["start_ms"]} {p["end_ms"]} {p["duration_ms"]}ms  ("{p["before"]}" \u2192 "{p["after"]}")'
+        if is_multitrack and p.get('speaker_change'):
+            line += f'  [SPEAKER CHANGE: {p["speaker_before"]}\u2192{p["speaker_after"]}]'
+        pause_lines.append(line)
     pause_text = "\n".join(pause_lines) if pause_lines else "None detected"
 
     print(f"Pre-detected {len(fillers)} fillers, {len(pauses)} pauses")
@@ -379,7 +386,13 @@ PAUSE RULES:
 - Set start_ms = pause_start_ms + {pause_target_ms}, end_ms = pause_end_ms (keeps ~{pause_target_ms/1000:.1f}s of natural pause).
 - Trim ALL pauses in the list above \u2014 they have already been filtered by threshold, so every one should be trimmed.
 - Do NOT remove short, intentional pauses used for emphasis \u2014 only trim the clearly excessive ones.
-
+{"" if not is_multitrack else """
+MULTI-TRACK RULES (CRITICAL — this audio was mixed from separate speaker tracks):
+- SPEAKER TRANSITION PAUSES: When a pause occurs between two DIFFERENT speakers, do NOT trim it shorter than 1.5 seconds. Trimming speaker transitions too aggressively causes speakers to sound like they are talking over each other because each track contains background audio from the recording environment.
+- FILLER WORDS NEAR TRANSITIONS: Do NOT remove filler words that occur within 500ms of another speaker starting or stopping. These fillers overlap with the other speaker's audio on their track.
+- Be MORE CONSERVATIVE overall with pause trimming — it is far better to have a slightly longer pause than to create speaker overlap artifacts.
+- If a pause is between the SAME speaker's sentences, normal trimming rules apply.
+"""}
 CONTENT RULES:
 - STUTTERS: When the EXACT same word appears twice in a row (e.g. "so so", "part part", "just as just", "still there still"), remove the duplicate. These are speech disfluencies, not emphasis. This is the safest type of content cut.
 - FALSE STARTS: Only cut when a speaker clearly abandons a sentence and restarts it. You must be very confident the restart is cleaner. If in doubt, leave both.
@@ -1502,7 +1515,7 @@ def transcription_status(transcript_id):
         return jsonify({"error": str(e)}), 500
 
 
-def _run_analysis_job(job_id, transcript_data, filename, preset_name, transcript_id, custom_instructions):
+def _run_analysis_job(job_id, transcript_data, filename, preset_name, transcript_id, custom_instructions, is_multitrack=False):
     """Background thread: auto-detect preset if needed, then run Claude analysis."""
     try:
         detected_preset = None
@@ -1531,7 +1544,7 @@ def _run_analysis_job(job_id, transcript_data, filename, preset_name, transcript
         with _jobs_lock:
             _jobs[job_id]['status'] = 'analyzing'
 
-        edit_analysis = analyze_transcript_with_claude(transcript_data, preset_cfg, custom_instructions)
+        edit_analysis = analyze_transcript_with_claude(transcript_data, preset_cfg, custom_instructions, is_multitrack=is_multitrack)
         report = generate_edit_report(filename, transcript_data, edit_analysis, preset_cfg)
         cuts_count = sum(1 for d in edit_analysis['edit_decisions'] if 'start_ms' in d and 'end_ms' in d)
 
@@ -1584,6 +1597,7 @@ def process_podcast():
         filename = data.get('filename', 'episode')
         preset_name = data.get('preset', 'auto')
         custom_instructions = data.get('customInstructions', '')
+        is_multitrack = data.get('isMultitrack', False)
 
         if not transcript_id:
             return jsonify({"error": "No transcript_id provided"}), 400
@@ -1601,7 +1615,7 @@ def process_podcast():
 
         threading.Thread(
             target=_run_analysis_job,
-            args=(job_id, transcript_data, filename, preset_name, transcript_id, custom_instructions),
+            args=(job_id, transcript_data, filename, preset_name, transcript_id, custom_instructions, is_multitrack),
             daemon=True,
         ).start()
 

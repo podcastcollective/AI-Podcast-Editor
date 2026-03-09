@@ -75,8 +75,6 @@
             { key: 'transcribing',      label: 'Transcribing with AssemblyAI' },
             { key: 'detecting',         label: 'Detecting preset...' },
             { key: 'analyzing',         label: 'Analysing with Claude AI' },
-            { key: 'enhancing_tracks',  label: 'Enhancing individual tracks' },
-            { key: 'combining_final',   label: 'Mixing enhanced tracks' },
             { key: 'cutting',           label: 'Applying edits' },
             { key: 'merging',           label: 'Merging intro & outro' },
             { key: 'enhancing',         label: 'Enhancing with Adobe Enhance Speech' },
@@ -356,8 +354,6 @@
                     const statusData = await safeJson(statusRes);
                     if (!statusData) continue;
                     if (statusData.status === 'cutting')           setPipelineStage('cutting');
-                    if (statusData.status === 'enhancing_tracks') { setPipelineStage('enhancing_tracks'); if (statusData.progress) setPipelineProgress(statusData.progress); }
-                    if (statusData.status === 'combining')        { setPipelineStage('combining_final'); setPipelineProgress(null); }
                     if (statusData.status === 'merging')           setPipelineStage('merging');
                     if (statusData.status === 'enhancing')         setPipelineStage('enhancing');
                     if (statusData.status === 'finalizing')        setPipelineStage('finalizing');
@@ -393,7 +389,7 @@
 
                 try {
                     if (isMulti) {
-                        // Multi-track: combine raw → transcribe → analyse → per-track cuts → per-track enhance → combine → finalize
+                        // Multi-track: combine raw → transcribe → analyse → cut → enhance → finalize
                         const multiFilename = tracks.map(t => t.label).join(' + ');
                         setBatchResults([{ filename: multiFilename, status: 'processing' }]);
                         const transcriptId = await uploadMultiTrack();
@@ -992,8 +988,7 @@
 
                                 <div className="space-y-2">
                                     {STAGES.filter(s => {
-                                        if (uploadMode === 'multi') return s.key !== 'enhancing';
-                                        return s.key !== 'combining' && s.key !== 'enhancing_tracks' && s.key !== 'combining_final';
+                                        return s.key !== 'combining' || uploadMode === 'multi';
                                     }).map((stage, i, filteredStages) => {
                                         const currentIdx = filteredStages.findIndex(s => s.key === pipelineStage);
                                         const failedStage = pipelineError && pipelineError.stage === stage.key;
@@ -1028,9 +1023,6 @@
                                                 <div className="shrink-0">{icon}</div>
                                                 <div>
                                                     <span className={`font-medium text-sm ${textColor}`}>{stage.label}</span>
-                                                    {active && pipelineProgress && stage.key === 'enhancing_tracks' && (
-                                                        <span className="block text-xs text-purple-300/70 mt-0.5">{pipelineProgress}</span>
-                                                    )}
                                                 </div>
                                             </div>
                                         );

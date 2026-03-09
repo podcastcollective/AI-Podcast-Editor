@@ -62,8 +62,8 @@ _jobs: dict = {}
 _jobs_lock = threading.Lock()
 _edit_jobs: dict = {}
 _edit_jobs_lock = threading.Lock()
-# Multi-track metadata: preserved between upload and edit phases for per-track cutting
-_multitrack_meta: dict = {}  # transcript_id → {track_paths, labels, enhance_mixes, alignment_info}
+# Multi-track metadata: tracks raw file paths for cleanup after editing
+_multitrack_meta: dict = {}  # transcript_id → {track_paths, ...}
 _multitrack_meta_lock = threading.Lock()
 
 
@@ -721,13 +721,12 @@ def _measure_loudness(audio_path):
     return -24.0, -1.0
 
 
-def _combine_tracks(track_paths, labels=None, forced_delays=None):
+def _combine_tracks(track_paths, labels=None):
     """
     Normalize levels, optionally align, and mix multiple audio tracks into WAV.
     Only aligns when track durations differ by >2s (different recording start
     times). Same-duration tracks are assumed to be from the same session and
     are mixed as-is.
-    forced_delays: list of ms delays per track — skips auto-alignment when provided.
     Returns (combined_path, alignment_info).
     """
     n = len(track_paths)
@@ -736,29 +735,20 @@ def _combine_tracks(track_paths, labels=None, forced_delays=None):
 
     durations = [_get_track_duration(p) for p in track_paths]
 
-    if forced_delays is not None:
-        # Use provided delays (e.g. from original alignment) — skip auto-detection
-        delays = list(forced_delays)
-        onsets = [0] * n
-        needs_alignment = any(d > 0 for d in delays)
-        print(f"Track durations: {[f'{d:.1f}s' for d in durations]}, "
-              f"alignment=forced (delays={delays})")
-    else:
-        # Auto-detect alignment
-        duration_spread = max(durations) - min(durations)
-        needs_alignment = duration_spread > 2.0
-        print(f"Track durations: {[f'{d:.1f}s' for d in durations]}, "
-              f"spread={duration_spread:.1f}s, alignment={'yes' if needs_alignment else 'no (same session)'}")
+    duration_spread = max(durations) - min(durations)
+    needs_alignment = duration_spread > 2.0
+    print(f"Track durations: {[f'{d:.1f}s' for d in durations]}, "
+          f"spread={duration_spread:.1f}s, alignment={'yes' if needs_alignment else 'no (same session)'}")
 
-        onsets = []
-        delays = []
-        if needs_alignment:
-            onsets = [_detect_speech_onset(p) for p in track_paths]
-            max_onset = max(onsets)
-            delays = [max_onset - onset for onset in onsets]
-        else:
-            onsets = [0] * n
-            delays = [0] * n
+    onsets = []
+    delays = []
+    if needs_alignment:
+        onsets = [_detect_speech_onset(p) for p in track_paths]
+        max_onset = max(onsets)
+        delays = [max_onset - onset for onset in onsets]
+    else:
+        onsets = [0] * n
+        delays = [0] * n
 
     alignment_info = []
     for i in range(n):
@@ -835,131 +825,10 @@ def _combine_tracks(track_paths, labels=None, forced_delays=None):
     return combined_path, alignment_info
 
 
-# ============================================================================
-# CROSSTALK SUPPRESSION — silence other speakers before Adobe enhancement
-# ============================================================================
-
-def _measure_rms_at(track_path, start_s, duration_s=0.5):
-    """Measure mean RMS volume at a specific point in a track."""
-    result = subprocess.run(
-        ['ffmpeg', '-v', 'error', '-i', track_path,
-         '-ss', str(start_s), '-t', str(duration_s),
-         '-af', 'volumedetect', '-f', 'null', '-'],
-        capture_output=True, text=True, timeout=30,
-    )
-    for line in result.stderr.split('\n'):
-        m = re.search(r'mean_volume:\s*([-\d.]+)', line)
-        if m:
-            return float(m.group(1))
-    return -99.0
-
-
-def _map_speakers_to_tracks(track_paths, words, alignment_info):
-    """
-    Auto-detect which AssemblyAI speaker corresponds to which track
-    by measuring which track is loudest during each speaker's words.
-    Returns dict: {speaker_label: track_index} or None if mapping fails.
-    """
-    speakers = sorted(set(w.get('speaker', '?') for w in words if w.get('speaker')))
-    n_tracks = len(track_paths)
-    if len(speakers) < 2 or len(speakers) > n_tracks:
-        print(f"Speaker mapping: {len(speakers)} speakers, {n_tracks} tracks — skipping")
-        return None
-
-    # Sample up to 5 substantial words per speaker for volume comparison
-    speaker_words = {s: [] for s in speakers}
-    for w in words:
-        s = w.get('speaker')
-        if s and len(speaker_words.get(s, [])) < 5:
-            dur_ms = w.get('end', 0) - w.get('start', 0)
-            if dur_ms > 200:
-                speaker_words[s].append(w)
-
-    mapping = {}
-    for speaker in speakers:
-        samples = speaker_words[speaker]
-        if not samples:
-            continue
-        track_vols = []
-        for ti, track_path in enumerate(track_paths):
-            delay_ms = alignment_info[ti].get('delay_ms', 0)
-            volumes = []
-            for w in samples:
-                start_s = max(0, (w.get('start', 0) - delay_ms) / 1000.0)
-                dur_s = max(0.2, (w.get('end', 0) - w.get('start', 0)) / 1000.0)
-                vol = _measure_rms_at(track_path, start_s, dur_s)
-                volumes.append(vol)
-            avg = sum(volumes) / len(volumes) if volumes else -99
-            track_vols.append(avg)
-        loudest = track_vols.index(max(track_vols))
-        mapping[speaker] = loudest
-        print(f"Speaker {speaker} → Track {loudest} (avg dB: {[f'{v:.1f}' for v in track_vols]})")
-
-    if len(set(mapping.values())) != len(mapping):
-        print("Speaker-track mapping not 1:1, skipping crosstalk suppression")
-        return None
-    return mapping
-
-
-def _apply_crosstalk_gate(track_path, words, own_speaker, delay_ms, pad_ms=150):
-    """
-    Silence regions on a track where other speakers are talking.
-    Uses transcription word timestamps to identify own-speaker segments,
-    then mutes everything else (crosstalk from headphones/room).
-
-    pad_ms: padding around each word to catch natural speech transitions.
-    """
-    keep_ranges = []
-    for w in words:
-        if w.get('speaker') == own_speaker:
-            ws = max(0, (w.get('start', 0) - delay_ms - pad_ms)) / 1000.0
-            we = max(0, (w.get('end', 0) - delay_ms + pad_ms)) / 1000.0
-            if we > ws:
-                keep_ranges.append((ws, we))
-    if not keep_ranges:
-        print(f"No keep ranges for speaker {own_speaker}, skipping gate")
-        return track_path
-
-    # Merge overlapping ranges
-    keep_ranges.sort()
-    merged = []
-    for s, e in keep_ranges:
-        if merged and s <= merged[-1][1]:
-            merged[-1] = (merged[-1][0], max(merged[-1][1], e))
-        else:
-            merged.append((s, e))
-
-    # Build ffmpeg filter: mute everything EXCEPT keep ranges
-    between_parts = [f'between(t,{s:.3f},{e:.3f})' for s, e in merged]
-    keep_expr = '+'.join(between_parts)
-    filter_str = f"volume=0:enable='not({keep_expr})'"
-
-    gated_path = track_path.rsplit('.', 1)[0] + '_gated.wav'
-    filter_path = track_path + '_gate_filter.txt'
-    try:
-        with open(filter_path, 'w') as f:
-            f.write(filter_str)
-        result = subprocess.run(
-            ['ffmpeg', '-y', '-i', track_path,
-             '-filter_script:a', filter_path,
-             '-f', 'wav', gated_path],
-            capture_output=True, text=True, timeout=600,
-        )
-        if result.returncode != 0:
-            print(f"Crosstalk gate failed: {result.stderr[-300:]}")
-            return track_path
-    finally:
-        if os.path.exists(filter_path):
-            os.remove(filter_path)
-
-    size_kb = os.path.getsize(gated_path) // 1024
-    print(f"Crosstalk gate: {len(merged)} keep ranges for speaker {own_speaker}, "
-          f"{os.path.basename(gated_path)} ({size_kb}KB)")
-    return gated_path
 
 
 def _run_multitrack_job(job_id, track_paths, labels, enhance_mixes):
-    """Background thread: combine raw tracks, upload to AssemblyAI, preserve tracks for per-track cutting later."""
+    """Background thread: combine raw tracks, upload to AssemblyAI, preserve track paths for cleanup."""
     try:
         n = len(track_paths)
         print(f"Multitrack job {job_id}: {n} tracks")
@@ -983,13 +852,10 @@ def _run_multitrack_job(job_id, track_paths, labels, enhance_mixes):
         final_path = f'/tmp/{transcript_id}.wav'
         os.rename(combined_path, final_path)
 
-        # Preserve raw track files and metadata for per-track cutting in edit phase
+        # Preserve raw track paths for cleanup after editing
         with _multitrack_meta_lock:
             _multitrack_meta[transcript_id] = {
                 'track_paths': list(track_paths),
-                'labels': list(labels),
-                'enhance_mixes': list(enhance_mixes),
-                'alignment_info': alignment_info,
             }
         print(f"Stored multitrack meta for {transcript_id}: {n} tracks preserved")
 
@@ -1020,125 +886,6 @@ def _cleanup_multitrack_files(transcript_id):
             if os.path.exists(p):
                 os.remove(p)
                 print(f"Cleaned up: {p}")
-
-
-def _run_multitrack_edit_job(job_id, audio_path, cuts_ms, transcript_id,
-                              intro_path=None, outro_path=None):
-    """
-    Background thread: multi-track edit pipeline.
-    Gate crosstalk → enhance each → normalize duration → recombine → cut combined → finalize.
-    Cuts are applied to the recombined audio (not per-track) so alignment is preserved.
-    Requires ADOBE_ENHANCE_TOKEN — fails if not available.
-    """
-    current_step = 'enhancing_tracks'
-    try:
-        # Load multitrack metadata
-        with _multitrack_meta_lock:
-            meta = _multitrack_meta.get(transcript_id)
-        if not meta:
-            raise Exception(f"No multitrack metadata found for {transcript_id}")
-
-        track_paths = meta['track_paths']
-        labels = meta['labels']
-        enhance_mixes = meta['enhance_mixes']
-        alignment_info = meta['alignment_info']
-        n = len(track_paths)
-        original_delays = [info.get('delay_ms', 0) for info in alignment_info]
-        print(f"Multitrack edit {job_id}: {n} tracks, {len(cuts_ms)} cuts, delays={original_delays}")
-
-        # Fetch word timestamps for crosstalk gating and cut snapping
-        words = None
-        transcript_data = get_transcription(transcript_id)
-        words = transcript_data.get('words', [])
-        print(f"Fetched {len(words)} word timestamps")
-
-        # Map speakers to tracks for crosstalk suppression
-        speaker_map = _map_speakers_to_tracks(track_paths, words, alignment_info)
-        if speaker_map:
-            print(f"Speaker mapping: {speaker_map}")
-
-        # Step 1: Gate crosstalk + enhance each track + normalize duration
-        with _edit_jobs_lock:
-            _edit_jobs[job_id]['status'] = 'enhancing_tracks'
-        enhanced_paths = []
-        for i, track_path in enumerate(track_paths):
-            with _edit_jobs_lock:
-                _edit_jobs[job_id]['progress'] = f'Processing track {i + 1} of {n}'
-            delay_ms = original_delays[i]
-
-            # Suppress crosstalk before enhancement
-            process_path = track_path
-            if speaker_map and words:
-                own_speaker = next((s for s, ti in speaker_map.items() if ti == i), None)
-                if own_speaker:
-                    print(f"Gating Track {i} ({labels[i]}): keeping speaker {own_speaker}")
-                    process_path = _apply_crosstalk_gate(track_path, words, own_speaker, delay_ms)
-
-            # Enhance with Adobe
-            orig_dur = _get_track_duration(process_path)
-            mix = enhance_mixes[i] if i < len(enhance_mixes) else None
-            print(f"Enhancing track {i + 1}/{n}: {os.path.basename(process_path)}, mix={mix}, dur={orig_dur:.3f}s")
-            enhanced_path = process_with_adobe_enhance(process_path, enhance_mix=mix)
-
-            # Normalize duration back to pre-enhancement length to prevent drift
-            enh_dur = _get_track_duration(enhanced_path)
-            drift_ms = abs(enh_dur - orig_dur) * 1000
-            if drift_ms > 50:
-                ratio = enh_dur / orig_dur
-                normalized_path = enhanced_path.rsplit('.', 1)[0] + '_normalized.wav'
-                norm_result = subprocess.run(
-                    ['ffmpeg', '-y', '-i', enhanced_path, '-af', f'atempo={ratio}',
-                     '-f', 'wav', normalized_path],
-                    capture_output=True, text=True, timeout=600,
-                )
-                if norm_result.returncode == 0:
-                    print(f"Track {i}: {orig_dur:.3f}s → {enh_dur:.3f}s (drift={drift_ms:.0f}ms), normalized")
-                    enhanced_path = normalized_path
-                else:
-                    print(f"Track {i}: atempo failed, drift={drift_ms:.0f}ms")
-            else:
-                print(f"Track {i}: {orig_dur:.3f}s → {enh_dur:.3f}s (drift={drift_ms:.0f}ms, OK)")
-            enhanced_paths.append(enhanced_path)
-
-        # Step 2: Recombine enhanced tracks using original alignment delays
-        current_step = 'combining'
-        with _edit_jobs_lock:
-            _edit_jobs[job_id]['status'] = 'combining'
-            _edit_jobs[job_id]['progress'] = 'Mixing enhanced tracks'
-        combined_path, _ = _combine_tracks(enhanced_paths, labels, forced_delays=original_delays)
-
-        # Step 3: Apply cuts to the combined audio (single set of cuts = perfect alignment)
-        current_step = 'cutting'
-        with _edit_jobs_lock:
-            _edit_jobs[job_id]['status'] = 'cutting'
-        wav_path = apply_audio_edits(combined_path, cuts_ms, words=words)
-
-        # Step 4: Merge intro/outro if provided
-        if intro_path or outro_path:
-            current_step = 'merging'
-            with _edit_jobs_lock:
-                _edit_jobs[job_id]['status'] = 'merging'
-            wav_path = _concat_with_crossfade(wav_path, intro_path=intro_path, outro_path=outro_path)
-
-        # Step 5: Finalize
-        current_step = 'finalizing'
-        with _edit_jobs_lock:
-            _edit_jobs[job_id]['status'] = 'finalizing'
-        _finalize_audio(job_id, wav_path)
-
-        # Cleanup
-        _cleanup_multitrack_files(transcript_id)
-
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        _cleanup_multitrack_files(transcript_id)
-        with _edit_jobs_lock:
-            _edit_jobs[job_id] = {
-                'status': 'error',
-                'error': str(e),
-                'failed_step': current_step,
-            }
 
 
 # ============================================================================
@@ -1442,9 +1189,15 @@ def _run_edit_job(job_id, audio_path, cuts_ms, transcript_id=None,
             _edit_jobs[job_id]['status'] = 'finalizing'
         _finalize_audio(job_id, enhanced_path)
 
+        # Clean up raw multi-track files if this was a multi-track job
+        if transcript_id:
+            _cleanup_multitrack_files(transcript_id)
+
     except Exception as e:
         import traceback
         traceback.print_exc()
+        if transcript_id:
+            _cleanup_multitrack_files(transcript_id)
         with _edit_jobs_lock:
             _edit_jobs[job_id] = {
                 'status': 'error',
@@ -2041,23 +1794,17 @@ def edit_audio():
         with _edit_jobs_lock:
             _edit_jobs[job_id] = {'status': 'pending'}
 
-        if is_multitrack:
-            # Multi-track: per-track cuts → per-track enhance → combine
-            if not get_adobe_token():
-                return jsonify({"error": "ADOBE_ENHANCE_TOKEN is required for multi-track editing"}), 400
-            threading.Thread(
-                target=_run_multitrack_edit_job,
-                args=(job_id, audio_path, cuts_ms, transcript_id),
-                kwargs={'intro_path': intro_path, 'outro_path': outro_path},
-                daemon=True,
-            ).start()
-        else:
-            threading.Thread(
-                target=_run_edit_job,
-                args=(job_id, audio_path, cuts_ms, transcript_id),
-                kwargs={'intro_path': intro_path, 'outro_path': outro_path, 'enhance_mix': enhance_mix},
-                daemon=True,
-            ).start()
+        if is_multitrack and not get_adobe_token():
+            return jsonify({"error": "ADOBE_ENHANCE_TOKEN is required for multi-track editing"}), 400
+
+        # Multi-track and single-track both use the same pipeline: cut → enhance → finalize.
+        # Multi-track audio is already combined during upload, so it's just a single file.
+        threading.Thread(
+            target=_run_edit_job,
+            args=(job_id, audio_path, cuts_ms, transcript_id),
+            kwargs={'intro_path': intro_path, 'outro_path': outro_path, 'enhance_mix': enhance_mix},
+            daemon=True,
+        ).start()
 
         return jsonify({
             "success": True,
@@ -2082,7 +1829,7 @@ def edit_audio_status(job_id):
         return jsonify({"status": "cuts_completed"})
     if job['status'] == 'error':
         return jsonify({"error": job['error'], "failed_step": job.get('failed_step')}), 500
-    # merging, enhancing, enhancing_tracks, combining, finalizing, cutting, pending
+    # merging, enhancing, finalizing, cutting, pending
     result = {"status": job['status']}
     if 'progress' in job:
         result['progress'] = job['progress']

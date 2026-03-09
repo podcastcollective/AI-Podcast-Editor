@@ -778,8 +778,10 @@ def _combine_tracks(track_paths, labels=None):
         gains.append(gain)
 
     # Build ffmpeg filter_complex
-    # Per-track: normalize format → volume gain → optional delay → pad to equal length
-    # Padding prevents ffmpeg amix assertion crash when streams end at different times
+    # Per-track: normalize format → volume gain → noise gate → optional delay → pad
+    # Noise gate silences bleed/crosstalk when a track is inactive. Without this,
+    # Adobe Enhancement boosts faint crosstalk, creating echo when tracks are mixed.
+    # Padding prevents ffmpeg amix assertion crash when streams end at different times.
     max_dur_s = max(durations[i] + delays[i] / 1000 for i in range(n))
     filter_parts = []
     for i in range(n):
@@ -788,6 +790,9 @@ def _combine_tracks(track_paths, labels=None):
         if abs(gain_db) > 0.5:
             chain += f',volume={gain_db:.1f}dB'
             print(f"Track {i}: applying {gain_db:+.1f}dB gain ({measurements[i][0]:.1f} LUFS, peak {measurements[i][1]:.1f} dBTP)")
+        # Noise gate: threshold=-45dB (below speech, above bleed), 10ms attack,
+        # 250ms release (smooth), range=-40dB (heavy reduction when gated)
+        chain += ',agate=threshold=0.006:attack=10:release=250:range=0.01'
         if delays[i] > 0:
             d = delays[i]
             chain += f',adelay={d}|{d}'

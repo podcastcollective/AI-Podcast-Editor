@@ -721,34 +721,44 @@ def _measure_loudness(audio_path):
     return -24.0, -1.0
 
 
-def _combine_tracks(track_paths, labels=None):
+def _combine_tracks(track_paths, labels=None, forced_delays=None):
     """
     Normalize levels, optionally align, and mix multiple audio tracks into WAV.
     Only aligns when track durations differ by >2s (different recording start
     times). Same-duration tracks are assumed to be from the same session and
     are mixed as-is.
+    forced_delays: list of ms delays per track — skips auto-alignment when provided.
     Returns (combined_path, alignment_info).
     """
     n = len(track_paths)
     if n < 2:
         raise ValueError("Need at least 2 tracks to combine")
 
-    # Check if tracks need alignment (different start times vs same session)
     durations = [_get_track_duration(p) for p in track_paths]
-    duration_spread = max(durations) - min(durations)
-    needs_alignment = duration_spread > 2.0
-    print(f"Track durations: {[f'{d:.1f}s' for d in durations]}, "
-          f"spread={duration_spread:.1f}s, alignment={'yes' if needs_alignment else 'no (same session)'}")
 
-    onsets = []
-    delays = []
-    if needs_alignment:
-        onsets = [_detect_speech_onset(p) for p in track_paths]
-        max_onset = max(onsets)
-        delays = [max_onset - onset for onset in onsets]
-    else:
+    if forced_delays is not None:
+        # Use provided delays (e.g. from original alignment) — skip auto-detection
+        delays = list(forced_delays)
         onsets = [0] * n
-        delays = [0] * n
+        needs_alignment = any(d > 0 for d in delays)
+        print(f"Track durations: {[f'{d:.1f}s' for d in durations]}, "
+              f"alignment=forced (delays={delays})")
+    else:
+        # Auto-detect alignment
+        duration_spread = max(durations) - min(durations)
+        needs_alignment = duration_spread > 2.0
+        print(f"Track durations: {[f'{d:.1f}s' for d in durations]}, "
+              f"spread={duration_spread:.1f}s, alignment={'yes' if needs_alignment else 'no (same session)'}")
+
+        onsets = []
+        delays = []
+        if needs_alignment:
+            onsets = [_detect_speech_onset(p) for p in track_paths]
+            max_onset = max(onsets)
+            delays = [max_onset - onset for onset in onsets]
+        else:
+            onsets = [0] * n
+            delays = [0] * n
 
     alignment_info = []
     for i in range(n):
@@ -1015,11 +1025,12 @@ def _cleanup_multitrack_files(transcript_id):
 def _run_multitrack_edit_job(job_id, audio_path, cuts_ms, transcript_id,
                               intro_path=None, outro_path=None):
     """
-    Background thread: Option C multi-track edit pipeline.
-    Gate crosstalk → cut each track → enhance each → combine → merge → finalize.
+    Background thread: multi-track edit pipeline.
+    Gate crosstalk → enhance each → normalize duration → recombine → cut combined → finalize.
+    Cuts are applied to the recombined audio (not per-track) so alignment is preserved.
     Requires ADOBE_ENHANCE_TOKEN — fails if not available.
     """
-    current_step = 'cutting'
+    current_step = 'enhancing_tracks'
     try:
         # Load multitrack metadata
         with _multitrack_meta_lock:
@@ -1032,66 +1043,47 @@ def _run_multitrack_edit_job(job_id, audio_path, cuts_ms, transcript_id,
         enhance_mixes = meta['enhance_mixes']
         alignment_info = meta['alignment_info']
         n = len(track_paths)
-        print(f"Multitrack edit {job_id}: {n} tracks, {len(cuts_ms)} cuts")
+        original_delays = [info.get('delay_ms', 0) for info in alignment_info]
+        print(f"Multitrack edit {job_id}: {n} tracks, {len(cuts_ms)} cuts, delays={original_delays}")
 
         # Fetch word timestamps for crosstalk gating and cut snapping
         words = None
-        if transcript_id:
-            try:
-                transcript_data = get_transcription(transcript_id)
-                words = transcript_data.get('words', [])
-                print(f"Fetched {len(words)} word timestamps")
-            except Exception as e:
-                print(f"Warning: could not fetch word timestamps: {e}")
+        transcript_data = get_transcription(transcript_id)
+        words = transcript_data.get('words', [])
+        print(f"Fetched {len(words)} word timestamps")
 
-        # Step 0: Map speakers to tracks and suppress crosstalk
-        speaker_map = None
-        if words:
-            speaker_map = _map_speakers_to_tracks(track_paths, words, alignment_info)
-            if speaker_map:
-                print(f"Speaker mapping: {speaker_map}")
+        # Map speakers to tracks for crosstalk suppression
+        speaker_map = _map_speakers_to_tracks(track_paths, words, alignment_info)
+        if speaker_map:
+            print(f"Speaker mapping: {speaker_map}")
 
-        # Step 1: Gate crosstalk + cut each raw track
+        # Step 1: Gate crosstalk + enhance each track + normalize duration
         with _edit_jobs_lock:
-            _edit_jobs[job_id]['status'] = 'cutting'
-        cut_track_paths = []
+            _edit_jobs[job_id]['status'] = 'enhancing_tracks'
+        enhanced_paths = []
         for i, track_path in enumerate(track_paths):
-            delay_ms = alignment_info[i].get('delay_ms', 0)
+            with _edit_jobs_lock:
+                _edit_jobs[job_id]['progress'] = f'Processing track {i + 1} of {n}'
+            delay_ms = original_delays[i]
 
-            # Suppress crosstalk before cutting (and before Adobe enhancement)
-            gated_path = track_path
+            # Suppress crosstalk before enhancement
+            process_path = track_path
             if speaker_map and words:
                 own_speaker = next((s for s, ti in speaker_map.items() if ti == i), None)
                 if own_speaker:
                     print(f"Gating Track {i} ({labels[i]}): keeping speaker {own_speaker}")
-                    gated_path = _apply_crosstalk_gate(track_path, words, own_speaker, delay_ms)
+                    process_path = _apply_crosstalk_gate(track_path, words, own_speaker, delay_ms)
 
-            # Adjust cuts from combined timeline to track-local timeline
-            adjusted_cuts = [(max(0, s - delay_ms), max(0, e - delay_ms)) for s, e in cuts_ms]
-            adjusted_cuts = [(s, e) for s, e in adjusted_cuts if e > s]
-            print(f"Track {i} ({labels[i]}): delay={delay_ms}ms, {len(adjusted_cuts)} adjusted cuts")
-            cut_path = apply_audio_edits(gated_path, adjusted_cuts, words=words)
-            cut_track_paths.append(cut_path)
-
-        # Step 2: Enhance each cut track, then normalize duration to prevent drift
-        current_step = 'enhancing_tracks'
-        with _edit_jobs_lock:
-            _edit_jobs[job_id]['status'] = 'enhancing_tracks'
-        enhanced_cut_paths = []
-        for i, cut_path in enumerate(cut_track_paths):
-            with _edit_jobs_lock:
-                _edit_jobs[job_id]['progress'] = f'Enhancing track {i + 1} of {n}'
+            # Enhance with Adobe
+            orig_dur = _get_track_duration(process_path)
             mix = enhance_mixes[i] if i < len(enhance_mixes) else None
-            orig_dur = _get_track_duration(cut_path)
-            print(f"Enhancing cut track {i + 1}/{n}: {os.path.basename(cut_path)}, mix={mix}, dur={orig_dur:.3f}s")
-            enhanced_path = process_with_adobe_enhance(cut_path, enhance_mix=mix)
-            # Adobe enhancement changes track duration slightly differently per track.
-            # This causes inter-track drift when combined. Fix: use atempo to restore
-            # each track to its pre-enhancement duration. The adjustment is typically
-            # <1%, so the tempo change is imperceptible.
+            print(f"Enhancing track {i + 1}/{n}: {os.path.basename(process_path)}, mix={mix}, dur={orig_dur:.3f}s")
+            enhanced_path = process_with_adobe_enhance(process_path, enhance_mix=mix)
+
+            # Normalize duration back to pre-enhancement length to prevent drift
             enh_dur = _get_track_duration(enhanced_path)
             drift_ms = abs(enh_dur - orig_dur) * 1000
-            if drift_ms > 50:  # >50ms difference — worth correcting
+            if drift_ms > 50:
                 ratio = enh_dur / orig_dur
                 normalized_path = enhanced_path.rsplit('.', 1)[0] + '_normalized.wav'
                 norm_result = subprocess.run(
@@ -1100,33 +1092,39 @@ def _run_multitrack_edit_job(job_id, audio_path, cuts_ms, transcript_id,
                     capture_output=True, text=True, timeout=600,
                 )
                 if norm_result.returncode == 0:
-                    print(f"Track {i}: duration {orig_dur:.3f}s → {enh_dur:.3f}s (drift={drift_ms:.0f}ms), normalized with atempo={ratio:.6f}")
+                    print(f"Track {i}: {orig_dur:.3f}s → {enh_dur:.3f}s (drift={drift_ms:.0f}ms), normalized")
                     enhanced_path = normalized_path
                 else:
-                    print(f"Track {i}: atempo normalization failed, using raw enhanced (drift={drift_ms:.0f}ms)")
+                    print(f"Track {i}: atempo failed, drift={drift_ms:.0f}ms")
             else:
-                print(f"Track {i}: duration {orig_dur:.3f}s → {enh_dur:.3f}s (drift={drift_ms:.0f}ms, within tolerance)")
-            enhanced_cut_paths.append(enhanced_path)
+                print(f"Track {i}: {orig_dur:.3f}s → {enh_dur:.3f}s (drift={drift_ms:.0f}ms, OK)")
+            enhanced_paths.append(enhanced_path)
 
-        # Step 3: Combine enhanced+cut tracks
+        # Step 2: Recombine enhanced tracks using original alignment delays
         current_step = 'combining'
         with _edit_jobs_lock:
             _edit_jobs[job_id]['status'] = 'combining'
             _edit_jobs[job_id]['progress'] = 'Mixing enhanced tracks'
-        combined_path, _ = _combine_tracks(enhanced_cut_paths, labels)
+        combined_path, _ = _combine_tracks(enhanced_paths, labels, forced_delays=original_delays)
+
+        # Step 3: Apply cuts to the combined audio (single set of cuts = perfect alignment)
+        current_step = 'cutting'
+        with _edit_jobs_lock:
+            _edit_jobs[job_id]['status'] = 'cutting'
+        wav_path = apply_audio_edits(combined_path, cuts_ms, words=words)
 
         # Step 4: Merge intro/outro if provided
         if intro_path or outro_path:
             current_step = 'merging'
             with _edit_jobs_lock:
                 _edit_jobs[job_id]['status'] = 'merging'
-            combined_path = _concat_with_crossfade(combined_path, intro_path=intro_path, outro_path=outro_path)
+            wav_path = _concat_with_crossfade(wav_path, intro_path=intro_path, outro_path=outro_path)
 
         # Step 5: Finalize
         current_step = 'finalizing'
         with _edit_jobs_lock:
             _edit_jobs[job_id]['status'] = 'finalizing'
-        _finalize_audio(job_id, combined_path)
+        _finalize_audio(job_id, wav_path)
 
         # Cleanup
         _cleanup_multitrack_files(transcript_id)

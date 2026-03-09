@@ -825,6 +825,129 @@ def _combine_tracks(track_paths, labels=None):
     return combined_path, alignment_info
 
 
+# ============================================================================
+# CROSSTALK SUPPRESSION — silence other speakers before Adobe enhancement
+# ============================================================================
+
+def _measure_rms_at(track_path, start_s, duration_s=0.5):
+    """Measure mean RMS volume at a specific point in a track."""
+    result = subprocess.run(
+        ['ffmpeg', '-v', 'error', '-i', track_path,
+         '-ss', str(start_s), '-t', str(duration_s),
+         '-af', 'volumedetect', '-f', 'null', '-'],
+        capture_output=True, text=True, timeout=30,
+    )
+    for line in result.stderr.split('\n'):
+        m = re.search(r'mean_volume:\s*([-\d.]+)', line)
+        if m:
+            return float(m.group(1))
+    return -99.0
+
+
+def _map_speakers_to_tracks(track_paths, words, alignment_info):
+    """
+    Auto-detect which AssemblyAI speaker corresponds to which track
+    by measuring which track is loudest during each speaker's words.
+    Returns dict: {speaker_label: track_index} or None if mapping fails.
+    """
+    speakers = sorted(set(w.get('speaker', '?') for w in words if w.get('speaker')))
+    n_tracks = len(track_paths)
+    if len(speakers) < 2 or len(speakers) > n_tracks:
+        print(f"Speaker mapping: {len(speakers)} speakers, {n_tracks} tracks — skipping")
+        return None
+
+    # Sample up to 5 substantial words per speaker for volume comparison
+    speaker_words = {s: [] for s in speakers}
+    for w in words:
+        s = w.get('speaker')
+        if s and len(speaker_words.get(s, [])) < 5:
+            dur_ms = w.get('end', 0) - w.get('start', 0)
+            if dur_ms > 200:
+                speaker_words[s].append(w)
+
+    mapping = {}
+    for speaker in speakers:
+        samples = speaker_words[speaker]
+        if not samples:
+            continue
+        track_vols = []
+        for ti, track_path in enumerate(track_paths):
+            delay_ms = alignment_info[ti].get('delay_ms', 0)
+            volumes = []
+            for w in samples:
+                start_s = max(0, (w.get('start', 0) - delay_ms) / 1000.0)
+                dur_s = max(0.2, (w.get('end', 0) - w.get('start', 0)) / 1000.0)
+                vol = _measure_rms_at(track_path, start_s, dur_s)
+                volumes.append(vol)
+            avg = sum(volumes) / len(volumes) if volumes else -99
+            track_vols.append(avg)
+        loudest = track_vols.index(max(track_vols))
+        mapping[speaker] = loudest
+        print(f"Speaker {speaker} → Track {loudest} (avg dB: {[f'{v:.1f}' for v in track_vols]})")
+
+    if len(set(mapping.values())) != len(mapping):
+        print("Speaker-track mapping not 1:1, skipping crosstalk suppression")
+        return None
+    return mapping
+
+
+def _apply_crosstalk_gate(track_path, words, own_speaker, delay_ms, pad_ms=150):
+    """
+    Silence regions on a track where other speakers are talking.
+    Uses transcription word timestamps to identify own-speaker segments,
+    then mutes everything else (crosstalk from headphones/room).
+
+    pad_ms: padding around each word to catch natural speech transitions.
+    """
+    keep_ranges = []
+    for w in words:
+        if w.get('speaker') == own_speaker:
+            ws = max(0, (w.get('start', 0) - delay_ms - pad_ms)) / 1000.0
+            we = max(0, (w.get('end', 0) - delay_ms + pad_ms)) / 1000.0
+            if we > ws:
+                keep_ranges.append((ws, we))
+    if not keep_ranges:
+        print(f"No keep ranges for speaker {own_speaker}, skipping gate")
+        return track_path
+
+    # Merge overlapping ranges
+    keep_ranges.sort()
+    merged = []
+    for s, e in keep_ranges:
+        if merged and s <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], e))
+        else:
+            merged.append((s, e))
+
+    # Build ffmpeg filter: mute everything EXCEPT keep ranges
+    between_parts = [f'between(t,{s:.3f},{e:.3f})' for s, e in merged]
+    keep_expr = '+'.join(between_parts)
+    filter_str = f"volume=0:enable='not({keep_expr})'"
+
+    gated_path = track_path.rsplit('.', 1)[0] + '_gated.wav'
+    filter_path = track_path + '_gate_filter.txt'
+    try:
+        with open(filter_path, 'w') as f:
+            f.write(filter_str)
+        result = subprocess.run(
+            ['ffmpeg', '-y', '-i', track_path,
+             '-filter_script:a', filter_path,
+             '-f', 'wav', gated_path],
+            capture_output=True, text=True, timeout=600,
+        )
+        if result.returncode != 0:
+            print(f"Crosstalk gate failed: {result.stderr[-300:]}")
+            return track_path
+    finally:
+        if os.path.exists(filter_path):
+            os.remove(filter_path)
+
+    size_kb = os.path.getsize(gated_path) // 1024
+    print(f"Crosstalk gate: {len(merged)} keep ranges for speaker {own_speaker}, "
+          f"{os.path.basename(gated_path)} ({size_kb}KB)")
+    return gated_path
+
+
 def _run_multitrack_job(job_id, track_paths, labels, enhance_mixes):
     """Background thread: combine raw tracks, upload to AssemblyAI, preserve tracks for per-track cutting later."""
     try:
@@ -893,7 +1016,7 @@ def _run_multitrack_edit_job(job_id, audio_path, cuts_ms, transcript_id,
                               intro_path=None, outro_path=None):
     """
     Background thread: Option C multi-track edit pipeline.
-    Cut each raw track → enhance each → combine → merge intro/outro → finalize.
+    Gate crosstalk → cut each track → enhance each → combine → merge → finalize.
     Requires ADOBE_ENHANCE_TOKEN — fails if not available.
     """
     current_step = 'cutting'
@@ -911,27 +1034,43 @@ def _run_multitrack_edit_job(job_id, audio_path, cuts_ms, transcript_id,
         n = len(track_paths)
         print(f"Multitrack edit {job_id}: {n} tracks, {len(cuts_ms)} cuts")
 
-        # Fetch word timestamps for smart cut snapping
+        # Fetch word timestamps for crosstalk gating and cut snapping
         words = None
         if transcript_id:
             try:
                 transcript_data = get_transcription(transcript_id)
                 words = transcript_data.get('words', [])
-                print(f"Fetched {len(words)} word timestamps for cut snapping")
+                print(f"Fetched {len(words)} word timestamps")
             except Exception as e:
                 print(f"Warning: could not fetch word timestamps: {e}")
 
-        # Step 1: Cut each raw track
+        # Step 0: Map speakers to tracks and suppress crosstalk
+        speaker_map = None
+        if words:
+            speaker_map = _map_speakers_to_tracks(track_paths, words, alignment_info)
+            if speaker_map:
+                print(f"Speaker mapping: {speaker_map}")
+
+        # Step 1: Gate crosstalk + cut each raw track
         with _edit_jobs_lock:
             _edit_jobs[job_id]['status'] = 'cutting'
         cut_track_paths = []
         for i, track_path in enumerate(track_paths):
             delay_ms = alignment_info[i].get('delay_ms', 0)
+
+            # Suppress crosstalk before cutting (and before Adobe enhancement)
+            gated_path = track_path
+            if speaker_map and words:
+                own_speaker = next((s for s, ti in speaker_map.items() if ti == i), None)
+                if own_speaker:
+                    print(f"Gating Track {i} ({labels[i]}): keeping speaker {own_speaker}")
+                    gated_path = _apply_crosstalk_gate(track_path, words, own_speaker, delay_ms)
+
             # Adjust cuts from combined timeline to track-local timeline
             adjusted_cuts = [(max(0, s - delay_ms), max(0, e - delay_ms)) for s, e in cuts_ms]
             adjusted_cuts = [(s, e) for s, e in adjusted_cuts if e > s]
             print(f"Track {i} ({labels[i]}): delay={delay_ms}ms, {len(adjusted_cuts)} adjusted cuts")
-            cut_path = apply_audio_edits(track_path, adjusted_cuts, words=words)
+            cut_path = apply_audio_edits(gated_path, adjusted_cuts, words=words)
             cut_track_paths.append(cut_path)
 
         # Step 2: Enhance each cut track, then normalize duration to prevent drift

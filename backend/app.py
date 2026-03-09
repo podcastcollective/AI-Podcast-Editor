@@ -740,7 +740,9 @@ def _combine_tracks(track_paths, labels=None):
             print(f"Track {i} ({label}): onset={onsets[i]}ms, delay={delays[i]}ms")
 
     # Build ffmpeg filter_complex
-    # Per-track: normalize format → loudnorm to -16 LUFS → optional delay
+    # Per-track: normalize format → loudnorm → optional delay → pad to equal length
+    # Padding prevents ffmpeg amix assertion crash when streams end at different times
+    max_dur_s = max(durations[i] + delays[i] / 1000 for i in range(n))
     filter_parts = []
     for i in range(n):
         chain = f'[{i}:a]aformat=sample_rates=48000:channel_layouts=mono'
@@ -748,6 +750,7 @@ def _combine_tracks(track_paths, labels=None):
         if delays[i] > 0:
             d = delays[i]
             chain += f',adelay={d}|{d}'
+        chain += f',apad=whole_dur={max_dur_s:.3f}'
         chain += f'[t{i}]'
         filter_parts.append(chain)
 

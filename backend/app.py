@@ -578,7 +578,7 @@ def apply_audio_edits(audio_path, cuts_ms, words=None):
         keeps = [(0, min(1000, total_ms))]
 
     # Build ffmpeg filter_complex: trim each keep segment, apply micro-fades, concat
-    FADE_S = 0.005  # 5ms micro-fade at cut boundaries
+    FADE_S = 0.010  # 10ms micro-fade at cut boundaries (5ms caused audible clicks)
     filter_parts = []
     for i, (start, end) in enumerate(keeps):
         start_s = start / 1000
@@ -700,6 +700,27 @@ def _get_track_duration(audio_path):
     return float(probe.stdout.strip())
 
 
+def _measure_loudness(audio_path):
+    """Measure integrated loudness (LUFS) and true peak (dBTP) using ffmpeg loudnorm first-pass."""
+    result = subprocess.run(
+        ['ffmpeg', '-hide_banner', '-i', audio_path, '-af',
+         'loudnorm=I=-16:TP=-1.5:LRA=11:print_format=json', '-f', 'null', '-'],
+        capture_output=True, text=True, timeout=120,
+    )
+    import json as _json
+    stderr = result.stderr
+    json_start = stderr.rfind('{')
+    json_end = stderr.rfind('}') + 1
+    if json_start >= 0 and json_end > json_start:
+        data = _json.loads(stderr[json_start:json_end])
+        lufs = float(data.get('input_i', '-24'))
+        tp = float(data.get('input_tp', '-1'))
+        print(f"Loudness of {os.path.basename(audio_path)}: {lufs:.1f} LUFS, peak={tp:.1f} dBTP")
+        return lufs, tp
+    print(f"Loudness measurement failed for {os.path.basename(audio_path)}, using defaults")
+    return -24.0, -1.0
+
+
 def _combine_tracks(track_paths, labels=None):
     """
     Normalize levels, optionally align, and mix multiple audio tracks into WAV.
@@ -742,14 +763,31 @@ def _combine_tracks(track_paths, labels=None):
         if needs_alignment:
             print(f"Track {i} ({label}): onset={onsets[i]}ms, delay={delays[i]}ms")
 
+    # Measure loudness of each track (first-pass), then apply simple gain.
+    # Using volume= instead of loudnorm avoids: (a) loudnorm upsampling to 192kHz,
+    # (b) variable lookahead latency causing inter-track timing drift.
+    target_lufs = -16
+    peak_ceiling = -3  # dBTP ceiling per track — leaves headroom for summing
+    measurements = [_measure_loudness(p) for p in track_paths]
+    gains = []
+    for lufs, tp in measurements:
+        lufs_gain = target_lufs - lufs
+        # Cap gain so peaks don't exceed ceiling (prevents clipping when summed)
+        max_gain = peak_ceiling - tp
+        gain = min(lufs_gain, max_gain)
+        gains.append(gain)
+
     # Build ffmpeg filter_complex
-    # Per-track: normalize format → loudnorm → optional delay → pad to equal length
+    # Per-track: normalize format → volume gain → optional delay → pad to equal length
     # Padding prevents ffmpeg amix assertion crash when streams end at different times
     max_dur_s = max(durations[i] + delays[i] / 1000 for i in range(n))
     filter_parts = []
     for i in range(n):
         chain = f'[{i}:a]aformat=sample_rates=48000:channel_layouts=mono'
-        chain += ',loudnorm=I=-16:TP=-1.5:LRA=11'
+        gain_db = gains[i]
+        if abs(gain_db) > 0.5:
+            chain += f',volume={gain_db:.1f}dB'
+            print(f"Track {i}: applying {gain_db:+.1f}dB gain ({measurements[i][0]:.1f} LUFS, peak {measurements[i][1]:.1f} dBTP)")
         if delays[i] > 0:
             d = delays[i]
             chain += f',adelay={d}|{d}'
@@ -758,10 +796,10 @@ def _combine_tracks(track_paths, labels=None):
         filter_parts.append(chain)
 
     mix_inputs = ''.join(f'[t{i}]' for i in range(n))
-    # amix sums signals; add -3dB headroom then limiter to prevent clipping
+    # amix sums signals; -3dB headroom + limiter at -1dB to leave room for MP3 encoding
     filter_parts.append(
         f'{mix_inputs}amix=inputs={n}:duration=longest:dropout_transition=0:normalize=0,'
-        f'volume=-3dB,alimiter=limit=0.95:attack=0.1:release=50[out]'
+        f'volume=-3dB,alimiter=limit=0.89:attack=0.1:release=50[out]'
     )
     filter_str = ';'.join(filter_parts)
 

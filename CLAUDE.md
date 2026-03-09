@@ -12,9 +12,7 @@ AI-powered podcast editing platform. Users upload audio, which gets transcribed 
 
 **Backend:** Flask REST API (`backend/app.py`) deployed on Railway. Orchestrates AssemblyAI transcription, Claude analysis, and pydub audio editing.
 
-**Flow (auto-enhance):** Frontend uploads audio → Backend sends to AssemblyAI → Backend polls for transcript → Backend sends compact prompt to Claude → Returns edit decisions → Backend applies cuts with pydub → Backend sends to Adobe Enhance Speech API → Backend finalizes (stereo + peak-normalize) → Returns edited MP3.
-
-**Flow (manual fallback):** Same as above, but if `ADOBE_ENHANCE_TOKEN` is not set or Adobe API fails, the pipeline stops after cuts. User downloads intermediate WAV → Enhances externally (Adobe Enhance Speech) → Re-uploads enhanced file → Backend finalizes → Returns edited MP3.
+**Flow:** Frontend uploads audio → Backend sends to AssemblyAI → Backend polls for transcript → Backend sends compact prompt to Claude → Returns edit decisions → Backend applies cuts with ffmpeg → Backend sends to Adobe Enhance Speech API → Backend finalizes (mastering chain + MP3) → Backend reviews quality (ebur128 + silencedetect) → Returns edited MP3 with quality metrics.
 
 The backend API URL is hardcoded in the frontend: `https://ai-podcast-editor-production.up.railway.app`
 
@@ -48,14 +46,13 @@ No build — open `index.html` in browser or serve with any static file server.
 - `GET /api/transcription-status/<transcript_id>` — Poll transcription progress
 - `POST /api/process` — Start Claude analysis (async), returns `job_id`
 - `GET /api/process-status/<job_id>` — Poll analysis results
-- `POST /api/edit-audio` — Apply cuts to audio (phase 1), returns `job_id`
-- `GET /api/edit-audio-status/<job_id>` — Poll edit status (`cutting` → `enhancing` → `finalizing` → `completed`, or `cutting` → `cuts_completed` if manual)
-- `GET /api/edit-audio-download/<job_id>` — Download intermediate WAV (when `cuts_completed`) or final MP3 (when `completed`)
-- `POST /api/upload-enhanced` — Upload enhanced audio file with `job_id`, starts finalization (phase 2)
+- `POST /api/edit-audio` — Apply cuts to audio, returns `job_id`. Requires `ADOBE_ENHANCE_TOKEN`.
+- `GET /api/edit-audio-status/<job_id>` — Poll edit status (`cutting` → `enhancing` → `finalizing` → `reviewing` → `completed`)
+- `GET /api/edit-audio-download/<job_id>` — Download final MP3 (when `completed`)
 
 ## Key Technical Details
 
-- **Two-phase editing:** Phase 1 applies cuts and exports WAV. If `ADOBE_ENHANCE_TOKEN` is set, enhancement and finalization happen automatically. Otherwise, user enhances externally and re-uploads. Phase 2 finalizes (stereo + normalize + MP3).
+- **Single-phase editing:** Cuts → Adobe Enhance → mastering chain (adeclick + alimiter + loudnorm) → quality review (ebur128 + silencedetect) → MP3 export. All automatic, requires `ADOBE_ENHANCE_TOKEN`.
 - **Async processing:** Claude analysis runs in a background thread; frontend polls `/api/process-status/<job_id>` every 3 seconds
 - **Compact prompts:** Filler words and pauses are pre-detected in Python before sending to Claude, keeping the prompt small to avoid Railway timeouts
 - **Audio storage:** Uploaded files saved in `/tmp` with `transcript_id` as filename
@@ -65,4 +62,4 @@ No build — open `index.html` in browser or serve with any static file server.
 
 - `ASSEMBLYAI_API_KEY` — AssemblyAI transcription API key
 - `CLAUDE_API_KEY` — Anthropic Claude API key
-- `ADOBE_ENHANCE_TOKEN` — (optional) Bearer token from Adobe session for auto-enhance. When set, the pipeline runs end-to-end. When not set, stops at cuts for manual enhancement.
+- `ADOBE_ENHANCE_TOKEN` — Bearer token from Adobe session. Required for audio editing — pipeline fails without it.

@@ -53,9 +53,9 @@ def _mark_token_used():
 if not ASSEMBLYAI_API_KEY or not CLAUDE_API_KEY:
     print("WARNING: ASSEMBLYAI_API_KEY and CLAUDE_API_KEY are required")
 if _adobe_token:
-    print("Adobe Enhance Speech: configured (auto-enhance enabled)")
+    print("Adobe Enhance Speech: configured")
 else:
-    print("Adobe Enhance Speech: not configured (manual enhance mode)")
+    print("WARNING: ADOBE_ENHANCE_TOKEN not set — audio editing will fail")
 
 # In-memory job stores. Gunicorn must use threads (not processes) so these are shared.
 _jobs: dict = {}
@@ -1141,10 +1141,8 @@ def process_with_adobe_enhance(audio_path, enhance_mix=None):
 def _run_edit_job(job_id, audio_path, cuts_ms, transcript_id=None,
                   intro_path=None, outro_path=None, enhance_mix=None):
     """
-    Background thread: apply cuts, optionally merge intro/outro, then either
-    auto-enhance or stop for manual enhance.
-    Pipeline: cuts → merge (if intro/outro) → Adobe enhance → finalize → completed
-    Without token: cuts → merge → cuts_completed (user enhances manually)
+    Background thread: apply cuts, optionally merge intro/outro, enhance, finalize.
+    Pipeline: cuts → merge (if intro/outro) → Adobe enhance → finalize → review → completed
     """
     current_step = 'cutting'
     try:
@@ -1169,15 +1167,7 @@ def _run_edit_job(job_id, audio_path, cuts_ms, transcript_id=None,
                 _edit_jobs[job_id]['status'] = 'merging'
             wav_path = _concat_with_crossfade(wav_path, intro_path=intro_path, outro_path=outro_path)
 
-        # If no Adobe token, stop here for manual enhancement
-        if not get_adobe_token():
-            with _edit_jobs_lock:
-                _edit_jobs[job_id]['status'] = 'cuts_completed'
-                _edit_jobs[job_id]['cuts_path'] = wav_path
-            print(f"Cuts job {job_id} complete (manual enhance mode): {wav_path}")
-            return
-
-        # Auto-enhance with Adobe Enhance Speech
+        # Enhance with Adobe Enhance Speech
         current_step = 'enhancing'
         with _edit_jobs_lock:
             _edit_jobs[job_id]['status'] = 'enhancing'
@@ -1206,15 +1196,118 @@ def _run_edit_job(job_id, audio_path, cuts_ms, transcript_id=None,
             }
 
 
+def _review_audio(audio_path):
+    """
+    Analyze final audio for quality metrics using ffmpeg.
+    Pass 1: ebur128 for loudness + true peak.
+    Pass 2: silencedetect for unexpected silence gaps.
+    Returns dict with passed, issues, and metrics.
+    """
+    issues = []
+    metrics = {'integrated_lufs': 0.0, 'true_peak_dbtp': 0.0, 'loudness_range_lu': 0.0, 'duration_s': 0.0}
+
+    # Pass 1: ebur128 loudness analysis
+    result = subprocess.run(
+        ['ffmpeg', '-hide_banner', '-i', audio_path,
+         '-af', 'ebur128=peak=true', '-f', 'null', '-'],
+        capture_output=True, text=True, timeout=120,
+    )
+    stderr = result.stderr
+
+    # Parse Summary block from ebur128 output
+    summary_start = stderr.rfind('Summary:')
+    if summary_start >= 0:
+        summary = stderr[summary_start:]
+        m = re.search(r'I:\s*([-\d.]+)\s*LUFS', summary)
+        if m:
+            metrics['integrated_lufs'] = float(m.group(1))
+        m = re.search(r'LRA:\s*([-\d.]+)\s*LU', summary)
+        if m:
+            metrics['loudness_range_lu'] = float(m.group(1))
+        m = re.search(r'Peak:\s*([-\d.]+)\s*dBFS', summary)
+        if m:
+            metrics['true_peak_dbtp'] = float(m.group(1))
+
+    # Get duration
+    probe = subprocess.run(
+        ['ffprobe', '-v', 'error', '-show_entries', 'format=duration',
+         '-of', 'csv=p=0', audio_path],
+        capture_output=True, text=True, timeout=30,
+    )
+    try:
+        metrics['duration_s'] = round(float(probe.stdout.strip()), 1)
+    except (ValueError, AttributeError):
+        pass
+
+    # Check loudness range (after mastering, should be close to -16 LUFS)
+    lufs = metrics['integrated_lufs']
+    if lufs < -20 or lufs > -12:
+        issues.append({
+            'type': 'loudness',
+            'severity': 'warning',
+            'time_s': None,
+            'description': f'Integrated loudness {lufs:.1f} LUFS is outside target range (-20 to -12)',
+        })
+
+    # Check true peak
+    peak = metrics['true_peak_dbtp']
+    if peak > -0.5:
+        issues.append({
+            'type': 'clipping',
+            'severity': 'warning',
+            'time_s': None,
+            'description': f'True peak {peak:.1f} dBTP exceeds -0.5 dBTP ceiling',
+        })
+
+    # Pass 2: silencedetect for gaps > 500ms
+    result = subprocess.run(
+        ['ffmpeg', '-hide_banner', '-i', audio_path,
+         '-af', 'silencedetect=noise=-40dB:d=0.5', '-f', 'null', '-'],
+        capture_output=True, text=True, timeout=120,
+    )
+    silence_events = []
+    current_start = None
+    for line in result.stderr.split('\n'):
+        m = re.search(r'silence_start:\s*([\d.]+)', line)
+        if m:
+            current_start = float(m.group(1))
+        m = re.search(r'silence_end:\s*([\d.]+)\s*\|\s*silence_duration:\s*([\d.]+)', line)
+        if m and current_start is not None:
+            silence_end = float(m.group(1))
+            silence_dur = float(m.group(2))
+            silence_events.append((current_start, silence_end, silence_dur))
+            current_start = None
+
+    # Filter: ignore silence in first/last 2 seconds (natural episode boundaries)
+    duration_s = metrics['duration_s']
+    for start, end, dur in silence_events:
+        if start < 2.0 or (duration_s > 0 and end > duration_s - 2.0):
+            continue
+        issues.append({
+            'type': 'silence',
+            'severity': 'info',
+            'time_s': round(start, 1),
+            'description': f'Silence gap {dur:.1f}s at {start:.1f}s',
+        })
+
+    passed = all(i['severity'] != 'warning' for i in issues)
+
+    return {
+        'passed': passed,
+        'issues': issues,
+        'metrics': metrics,
+    }
+
+
 def _finalize_audio(job_id, enhanced_path):
-    """Shared finalization: convert Adobe output to MP3 without altering levels."""
+    """Shared finalization: mastering chain + MP3 encode."""
     mp3_path = enhanced_path.rsplit('.', 1)[0] + '_final.mp3'
 
-    # Minimal processing — Adobe Enhance output is already well-mastered.
-    # No loudnorm (was clipping at 0dB), no forced stereo (mono is fine for speech).
-    # Just encode to high-quality MP3.
+    # Mastering chain: click removal → peak limiting → loudness normalization.
+    # These are non-destructive — if there's nothing to fix, audio passes through unchanged.
     result = subprocess.run(
-        ['ffmpeg', '-y', '-i', enhanced_path,
+        ['ffmpeg', '-y', '-i', enhanced_path, '-af',
+         'adeclick=w=55:o=75,alimiter=limit=0.89:attack=5:release=50,loudnorm=I=-16:TP=-1:LRA=11',
          '-b:a', '320k',
          '-f', 'mp3', mp3_path],
         capture_output=True, text=True, timeout=600,
@@ -1223,28 +1316,23 @@ def _finalize_audio(job_id, enhanced_path):
         raise Exception(f"ffmpeg finalize failed: {result.stderr[-500:]}")
 
     size_kb = os.path.getsize(mp3_path) // 1024
-    print(f"Finalize: {mp3_path} ({size_kb}KB, 320kbps MP3)")
+    print(f"Finalize: {mp3_path} ({size_kb}KB, 320kbps MP3, mastered)")
+
+    # Review step: analyze the final MP3 for quality metrics
+    with _edit_jobs_lock:
+        _edit_jobs[job_id]['status'] = 'reviewing'
+    review = _review_audio(mp3_path)
+    print(f"Review: passed={review['passed']}, "
+          f"LUFS={review['metrics']['integrated_lufs']:.1f}, "
+          f"peak={review['metrics']['true_peak_dbtp']:.1f} dBTP, "
+          f"issues={len(review['issues'])}")
 
     with _edit_jobs_lock:
         _edit_jobs[job_id]['status'] = 'completed'
         _edit_jobs[job_id]['path'] = mp3_path
         _edit_jobs[job_id]['is_mp3'] = True
+        _edit_jobs[job_id]['review'] = review
     print(f"Finalize job {job_id} complete: {mp3_path}")
-
-
-def _run_finalize_job(job_id, enhanced_path):
-    """Background thread phase 2 (manual path): finalize after user re-uploads enhanced file."""
-    try:
-        with _edit_jobs_lock:
-            _edit_jobs[job_id]['status'] = 'finalizing'
-        _finalize_audio(job_id, enhanced_path)
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        with _edit_jobs_lock:
-            _edit_jobs[job_id]['status'] = 'error'
-            _edit_jobs[job_id]['error'] = str(e)
-            _edit_jobs[job_id]['failed_step'] = 'finalizing'
 
 
 # ============================================================================
@@ -1794,11 +1882,8 @@ def edit_audio():
         with _edit_jobs_lock:
             _edit_jobs[job_id] = {'status': 'pending'}
 
-        if is_multitrack and not get_adobe_token():
-            return jsonify({"error": "ADOBE_ENHANCE_TOKEN is required for multi-track editing"}), 400
-
-        # Multi-track and single-track both use the same pipeline: cut → enhance → finalize.
-        # Multi-track audio is already combined during upload, so it's just a single file.
+        if not get_adobe_token():
+            return jsonify({"error": "ADOBE_ENHANCE_TOKEN is required for audio editing"}), 400
         threading.Thread(
             target=_run_edit_job,
             args=(job_id, audio_path, cuts_ms, transcript_id),
@@ -1824,12 +1909,13 @@ def edit_audio_status(job_id):
     if not job:
         return jsonify({"error": "Job not found"}), 404
     if job['status'] == 'completed':
-        return jsonify({"status": "completed", "is_mp3": job.get('is_mp3', False)})
-    if job['status'] == 'cuts_completed':
-        return jsonify({"status": "cuts_completed"})
+        resp = {"status": "completed", "is_mp3": job.get('is_mp3', False)}
+        if 'review' in job:
+            resp['review'] = job['review']
+        return jsonify(resp)
     if job['status'] == 'error':
         return jsonify({"error": job['error'], "failed_step": job.get('failed_step')}), 500
-    # merging, enhancing, finalizing, cutting, pending
+    # merging, enhancing, finalizing, reviewing, cutting, pending
     result = {"status": job['status']}
     if 'progress' in job:
         result['progress'] = job['progress']
@@ -1842,52 +1928,9 @@ def edit_audio_download(job_id):
         job = _edit_jobs.get(job_id)
     if not job:
         return jsonify({"error": "File not ready"}), 404
-    if job['status'] == 'cuts_completed':
-        return send_file(job['cuts_path'], as_attachment=True, download_name='edited_podcast.wav', mimetype='audio/wav')
     if job['status'] == 'completed':
         return send_file(job['path'], as_attachment=True, download_name='edited_podcast.mp3', mimetype='audio/mpeg')
     return jsonify({"error": "File not ready"}), 404
-
-
-@app.route('/api/upload-enhanced', methods=['POST', 'OPTIONS'])
-def upload_enhanced():
-    """Step 4: Receive enhanced audio file, kick off finalization."""
-    if request.method == 'OPTIONS':
-        return '', 204
-
-    try:
-        job_id = request.form.get('job_id')
-        if not job_id:
-            return jsonify({"error": "No job_id provided"}), 400
-
-        with _edit_jobs_lock:
-            job = _edit_jobs.get(job_id)
-        if not job or job['status'] != 'cuts_completed':
-            return jsonify({"error": "Job not found or cuts not completed yet"}), 400
-
-        if 'file' not in request.files:
-            return jsonify({"error": "No file provided"}), 400
-
-        file = request.files['file']
-        if file.filename == '':
-            return jsonify({"error": "No file selected"}), 400
-
-        enhanced_path = f"/tmp/{job_id}_enhanced.wav"
-        file.save(enhanced_path)
-        print(f"Enhanced file saved: {enhanced_path} ({os.path.getsize(enhanced_path) // 1024}KB)")
-
-        threading.Thread(
-            target=_run_finalize_job,
-            args=(job_id, enhanced_path),
-            daemon=True,
-        ).start()
-
-        return jsonify({"success": True, "job_id": job_id})
-
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        return jsonify({"error": str(e)}), 500
 
 
 @app.route('/api/transcript-download/<transcript_id>', methods=['GET'])

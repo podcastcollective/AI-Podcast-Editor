@@ -84,7 +84,7 @@
             const [outroFile, setOutroFile] = useState(null);
             const preset = 'auto';
             const [customInstructions, setCustomInstructions] = useState('');
-            const [enhanceMix, setEnhanceMix] = useState({ speech: 90, background: 10, music: 10 });
+            const enhanceMix = { speech: 90, background: 10, music: 10 };
             const [pipelineStage, setPipelineStage] = useState(null);
             const [pipelineProgress, setPipelineProgress] = useState(null);
             const [pipelineError, setPipelineError] = useState(null);
@@ -116,7 +116,6 @@
             const selectProfile = (profile) => {
                 setSelectedProfile(profile.id);
                 setCustomInstructions(profile.customInstructions || '');
-                setEnhanceMix(profile.enhanceMix || { speech: 90, background: 10, music: 10 });
             };
 
             const saveProfile = () => {
@@ -126,7 +125,6 @@
                     id: crypto.randomUUID(),
                     name,
                     customInstructions,
-                    enhanceMix,
                     createdAt: Date.now(),
                 };
                 setProfiles(prev => [...prev, newProfile]);
@@ -746,55 +744,6 @@
                                         className="w-full p-2.5 rounded-lg bg-white/10 border border-white/20 text-white placeholder-purple-300 text-sm h-24 resize-none"
                                     />
                                 </div>
-
-                                {/* Adobe Enhance Mix (single-track only — multi-track has per-track controls) */}
-                                {uploadMode === 'single' && (
-                                <div className="mb-6">
-                                    <h3 className="text-sm font-semibold text-purple-200 uppercase tracking-wide mb-3">
-                                        Adobe Enhance Mix
-                                        <span className="font-normal normal-case text-purple-300/70 ml-1">
-                                            ({enhanceMix.speech}/{enhanceMix.background}/{enhanceMix.music})
-                                        </span>
-                                    </h3>
-                                    <div className="grid grid-cols-3 gap-3">
-                                        {[
-                                            { key: 'speech', label: 'Speech' },
-                                            { key: 'background', label: 'Background' },
-                                            { key: 'music', label: 'Music' },
-                                        ].map(({ key, label }) => (
-                                            <div key={key}>
-                                                <label className="block text-xs text-purple-300/70 mb-1">{label}</label>
-                                                <input
-                                                    type="number"
-                                                    min="0" max="100" step="5"
-                                                    value={enhanceMix[key]}
-                                                    onChange={e => setEnhanceMix(prev => ({ ...prev, [key]: Math.max(0, Math.min(100, parseInt(e.target.value) || 0)) }))}
-                                                    className="w-full p-2 rounded-lg bg-white/10 border border-white/20 text-white text-sm text-center"
-                                                />
-                                            </div>
-                                        ))}
-                                    </div>
-                                    <div className="flex gap-2 mt-2">
-                                        {[
-                                            { label: '90/10/10', s: 90, b: 10, m: 10 },
-                                            { label: '40/10/10', s: 40, b: 10, m: 10 },
-                                            { label: '100/0/0', s: 100, b: 0, m: 0 },
-                                        ].map(p => (
-                                            <button
-                                                key={p.label}
-                                                onClick={() => setEnhanceMix({ speech: p.s, background: p.b, music: p.m })}
-                                                className={`text-xs px-2 py-1 rounded border transition-all ${
-                                                    enhanceMix.speech === p.s && enhanceMix.background === p.b && enhanceMix.music === p.m
-                                                        ? 'bg-purple-500/20 border-purple-400 text-purple-200'
-                                                        : 'bg-white/5 border-white/10 text-purple-300/60 hover:bg-white/10'
-                                                }`}
-                                            >
-                                                {p.label}
-                                            </button>
-                                        ))}
-                                    </div>
-                                </div>
-                                )}
 
                                 <button
                                     onClick={runFullPipeline}

@@ -827,7 +827,7 @@ def _combine_tracks(track_paths, labels=None):
 
 
 
-def _run_multitrack_job(job_id, track_paths, labels, enhance_mixes):
+def _run_multitrack_job(job_id, track_paths, labels):
     """Background thread: combine raw tracks, upload to AssemblyAI, preserve track paths for cleanup."""
     try:
         n = len(track_paths)
@@ -1545,18 +1545,16 @@ def upload_file():
 
 @app.route('/api/upload-multitrack', methods=['POST', 'OPTIONS'])
 def upload_multitrack():
-    """Upload multiple tracks, start async per-track enhance + combine + transcription."""
+    """Upload multiple tracks, combine and start transcription."""
     if request.method == 'OPTIONS':
         return '', 204
 
     if not ASSEMBLYAI_API_KEY:
         return jsonify({"error": "ASSEMBLYAI_API_KEY not configured"}), 500
 
-    # Collect track files, labels, and per-track enhance mixes from form data
-    import json as _json
+    # Collect track files and labels from form data
     track_paths = []
     labels = []
-    enhance_mixes = []
     i = 0
     while f'track_{i}' in request.files:
         f = request.files[f'track_{i}']
@@ -1574,14 +1572,6 @@ def upload_multitrack():
         f.save(path)
         track_paths.append(path)
         labels.append(request.form.get(f'label_{i}', f'Track {i + 1}'))
-        mix_raw = request.form.get(f'enhance_mix_{i}')
-        if mix_raw:
-            try:
-                enhance_mixes.append(_json.loads(mix_raw))
-            except Exception:
-                enhance_mixes.append(None)
-        else:
-            enhance_mixes.append(None)
         i += 1
 
     if len(track_paths) < 2:
@@ -1598,7 +1588,7 @@ def upload_multitrack():
 
     threading.Thread(
         target=_run_multitrack_job,
-        args=(job_id, track_paths, labels, enhance_mixes),
+        args=(job_id, track_paths, labels),
         daemon=True,
     ).start()
 

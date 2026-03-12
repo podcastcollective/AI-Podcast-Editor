@@ -283,6 +283,41 @@ def _find_fillers(words):
     return found
 
 
+def _find_stutters(words):
+    """Detect partial-word stutters: a truncated word followed by the complete word.
+    E.g. 'commu' followed by 'community', or exact duplicates like 'so so'."""
+    found = []
+    for i in range(len(words) - 1):
+        w1 = words[i]
+        w2 = words[i + 1]
+        t1 = w1.get('text', '').lower().strip('.,!?;:')
+        t2 = w2.get('text', '').lower().strip('.,!?;:')
+        if not t1 or not t2:
+            continue
+        # Exact duplicate: "so so", "the the"
+        if t1 == t2 and len(t1) >= 2:
+            found.append({
+                'partial': t1,
+                'full': t2,
+                'start_ms': w1.get('start', 0),
+                'end_ms': w1.get('end', 0),
+                'speaker': w1.get('speaker', '?'),
+                'type': 'duplicate',
+            })
+            continue
+        # Partial prefix: "commu" + "community" (prefix must be 3+ chars and shorter)
+        if len(t1) >= 3 and len(t1) < len(t2) and t2.startswith(t1):
+            found.append({
+                'partial': t1,
+                'full': t2,
+                'start_ms': w1.get('start', 0),
+                'end_ms': w1.get('end', 0),
+                'speaker': w1.get('speaker', '?'),
+                'type': 'partial',
+            })
+    return found
+
+
 def _find_pauses(words, min_ms=1000):
     """Return list of pauses longer than min_ms between consecutive words."""
     pauses = []
@@ -351,7 +386,14 @@ def analyze_transcript_with_claude(transcript_data, preset_cfg, custom_instructi
         pause_lines.append(line)
     pause_text = "\n".join(pause_lines) if pause_lines else "None detected"
 
-    print(f"Pre-detected {len(fillers)} fillers, {len(pauses)} pauses")
+    stutters = _find_stutters(words)
+    stutter_lines = [
+        f'{s["start_ms"]} {s["end_ms"]} "{s["partial"]}" \u2192 "{s["full"]}" [{s["type"]}] (Speaker {s["speaker"]})'
+        for s in stutters[:100]
+    ]
+    stutter_text = "\n".join(stutter_lines) if stutter_lines else "None detected"
+
+    print(f"Pre-detected {len(fillers)} fillers, {len(pauses)} pauses, {len(stutters)} stutters")
 
     multitrack_rules = ""
     if is_multitrack:
@@ -376,6 +418,9 @@ PRE-DETECTED FILLER WORDS (format: start_ms end_ms "word" speaker):
 
 PRE-DETECTED PAUSES >{pause_min_ms}ms (format: start_ms end_ms duration before\u2192after):
 {pause_text}
+
+PRE-DETECTED STUTTERS (format: start_ms end_ms "partial" \u2192 "full" [type] speaker):
+{stutter_text}
 
 RECORDING CONTEXT:
 {preset_cfg.get('claude_hint', '')}
@@ -403,7 +448,7 @@ PAUSE RULES:
 - Trim ALL pauses in the list above \u2014 they have already been filtered by threshold, so every one should be trimmed.
 - Do NOT remove short, intentional pauses used for emphasis \u2014 only trim the clearly excessive ones.
 {multitrack_rules}CONTENT RULES:
-- STUTTERS: When the EXACT same word appears twice in a row (e.g. "so so", "part part", "just as just", "still there still"), remove the duplicate. These are speech disfluencies, not emphasis. This is the safest type of content cut.
+- STUTTERS: Remove ALL pre-detected stutters listed above. These include exact duplicates ("so so") and partial-word false starts ("commu" before "community"). For each stutter, cut the partial/duplicate word using its start_ms and end_ms. These are the safest type of content cut.
 - FALSE STARTS: Only cut when a speaker clearly abandons a sentence and restarts it. You must be very confident the restart is cleaner. If in doubt, leave both.
 - Do NOT make speculative content cuts. Only cut content you are 95%+ confident should be removed.
 - Do NOT rewrite or paraphrase content. Do NOT change the meaning or tone of the speaker.

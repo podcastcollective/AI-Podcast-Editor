@@ -253,6 +253,10 @@ FILLER_WORDS = {
     'um', 'uh', 'uhm', 'hmm', 'mhm', 'hm', 'mm', 'ah', 'eh',
 }
 
+HEDGING_PHRASES = {
+    'you know', 'i mean', 'kind of', 'sort of', 'i think', 'i guess',
+}
+
 
 def _find_fillers(words):
     """Scan word list for filler words; return list of {text, start_ms, end_ms, speaker}."""
@@ -357,8 +361,59 @@ def _find_stutters(words):
     return found
 
 
+def _find_hedging_clusters(words):
+    """Detect regions where hedging phrases cluster (3+ within 15s = uncertain passage).
+    These flag sections where the host is searching for words or unsure."""
+    hedges = []
+    i = 0
+    while i < len(words):
+        if i + 1 < len(words):
+            tok2 = (words[i].get('text', '').lower().strip('.,!?;:') + ' ' +
+                    words[i + 1].get('text', '').lower().strip('.,!?;:'))
+            if tok2 in HEDGING_PHRASES:
+                hedges.append({
+                    'text': tok2,
+                    'start_ms': words[i].get('start', 0),
+                    'end_ms': words[i + 1].get('end', 0),
+                    'speaker': words[i].get('speaker', '?'),
+                })
+                i += 2
+                continue
+        i += 1
+
+    # Find clusters: 3+ hedges within 15s window, same speaker
+    clusters = []
+    reported_ends = {}  # speaker -> last reported end_ms
+    for i in range(len(hedges)):
+        speaker = hedges[i]['speaker']
+        # Skip if this hedge is inside an already-reported cluster
+        if speaker in reported_ends and hedges[i]['start_ms'] <= reported_ends[speaker]:
+            continue
+        window = [hedges[i]]
+        for j in range(i + 1, len(hedges)):
+            if hedges[j]['speaker'] != speaker:
+                continue
+            if hedges[j]['start_ms'] - hedges[i]['start_ms'] > 15000:
+                break
+            window.append(hedges[j])
+        if len(window) >= 3:
+            end = window[-1]['end_ms']
+            reported_ends[speaker] = end
+            clusters.append({
+                'start_ms': window[0]['start_ms'],
+                'end_ms': end,
+                'speaker': speaker,
+                'phrases': [h['text'] for h in window],
+                'count': len(window),
+            })
+    return clusters
+
+
 def _find_pauses(words, min_ms=1000):
-    """Return list of pauses longer than min_ms between consecutive words."""
+    """Return list of pauses longer than min_ms between consecutive words.
+    Each pause is classified as 'emphatic' or 'uncertain' based on context:
+    - emphatic: after a complete sentence, topic transition — trim gently
+    - uncertain: near fillers, hedging, or restarts — trim aggressively"""
     pauses = []
     for i in range(len(words) - 1):
         gap_start = words[i].get('end', 0)
@@ -367,6 +422,45 @@ def _find_pauses(words, min_ms=1000):
         if gap_ms >= min_ms:
             speaker_before = words[i].get('speaker', '?')
             speaker_after = words[i + 1].get('speaker', '?')
+
+            # Score-based classification
+            emphatic_score = 0
+            uncertain_score = 0
+
+            # Sentence boundary before pause (punctuation = complete thought)
+            text_before = words[i].get('text', '')
+            if text_before.rstrip().endswith(('.', '?', '!')):
+                emphatic_score += 2
+
+            # Filler words within 2 words before or after
+            for offset in [i - 1, i - 2, i + 1, i + 2]:
+                if 0 <= offset < len(words):
+                    tok = words[offset].get('text', '').lower().strip('.,!?;:')
+                    if tok in FILLER_WORDS:
+                        uncertain_score += 2
+
+            # Hedging phrases within 2 words
+            for offset in range(max(0, i - 2), min(len(words) - 1, i + 3)):
+                if offset + 1 < len(words):
+                    tok2 = (words[offset].get('text', '').lower().strip('.,!?;:') + ' ' +
+                            words[offset + 1].get('text', '').lower().strip('.,!?;:'))
+                    if tok2 in HEDGING_PHRASES:
+                        uncertain_score += 1
+
+            # Word repetition after pause (restart signal)
+            words_before = set()
+            for offset in range(max(0, i - 2), i + 1):
+                w = words[offset].get('text', '').lower().strip('.,!?;:')
+                if len(w) >= 3:
+                    words_before.add(w)
+            for offset in range(i + 1, min(len(words), i + 4)):
+                tok = words[offset].get('text', '').lower().strip('.,!?;:')
+                if tok in words_before:
+                    uncertain_score += 2
+                    break
+
+            pause_type = 'emphatic' if emphatic_score > uncertain_score else 'uncertain'
+
             pauses.append({
                 'start_ms': gap_start,
                 'end_ms': gap_end,
@@ -376,6 +470,7 @@ def _find_pauses(words, min_ms=1000):
                 'speaker_before': speaker_before,
                 'speaker_after': speaker_after,
                 'speaker_change': speaker_before != speaker_after,
+                'pause_type': pause_type,
             })
     return pauses
 
@@ -419,7 +514,8 @@ def analyze_transcript_with_claude(transcript_data, preset_cfg, custom_instructi
     pauses = _find_pauses(words, min_ms=pause_min_ms) if remove_pauses else []
     pause_lines = []
     for p in pauses[:100]:
-        line = f'{p["start_ms"]} {p["end_ms"]} {p["duration_ms"]}ms  ("{p["before"]}" \u2192 "{p["after"]}")'
+        tag = p.get('pause_type', 'uncertain').upper()
+        line = f'{p["start_ms"]} {p["end_ms"]} {p["duration_ms"]}ms  ("{p["before"]}" \u2192 "{p["after"]}") [{tag}]'
         if is_multitrack and p.get('speaker_change'):
             line += f'  [SPEAKER CHANGE: {p["speaker_before"]}\u2192{p["speaker_after"]}]'
         pause_lines.append(line)
@@ -432,7 +528,14 @@ def analyze_transcript_with_claude(transcript_data, preset_cfg, custom_instructi
     ]
     stutter_text = "\n".join(stutter_lines) if stutter_lines else "None detected"
 
-    print(f"Pre-detected {len(fillers)} fillers, {len(pauses)} pauses, {len(stutters)} stutters")
+    hedging_clusters = _find_hedging_clusters(words)
+    hedging_lines = [
+        f'{c["start_ms"]} {c["end_ms"]} Speaker {c["speaker"]}: {c["count"]}x hedging ({", ".join(c["phrases"])})'
+        for c in hedging_clusters[:50]
+    ]
+    hedging_text = "\n".join(hedging_lines) if hedging_lines else "None detected"
+
+    print(f"Pre-detected {len(fillers)} fillers, {len(pauses)} pauses, {len(stutters)} stutters, {len(hedging_clusters)} hedging clusters")
 
     multitrack_rules = ""
     if is_multitrack:
@@ -461,6 +564,9 @@ PRE-DETECTED PAUSES >{pause_min_ms}ms (format: start_ms end_ms duration before\u
 PRE-DETECTED STUTTERS (format: start_ms end_ms "partial" \u2192 "full" [type] speaker):
 {stutter_text}
 
+PRE-DETECTED HEDGING CLUSTERS (3+ hedging phrases within 15s \u2014 uncertain passages):
+{hedging_text}
+
 RECORDING CONTEXT:
 {preset_cfg.get('claude_hint', '')}
 
@@ -482,15 +588,20 @@ FILLER WORD RULES:
 - Preserve ALL acronyms and industry-specific terms exactly as spoken \u2014 they are key terminology, not mistakes.
 
 PAUSE RULES:
-- For pauses listed above, trim so that any pause longer than {pause_min_ms}ms becomes about {pause_target_ms/1000:.1f} seconds.
-- Set start_ms = pause_start_ms + {pause_target_ms}, end_ms = pause_end_ms (keeps ~{pause_target_ms/1000:.1f}s of natural pause).
-- Trim ALL pauses in the list above \u2014 they have already been filtered by threshold, so every one should be trimmed.
-- Do NOT remove short, intentional pauses used for emphasis \u2014 only trim the clearly excessive ones.
+Each pause above is tagged [EMPHATIC] or [UNCERTAIN] based on surrounding context. Treat them differently:
+- [UNCERTAIN] pauses (near fillers, hedging, or restarts): Trim aggressively to ~0.5s. These are the speaker losing their thread, not dramatic effect.
+- [EMPHATIC] pauses (after complete sentences, topic transitions): Trim gently to ~1.2s, or leave entirely if the pause genuinely serves the narrative. A beat after a powerful statement makes it land harder \u2014 do not flatten that.
+- You may override the classification if you disagree based on the transcript context. The tags are heuristic, not gospel.
+- Set start_ms = pause_start_ms + target, end_ms = pause_end_ms (target = 500 for uncertain, 1200 for emphatic).
+- All pauses in the list should be addressed \u2014 either trimmed or explicitly left.
 {multitrack_rules}CONTENT RULES:
 - STUTTERS: Remove ALL pre-detected stutters listed above. For each stutter, cut the partial/duplicate word using its start_ms and end_ms. These are the safest type of content cut.
 - STUTTERS (scan independently): Also look through the transcript for stutters the pre-detection missed. These include: exact word duplicates ("so so"), partial-word false starts where a speaker begins a word then restarts it ("comm community", "compu computer", "tic particularly"), and repeated short phrases ("I think I think"). The transcriber may garble the partial word, so look for any short word immediately before a longer word that sounds like a false start of that word. Cut the partial/duplicate.
 - FALSE STARTS: Only cut when a speaker clearly abandons a sentence and restarts it. You must be very confident the restart is cleaner. If in doubt, leave both.
-- Do NOT make speculative content cuts. Only cut content you are 95%+ confident should be removed.
+- RESTATED THOUGHTS: When a speaker says something then immediately rephrases it more clearly (e.g. "the way we approach it is... well really what it comes down to is X"), cut the weaker first attempt and keep the cleaner version. Look for rephrase signals: "I mean", "well actually", "what I'm trying to say is", "so basically", "or rather". Only cut if the second version fully replaces the first \u2014 the result must read as a single clean sentence.
+- HEDGING CLUSTERS: In regions flagged as hedging clusters above, selectively remove 1-2 of the weakest hedging phrases ("you know", "I mean", "kind of") where removing them does not change the meaning. Do NOT strip all hedging \u2014 some is natural. Only thin out obvious clusters where the speaker sounds uncertain.
+- REPEATED POINTS: When a speaker makes the same point multiple times with different words in quick succession ("it's really important, I mean it's crucial"), keep the strongest version and cut the weaker one(s). The speaker should sound like they said it once, confidently.
+- Do NOT make speculative content cuts. Only cut content you are 90%+ confident should be removed.
 - Do NOT rewrite or paraphrase content. Do NOT change the meaning or tone of the speaker.
 - All content cuts MUST start at the beginning of a word (use the word's start_ms) and end at the end of a word (use the word's end_ms). NEVER cut mid-word.
 - SAFETY CHECK: Before finalizing any Content Cut, mentally read the sentence with the cut applied. If the remaining words do not form a complete, grammatical sentence, do NOT make the cut.

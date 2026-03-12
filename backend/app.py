@@ -353,6 +353,19 @@ def analyze_transcript_with_claude(transcript_data, preset_cfg, custom_instructi
 
     print(f"Pre-detected {len(fillers)} fillers, {len(pauses)} pauses")
 
+    multitrack_rules = ""
+    if is_multitrack:
+        multitrack_rules = (
+            "\nMULTI-TRACK RULES (CRITICAL \u2014 this audio was mixed from separate speaker tracks):\n"
+            "- SPEAKER TRANSITION PAUSES: When a pause occurs between two DIFFERENT speakers, do NOT trim it shorter than 1.5 seconds. "
+            "Trimming speaker transitions too aggressively causes speakers to sound like they are talking over each other because each track "
+            "contains background audio from the recording environment.\n"
+            "- FILLER WORDS NEAR TRANSITIONS: Do NOT remove filler words that occur within 500ms of another speaker starting or stopping. "
+            "These fillers overlap with the other speaker's audio on their track.\n"
+            "- Be MORE CONSERVATIVE overall with pause trimming \u2014 it is far better to have a slightly longer pause than to create speaker overlap artifacts.\n"
+            "- If a pause is between the SAME speaker's sentences, normal trimming rules apply.\n"
+        )
+
     prompt = f"""You are an experienced podcast editor. Your task is to clean and polish this podcast episode while keeping a natural, human flow. The goal is clean, confident, and human \u2014 NOT over-edited.
 
 UTTERANCE TRANSCRIPT (for context):
@@ -389,14 +402,7 @@ PAUSE RULES:
 - Set start_ms = pause_start_ms + {pause_target_ms}, end_ms = pause_end_ms (keeps ~{pause_target_ms/1000:.1f}s of natural pause).
 - Trim ALL pauses in the list above \u2014 they have already been filtered by threshold, so every one should be trimmed.
 - Do NOT remove short, intentional pauses used for emphasis \u2014 only trim the clearly excessive ones.
-{"" if not is_multitrack else """
-MULTI-TRACK RULES (CRITICAL — this audio was mixed from separate speaker tracks):
-- SPEAKER TRANSITION PAUSES: When a pause occurs between two DIFFERENT speakers, do NOT trim it shorter than 1.5 seconds. Trimming speaker transitions too aggressively causes speakers to sound like they are talking over each other because each track contains background audio from the recording environment.
-- FILLER WORDS NEAR TRANSITIONS: Do NOT remove filler words that occur within 500ms of another speaker starting or stopping. These fillers overlap with the other speaker's audio on their track.
-- Be MORE CONSERVATIVE overall with pause trimming — it is far better to have a slightly longer pause than to create speaker overlap artifacts.
-- If a pause is between the SAME speaker's sentences, normal trimming rules apply.
-"""}
-CONTENT RULES:
+{multitrack_rules}CONTENT RULES:
 - STUTTERS: When the EXACT same word appears twice in a row (e.g. "so so", "part part", "just as just", "still there still"), remove the duplicate. These are speech disfluencies, not emphasis. This is the safest type of content cut.
 - FALSE STARTS: Only cut when a speaker clearly abandons a sentence and restarts it. You must be very confident the restart is cleaner. If in doubt, leave both.
 - Do NOT make speculative content cuts. Only cut content you are 95%+ confident should be removed.

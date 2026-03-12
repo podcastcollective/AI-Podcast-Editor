@@ -4,3 +4,4 @@ anthropic>=0.49.0
 requests>=2.31.0
 gunicorn==21.2.0
 pydub==0.25.1
+audioop-lts==0.2.2

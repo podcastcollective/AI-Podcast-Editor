@@ -68,9 +68,9 @@
             { key: 'detecting',         label: 'Detecting preset...' },
             { key: 'analyzing',         label: 'Analysing with Claude AI' },
             { key: 'cutting',           label: 'Applying edits' },
-            { key: 'merging',           label: 'Merging intro & outro' },
             { key: 'enhancing',         label: 'Enhancing with Adobe Enhance Speech' },
-            { key: 'finalizing',        label: 'Finalizing audio' },
+            { key: 'merging',           label: 'Merging intro & outro' },
+            { key: 'mastering',         label: 'Mastering (de-click, limiter, loudness)' },
             { key: 'reviewing',         label: 'Reviewing quality' },
             { key: 'done',              label: 'Complete' },
         ];
@@ -99,6 +99,9 @@
             // Show notes state
             const [showNotes, setShowNotes] = useState(null);
             const [showNotesLoading, setShowNotesLoading] = useState(false);
+
+            // Edit decisions visibility
+            const [showEditsIndex, setShowEditsIndex] = useState(null);
 
             // Show profiles state
             const [profiles, setProfiles] = useState(() => {
@@ -342,7 +345,7 @@
                     if (statusData.status === 'cutting')           setPipelineStage('cutting');
                     if (statusData.status === 'merging')           setPipelineStage('merging');
                     if (statusData.status === 'enhancing')         setPipelineStage('enhancing');
-                    if (statusData.status === 'finalizing')        setPipelineStage('finalizing');
+                    if (statusData.status === 'mastering')         setPipelineStage('mastering');
                     if (statusData.status === 'reviewing')         setPipelineStage('reviewing');
                     if (statusData.status === 'completed') {
                         if (statusData.review) completedReview = statusData.review;
@@ -356,9 +359,9 @@
                 const dlRes = await fetch(`${API_URL}/api/edit-audio-download/${editJobId}`);
                 if (!dlRes.ok) {
                     const err = await safeJson(dlRes);
-                    throw { stage: 'finalizing', message: err?.error || 'Download failed' };
+                    throw { stage: 'mastering', message: err?.error || 'Download failed' };
                 }
-                return { blob: await dlRes.blob(), transcriptId: transcript_id, review: completedReview };
+                return { blob: await dlRes.blob(), transcriptId: transcript_id, review: completedReview, editDecisions };
             };
 
             const runFullPipeline = async () => {
@@ -376,7 +379,7 @@
                         setBatchResults([{ filename: multiFilename, status: 'processing' }]);
                         const transcriptId = await uploadMultiTrack();
                         const result = await processOneEpisode(null, transcriptId, true);
-                        setBatchResults([{ filename: multiFilename, status: 'completed', downloadBlob: result.blob, transcriptId: result.transcriptId, review: result.review }]);
+                        setBatchResults([{ filename: multiFilename, status: 'completed', downloadBlob: result.blob, transcriptId: result.transcriptId, review: result.review, editDecisions: result.editDecisions }]);
                         setPipelineStage('done');
                         setScreen('download');
                         return;
@@ -392,7 +395,7 @@
                             const result = await processOneEpisode(files[i]);
                             setBatchResults(prev => {
                                 const next = [...prev];
-                                next[i] = { filename: files[i].name, status: 'completed', downloadBlob: result.blob, transcriptId: result.transcriptId, review: result.review };
+                                next[i] = { filename: files[i].name, status: 'completed', downloadBlob: result.blob, transcriptId: result.transcriptId, review: result.review, editDecisions: result.editDecisions };
                                 return next;
                             });
                         } catch (err) {
@@ -537,6 +540,7 @@
                 setBatchResults([]);
                 setShowNotes(null);
                 setShowNotesLoading(false);
+                setShowEditsIndex(null);
                 downloadBlobRef.current = null;
                 transcriptIdRef.current = null;
                 editJobIdRef.current = null;
@@ -955,6 +959,14 @@
                                                         >
                                                             Show Notes
                                                         </button>
+                                                        {r.editDecisions?.length > 0 && (
+                                                            <button
+                                                                onClick={() => setShowEditsIndex(showEditsIndex === i ? null : i)}
+                                                                className={`text-xs px-3 py-1.5 rounded-lg transition-all ${showEditsIndex === i ? 'bg-purple-500/30 text-white' : 'bg-white/10 text-purple-300 hover:bg-white/20'}`}
+                                                            >
+                                                                Edits
+                                                            </button>
+                                                        )}
                                                     </div>
                                                 )}
                                             </div>
@@ -996,6 +1008,14 @@
                                             <Sparkles className="w-5 h-5" />
                                             {showNotesLoading ? 'Generating...' : 'Generate Show Notes'}
                                         </button>
+                                        {batchResults[0]?.editDecisions?.length > 0 && (
+                                            <button
+                                                onClick={() => setShowEditsIndex(showEditsIndex === 0 ? null : 0)}
+                                                className={`border font-semibold py-4 px-8 rounded-xl transition-all flex items-center justify-center gap-2 ${showEditsIndex === 0 ? 'bg-purple-500/20 border-purple-400 text-white' : 'bg-white/10 border-white/20 text-white hover:bg-white/20'}`}
+                                            >
+                                                {showEditsIndex === 0 ? 'Hide Edits' : 'View Edits'}
+                                            </button>
+                                        )}
                                     </div>
                                 )}
 
@@ -1041,6 +1061,57 @@
                                                     ))}
                                                 </div>
                                             )}
+                                        </div>
+                                    );
+                                })()}
+
+                                {/* Edit decisions panel */}
+                                {showEditsIndex != null && (() => {
+                                    const decisions = batchResults[showEditsIndex]?.editDecisions || [];
+                                    if (decisions.length === 0) return null;
+                                    const formatMs = (ms) => {
+                                        const totalSec = Math.floor(ms / 1000);
+                                        const min = Math.floor(totalSec / 60);
+                                        const sec = totalSec % 60;
+                                        return `${min}:${String(sec).padStart(2, '0')}`;
+                                    };
+                                    const types = ['Remove Filler', 'Trim Pause', 'Content Cut', 'Note'];
+                                    const grouped = {};
+                                    types.forEach(t => { grouped[t] = []; });
+                                    decisions.forEach(d => {
+                                        const key = types.includes(d.type) ? d.type : 'Note';
+                                        grouped[key].push(d);
+                                    });
+                                    const summary = types
+                                        .filter(t => grouped[t].length > 0)
+                                        .map(t => `${grouped[t].length} ${t.toLowerCase()}${grouped[t].length !== 1 ? 's' : ''}`)
+                                        .join(', ');
+                                    const confidenceColor = (c) => c >= 90 ? 'bg-green-500/20 text-green-300' : c >= 70 ? 'bg-yellow-500/20 text-yellow-300' : 'bg-red-500/20 text-red-300';
+                                    return (
+                                        <div className="mb-4 bg-white/5 rounded-xl border border-white/10 p-4">
+                                            <h3 className="text-sm font-semibold text-purple-200 uppercase tracking-wide mb-1">Edit Decisions</h3>
+                                            <p className="text-purple-300/70 text-xs mb-3">{decisions.length} edits: {summary}</p>
+                                            <div className="max-h-72 overflow-y-auto space-y-4 pr-1">
+                                                {types.filter(t => grouped[t].length > 0).map(type => (
+                                                    <div key={type}>
+                                                        <p className="text-xs font-semibold text-purple-200/80 mb-1.5">{type}</p>
+                                                        <div className="space-y-1">
+                                                            {grouped[type].map((d, j) => (
+                                                                <div key={j} className="bg-white/5 rounded-lg px-3 py-2 text-xs">
+                                                                    <div className="flex items-center gap-2">
+                                                                        {d.start_ms != null && (
+                                                                            <span className="text-purple-300/60 font-mono shrink-0">{formatMs(d.start_ms)}{d.end_ms != null ? ` \u2013 ${formatMs(d.end_ms)}` : ''}</span>
+                                                                        )}
+                                                                        <span className="text-white flex-1 truncate">{d.description}</span>
+                                                                        <span className={`shrink-0 px-1.5 py-0.5 rounded text-[10px] font-semibold ${confidenceColor(d.confidence)}`}>{d.confidence}%</span>
+                                                                    </div>
+                                                                    {d.rationale && <p className="text-purple-300/50 mt-0.5">{d.rationale}</p>}
+                                                                </div>
+                                                            ))}
+                                                        </div>
+                                                    </div>
+                                                ))}
+                                            </div>
                                         </div>
                                     );
                                 })()}

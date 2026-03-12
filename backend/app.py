@@ -1191,44 +1191,54 @@ def process_with_adobe_enhance(audio_path, enhance_mix=None):
 
 def _analyze_for_enhance(wav_path):
     """Quick ffmpeg analysis of cut audio for enhance mix recommendation.
-    Returns noise_floor_db, integrated_lufs, duration_s."""
-    result = {}
+    Returns noise_floor_db, integrated_lufs, duration_s.
+    Never raises — returns safe defaults on any failure."""
+    result = {'noise_floor_db': -35.0, 'integrated_lufs': -24.0, 'duration_s': 0.0}
 
-    # Duration via ffprobe
-    probe = subprocess.run(
-        ['ffprobe', '-v', 'error', '-show_entries', 'format=duration',
-         '-of', 'csv=p=0', wav_path],
-        capture_output=True, text=True, check=True, timeout=30,
-    )
-    result['duration_s'] = round(float(probe.stdout.strip()), 1)
+    try:
+        # Duration via ffprobe
+        probe = subprocess.run(
+            ['ffprobe', '-v', 'error', '-show_entries', 'format=duration',
+             '-of', 'csv=p=0', wav_path],
+            capture_output=True, text=True, timeout=30,
+        )
+        if probe.returncode == 0 and probe.stdout.strip():
+            result['duration_s'] = round(float(probe.stdout.strip()), 1)
+    except Exception as e:
+        print(f"Pre-enhance analysis: ffprobe failed: {e}")
 
-    # ebur128 for integrated loudness
-    ebur = subprocess.run(
-        ['ffmpeg', '-hide_banner', '-i', wav_path,
-         '-af', 'ebur128=peak=true', '-f', 'null', '-'],
-        capture_output=True, text=True, timeout=120,
-    )
-    result['integrated_lufs'] = -24.0
-    summary_start = ebur.stderr.rfind('Summary:')
-    if summary_start >= 0:
-        summary = ebur.stderr[summary_start:]
-        m = re.search(r'I:\s*([-\d.]+)\s*LUFS', summary)
-        if m:
-            result['integrated_lufs'] = round(float(m.group(1)), 1)
+    try:
+        # ebur128 for integrated loudness
+        ebur = subprocess.run(
+            ['ffmpeg', '-hide_banner', '-i', wav_path,
+             '-af', 'ebur128=peak=true', '-f', 'null', '-'],
+            capture_output=True, text=True, timeout=120,
+        )
+        if ebur.returncode == 0:
+            summary_start = ebur.stderr.rfind('Summary:')
+            if summary_start >= 0:
+                summary = ebur.stderr[summary_start:]
+                m = re.search(r'I:\s*([-\d.]+)\s*LUFS', summary)
+                if m:
+                    result['integrated_lufs'] = round(float(m.group(1)), 1)
+    except Exception as e:
+        print(f"Pre-enhance analysis: ebur128 failed: {e}")
 
-    # astats for noise floor (RMS trough = quietest segments)
-    astats = subprocess.run(
-        ['ffmpeg', '-hide_banner', '-i', wav_path,
-         '-af', 'astats', '-f', 'null', '-'],
-        capture_output=True, text=True, timeout=120,
-    )
-    noise_floor = -35.0
-    for line in astats.stderr.split('\n'):
-        m = re.search(r'RMS trough dB:\s*([-\d.]+)', line)
-        if m:
-            noise_floor = float(m.group(1))
-            break
-    result['noise_floor_db'] = round(noise_floor, 1)
+    try:
+        # astats for noise floor (RMS trough = quietest segments)
+        astats = subprocess.run(
+            ['ffmpeg', '-hide_banner', '-i', wav_path,
+             '-af', 'astats', '-f', 'null', '-'],
+            capture_output=True, text=True, timeout=120,
+        )
+        if astats.returncode == 0:
+            for line in astats.stderr.split('\n'):
+                m = re.search(r'RMS trough dB:\s*([-\d.]+)', line)
+                if m:
+                    result['noise_floor_db'] = round(float(m.group(1)), 1)
+                    break
+    except Exception as e:
+        print(f"Pre-enhance analysis: astats failed: {e}")
 
     print(f"Pre-enhance analysis: noise={result['noise_floor_db']}dB, "
           f"lufs={result['integrated_lufs']}, dur={result['duration_s']}s")

@@ -285,7 +285,9 @@ def _find_fillers(words):
 
 def _find_stutters(words):
     """Detect partial-word stutters: a truncated word followed by the complete word.
-    E.g. 'commu' followed by 'community', or exact duplicates like 'so so'."""
+    E.g. 'commu' followed by 'community', or exact duplicates like 'so so'.
+    Also catches cases where the transcriber garbles the partial word
+    (e.g. 'comm' transcribed as 'come' before 'community') via fuzzy prefix matching."""
     found = []
     for i in range(len(words) - 1):
         w1 = words[i]
@@ -305,8 +307,11 @@ def _find_stutters(words):
                 'type': 'duplicate',
             })
             continue
-        # Partial prefix: "commu" + "community" (prefix must be 3+ chars and shorter)
-        if len(t1) >= 3 and len(t1) < len(t2) and t2.startswith(t1):
+        # Skip if first word is longer or equal — not a false start
+        if len(t1) >= len(t2):
+            continue
+        # Exact prefix: "commu" + "community"
+        if len(t1) >= 3 and t2.startswith(t1):
             found.append({
                 'partial': t1,
                 'full': t2,
@@ -315,6 +320,40 @@ def _find_stutters(words):
                 'speaker': w1.get('speaker', '?'),
                 'type': 'partial',
             })
+            continue
+        # Fuzzy prefix: first 3+ chars match (catches transcription errors like
+        # "come" before "community" — ASR often garbles truncated syllables)
+        if len(t1) >= 3 and len(t2) >= 5:
+            match_len = 0
+            for c1, c2 in zip(t1, t2):
+                if c1 == c2:
+                    match_len += 1
+                else:
+                    break
+            # At least 3 leading chars match and the short word is mostly matched
+            if match_len >= 3 and match_len >= len(t1) - 1:
+                found.append({
+                    'partial': t1,
+                    'full': t2,
+                    'start_ms': w1.get('start', 0),
+                    'end_ms': w1.get('end', 0),
+                    'speaker': w1.get('speaker', '?'),
+                    'type': 'fuzzy',
+                })
+                continue
+        # Low-confidence short word before a longer word starting similarly
+        # (ASR often outputs garbage for truncated syllables)
+        c1 = w1.get('confidence', 1.0)
+        if c1 < 0.5 and len(t1) >= 2 and len(t1) < len(t2) and len(t2) >= 4:
+            if t2[:2] == t1[:2]:
+                found.append({
+                    'partial': t1,
+                    'full': t2,
+                    'start_ms': w1.get('start', 0),
+                    'end_ms': w1.get('end', 0),
+                    'speaker': w1.get('speaker', '?'),
+                    'type': 'low_confidence',
+                })
     return found
 
 
@@ -448,7 +487,8 @@ PAUSE RULES:
 - Trim ALL pauses in the list above \u2014 they have already been filtered by threshold, so every one should be trimmed.
 - Do NOT remove short, intentional pauses used for emphasis \u2014 only trim the clearly excessive ones.
 {multitrack_rules}CONTENT RULES:
-- STUTTERS: Remove ALL pre-detected stutters listed above. These include exact duplicates ("so so") and partial-word false starts ("commu" before "community"). For each stutter, cut the partial/duplicate word using its start_ms and end_ms. These are the safest type of content cut.
+- STUTTERS: Remove ALL pre-detected stutters listed above. For each stutter, cut the partial/duplicate word using its start_ms and end_ms. These are the safest type of content cut.
+- STUTTERS (scan independently): Also look through the transcript for stutters the pre-detection missed. These include: exact word duplicates ("so so"), partial-word false starts where a speaker begins a word then restarts it ("comm community", "compu computer", "tic particularly"), and repeated short phrases ("I think I think"). The transcriber may garble the partial word, so look for any short word immediately before a longer word that sounds like a false start of that word. Cut the partial/duplicate.
 - FALSE STARTS: Only cut when a speaker clearly abandons a sentence and restarts it. You must be very confident the restart is cleaner. If in doubt, leave both.
 - Do NOT make speculative content cuts. Only cut content you are 95%+ confident should be removed.
 - Do NOT rewrite or paraphrase content. Do NOT change the meaning or tone of the speaker.

@@ -68,6 +68,7 @@
             { key: 'detecting',         label: 'Detecting preset...' },
             { key: 'analyzing',         label: 'Analysing with Claude AI' },
             { key: 'cutting',           label: 'Applying edits' },
+            { key: 'awaiting_enhance',  label: 'Review enhance settings' },
             { key: 'enhancing',         label: 'Enhancing with Adobe Enhance Speech' },
             { key: 'merging',           label: 'Merging intro & outro' },
             { key: 'mastering',         label: 'Mastering (de-click, limiter, loudness)' },
@@ -99,6 +100,9 @@
             // Show notes state
             const [showNotes, setShowNotes] = useState(null);
             const [showNotesLoading, setShowNotesLoading] = useState(false);
+
+            // Enhance approval state (set when pipeline pauses for user to review mix)
+            const [enhanceApproval, setEnhanceApproval] = useState(null);
 
             // Edit decisions visibility
             const [showEditsIndex, setShowEditsIndex] = useState(null);
@@ -342,6 +346,27 @@
                     if (statusRes.status === 404) throw { stage: 'cutting', message: 'Server restarted during processing. Please retry.' };
                     const statusData = await safeJson(statusRes);
                     if (!statusData) continue;
+                    if (statusData.status === 'awaiting_enhance') {
+                        setPipelineStage('awaiting_enhance');
+                        // Pause pipeline: wait for user to approve enhance mix
+                        const approvedMix = await new Promise((resolve) => {
+                            setEnhanceApproval({
+                                jobId: editJobId,
+                                analysis: statusData.analysis,
+                                recommendedMix: statusData.recommended_mix,
+                                adjustedMix: { ...statusData.recommended_mix },
+                                resolve,
+                            });
+                        });
+                        // POST approval to backend
+                        await fetch(`${API_URL}/api/edit-audio-approve/${editJobId}`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ enhance_mix: approvedMix }),
+                        });
+                        setEnhanceApproval(null);
+                        continue;
+                    }
                     if (statusData.status === 'cutting')           setPipelineStage('cutting');
                     if (statusData.status === 'merging')           setPipelineStage('merging');
                     if (statusData.status === 'enhancing')         setPipelineStage('enhancing');
@@ -541,6 +566,7 @@
                 setShowNotes(null);
                 setShowNotesLoading(false);
                 setShowEditsIndex(null);
+                setEnhanceApproval(null);
                 downloadBlobRef.current = null;
                 transcriptIdRef.current = null;
                 editJobIdRef.current = null;
@@ -883,6 +909,83 @@
                                         );
                                     })}
                                 </div>
+
+                                {/* Enhance approval UI */}
+                                {enhanceApproval && (
+                                    <div className="mt-4 bg-purple-500/10 border border-purple-500/30 rounded-xl p-5">
+                                        <h3 className="text-sm font-semibold text-purple-200 uppercase tracking-wide mb-3">Audio Analysis</h3>
+                                        <div className="grid grid-cols-3 gap-3 mb-4">
+                                            <div className="bg-white/5 rounded-lg p-3 text-center">
+                                                <p className="text-purple-300/60 text-xs mb-1">Noise Floor</p>
+                                                <p className="text-white text-sm font-mono">{enhanceApproval.analysis.noise_floor_db} dB</p>
+                                            </div>
+                                            <div className="bg-white/5 rounded-lg p-3 text-center">
+                                                <p className="text-purple-300/60 text-xs mb-1">Loudness</p>
+                                                <p className="text-white text-sm font-mono">{enhanceApproval.analysis.integrated_lufs} LUFS</p>
+                                            </div>
+                                            <div className="bg-white/5 rounded-lg p-3 text-center">
+                                                <p className="text-purple-300/60 text-xs mb-1">Duration</p>
+                                                <p className="text-white text-sm font-mono">{Math.floor(enhanceApproval.analysis.duration_s / 60)}:{String(Math.floor(enhanceApproval.analysis.duration_s % 60)).padStart(2, '0')}</p>
+                                            </div>
+                                        </div>
+                                        <h3 className="text-sm font-semibold text-purple-200 uppercase tracking-wide mb-3">
+                                            Adobe Enhance Mix
+                                            <span className="font-normal normal-case text-purple-300/70 ml-1">
+                                                ({enhanceApproval.adjustedMix.speech}/{enhanceApproval.adjustedMix.background}/{enhanceApproval.adjustedMix.music})
+                                            </span>
+                                        </h3>
+                                        <div className="grid grid-cols-3 gap-3">
+                                            {[
+                                                { key: 'speech', label: 'Speech' },
+                                                { key: 'background', label: 'Background' },
+                                                { key: 'music', label: 'Music' },
+                                            ].map(({ key, label }) => (
+                                                <div key={key}>
+                                                    <label className="block text-xs text-purple-300/70 mb-1">{label}</label>
+                                                    <input
+                                                        type="number"
+                                                        min="0" max="100" step="5"
+                                                        value={enhanceApproval.adjustedMix[key]}
+                                                        onChange={e => setEnhanceApproval(prev => ({
+                                                            ...prev,
+                                                            adjustedMix: { ...prev.adjustedMix, [key]: Math.max(0, Math.min(100, parseInt(e.target.value) || 0)) }
+                                                        }))}
+                                                        className="w-full p-2 rounded-lg bg-white/10 border border-white/20 text-white text-sm text-center"
+                                                    />
+                                                </div>
+                                            ))}
+                                        </div>
+                                        <div className="flex gap-2 mt-2 mb-4">
+                                            {[
+                                                { label: '90/10/10', s: 90, b: 10, m: 10 },
+                                                { label: '40/10/10', s: 40, b: 10, m: 10 },
+                                                { label: '100/0/0', s: 100, b: 0, m: 0 },
+                                            ].map(p => (
+                                                <button
+                                                    key={p.label}
+                                                    onClick={() => setEnhanceApproval(prev => ({
+                                                        ...prev,
+                                                        adjustedMix: { speech: p.s, background: p.b, music: p.m }
+                                                    }))}
+                                                    className={`text-xs px-2 py-1 rounded border transition-all ${
+                                                        enhanceApproval.adjustedMix.speech === p.s && enhanceApproval.adjustedMix.background === p.b && enhanceApproval.adjustedMix.music === p.m
+                                                            ? 'bg-purple-500/20 border-purple-400 text-purple-200'
+                                                            : 'bg-white/5 border-white/10 text-purple-300/60 hover:bg-white/10'
+                                                    }`}
+                                                >
+                                                    {p.label}
+                                                </button>
+                                            ))}
+                                        </div>
+                                        <button
+                                            onClick={() => enhanceApproval.resolve(enhanceApproval.adjustedMix)}
+                                            className="w-full bg-gradient-to-r from-purple-500 to-pink-500 text-white font-semibold py-3 rounded-xl hover:from-purple-600 hover:to-pink-600 transition-all flex items-center justify-center gap-2"
+                                        >
+                                            <Sparkles className="w-4 h-4" />
+                                            Accept & Enhance
+                                        </button>
+                                    </div>
+                                )}
 
                                 {/* Error card */}
                                 {pipelineError && (

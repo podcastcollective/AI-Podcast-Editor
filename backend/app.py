@@ -1138,11 +1138,58 @@ def process_with_adobe_enhance(audio_path, enhance_mix=None):
 # EDIT PIPELINE — two-phase background jobs
 # ============================================================================
 
+def _analyze_for_enhance(wav_path):
+    """Quick ffmpeg analysis of cut audio for enhance mix recommendation.
+    Returns noise_floor_db, integrated_lufs, duration_s."""
+    result = {}
+
+    # Duration via ffprobe
+    probe = subprocess.run(
+        ['ffprobe', '-v', 'error', '-show_entries', 'format=duration',
+         '-of', 'csv=p=0', wav_path],
+        capture_output=True, text=True, check=True, timeout=30,
+    )
+    result['duration_s'] = round(float(probe.stdout.strip()), 1)
+
+    # ebur128 for integrated loudness
+    ebur = subprocess.run(
+        ['ffmpeg', '-hide_banner', '-i', wav_path,
+         '-af', 'ebur128=peak=true', '-f', 'null', '-'],
+        capture_output=True, text=True, timeout=120,
+    )
+    result['integrated_lufs'] = -24.0
+    summary_start = ebur.stderr.rfind('Summary:')
+    if summary_start >= 0:
+        summary = ebur.stderr[summary_start:]
+        m = re.search(r'I:\s*([-\d.]+)\s*LUFS', summary)
+        if m:
+            result['integrated_lufs'] = round(float(m.group(1)), 1)
+
+    # astats for noise floor (RMS trough = quietest segments)
+    astats = subprocess.run(
+        ['ffmpeg', '-hide_banner', '-i', wav_path,
+         '-af', 'astats', '-f', 'null', '-'],
+        capture_output=True, text=True, timeout=120,
+    )
+    noise_floor = -35.0
+    for line in astats.stderr.split('\n'):
+        m = re.search(r'RMS trough dB:\s*([-\d.]+)', line)
+        if m:
+            noise_floor = float(m.group(1))
+            break
+    result['noise_floor_db'] = round(noise_floor, 1)
+
+    print(f"Pre-enhance analysis: noise={result['noise_floor_db']}dB, "
+          f"lufs={result['integrated_lufs']}, dur={result['duration_s']}s")
+    return result
+
+
 def _run_edit_job(job_id, audio_path, cuts_ms, transcript_id=None,
                   intro_path=None, outro_path=None, enhance_mix=None):
     """
-    Background thread: apply cuts, optionally merge intro/outro, enhance, finalize.
-    Pipeline: cuts → merge (if intro/outro) → Adobe enhance → finalize → review → completed
+    Background thread: apply cuts, enhance, optionally merge intro/outro, finalize.
+    Pipeline: cuts → Adobe enhance → merge (if intro/outro) → mastering → review → completed
+    Intro/outro are already produced audio — they skip Adobe Enhance.
     """
     current_step = 'cutting'
     try:
@@ -1160,23 +1207,54 @@ def _run_edit_job(job_id, audio_path, cuts_ms, transcript_id=None,
             _edit_jobs[job_id]['status'] = 'cutting'
         wav_path = apply_audio_edits(audio_path, cuts_ms, words=words)
 
-        # Merge intro/outro if provided
+        # Analyze cut audio and pause for user approval of enhance mix
+        current_step = 'awaiting_enhance'
+        analysis = _analyze_for_enhance(wav_path)
+        nf = analysis['noise_floor_db']
+        if nf < -50:
+            recommended_mix = {'speech': 100, 'background': 0, 'music': 0}
+        elif nf > -35:
+            recommended_mix = {'speech': 80, 'background': 15, 'music': 10}
+        else:
+            recommended_mix = {'speech': 90, 'background': 10, 'music': 10}
+
+        approve_event = threading.Event()
+        with _edit_jobs_lock:
+            _edit_jobs[job_id]['status'] = 'awaiting_enhance'
+            _edit_jobs[job_id]['analysis'] = analysis
+            _edit_jobs[job_id]['recommended_mix'] = recommended_mix
+            _edit_jobs[job_id]['approved_mix'] = None
+            _edit_jobs[job_id]['_approve_event'] = approve_event
+
+        # Wait up to 10 minutes for user approval
+        approved = approve_event.wait(timeout=600)
+
+        with _edit_jobs_lock:
+            final_mix = _edit_jobs[job_id].get('approved_mix') or recommended_mix
+            _edit_jobs[job_id].pop('_approve_event', None)
+
+        if not approved:
+            print(f"Enhance approval timed out for {job_id}, using recommended mix: {recommended_mix}")
+        else:
+            print(f"Enhance approved for {job_id}, mix: {final_mix}")
+
+        # Enhance with Adobe Enhance Speech (before merging intro/outro)
+        current_step = 'enhancing'
+        with _edit_jobs_lock:
+            _edit_jobs[job_id]['status'] = 'enhancing'
+        enhanced_path = process_with_adobe_enhance(wav_path, enhance_mix=final_mix)
+
+        # Merge intro/outro after enhance — intro/outro are already produced audio
         if intro_path or outro_path:
             current_step = 'merging'
             with _edit_jobs_lock:
                 _edit_jobs[job_id]['status'] = 'merging'
-            wav_path = _concat_with_crossfade(wav_path, intro_path=intro_path, outro_path=outro_path)
+            enhanced_path = _concat_with_crossfade(enhanced_path, intro_path=intro_path, outro_path=outro_path)
 
-        # Enhance with Adobe Enhance Speech
-        current_step = 'enhancing'
+        # Mastering: click removal + peak limiting + loudness normalization + MP3
+        current_step = 'mastering'
         with _edit_jobs_lock:
-            _edit_jobs[job_id]['status'] = 'enhancing'
-        enhanced_path = process_with_adobe_enhance(wav_path, enhance_mix=enhance_mix)
-
-        # Finalize: stereo + peak-normalize + MP3
-        current_step = 'finalizing'
-        with _edit_jobs_lock:
-            _edit_jobs[job_id]['status'] = 'finalizing'
+            _edit_jobs[job_id]['status'] = 'mastering'
         _finalize_audio(job_id, enhanced_path)
 
         # Clean up raw multi-track files if this was a multi-track job
@@ -1905,11 +1983,36 @@ def edit_audio_status(job_id):
         return jsonify(resp)
     if job['status'] == 'error':
         return jsonify({"error": job['error'], "failed_step": job.get('failed_step')}), 500
-    # merging, enhancing, finalizing, reviewing, cutting, pending
+    # cutting, awaiting_enhance, enhancing, merging, mastering, reviewing, completed
     result = {"status": job['status']}
     if 'progress' in job:
         result['progress'] = job['progress']
+    if job['status'] == 'awaiting_enhance':
+        if 'analysis' in job:
+            result['analysis'] = job['analysis']
+        if 'recommended_mix' in job:
+            result['recommended_mix'] = job['recommended_mix']
     return jsonify(result)
+
+
+@app.route('/api/edit-audio-approve/<job_id>', methods=['POST', 'OPTIONS'])
+def edit_audio_approve(job_id):
+    """Accept enhance mix settings and resume the edit pipeline."""
+    if request.method == 'OPTIONS':
+        return '', 204
+    data = request.json or {}
+    mix = data.get('enhance_mix')
+    with _edit_jobs_lock:
+        job = _edit_jobs.get(job_id)
+        if not job:
+            return jsonify({"error": "Job not found"}), 404
+        if job.get('status') != 'awaiting_enhance':
+            return jsonify({"error": f"Job not awaiting approval (status: {job.get('status')})"}), 400
+        job['approved_mix'] = mix
+        event = job.get('_approve_event')
+    if event:
+        event.set()
+    return jsonify({"success": True})
 
 
 @app.route('/api/edit-audio-download/<job_id>', methods=['GET'])

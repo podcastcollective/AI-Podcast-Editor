@@ -62,11 +62,12 @@
         const API_URL = 'https://ai-podcast-editor-production.up.railway.app';
 
         const STAGES = [
-            { key: 'uploading',         label: 'Uploading audio' },
-            { key: 'combining',         label: 'Aligning & mixing tracks' },
-            { key: 'transcribing',      label: 'Transcribing with AssemblyAI' },
-            { key: 'detecting',         label: 'Detecting preset...' },
-            { key: 'analyzing',         label: 'Analysing with Claude AI' },
+            { key: 'uploading',            label: 'Uploading audio' },
+            { key: 'combining',            label: 'Aligning & mixing tracks' },
+            { key: 'transcribing',         label: 'Transcribing with AssemblyAI' },
+            { key: 'filler_assessment',    label: 'Filler assessment' },
+            { key: 'detecting',            label: 'Detecting preset...' },
+            { key: 'analyzing',            label: 'Analysing with Claude AI' },
             { key: 'cutting',           label: 'Applying edits' },
             { key: 'awaiting_enhance',  label: 'Review enhance settings' },
             { key: 'enhancing',         label: 'Enhancing with Adobe Enhance Speech' },
@@ -102,6 +103,9 @@
 
             // Enhance approval state (set when pipeline pauses for user to review mix)
             const [enhanceApproval, setEnhanceApproval] = useState(null);
+
+            // Filler assessment state (set when pipeline pauses after transcription)
+            const [fillerAssessment, setFillerAssessment] = useState(null);
 
             // Edit decisions visibility
             const [showEditsIndex, setShowEditsIndex] = useState(null);
@@ -256,9 +260,27 @@
                     }
                 }
 
+                // Stage 2b: Filler assessment pause
+                setPipelineStage('filler_assessment');
+                let chosenFillerPct = null;
+                try {
+                    const assessRes = await fetch(`${API_URL}/api/filler-assessment/${transcript_id}`);
+                    if (assessRes.ok) {
+                        const assessData = await assessRes.json();
+                        // Pause pipeline: wait for user to review and choose filler %
+                        chosenFillerPct = await new Promise((resolve) => {
+                            setFillerAssessment({ ...assessData, resolve });
+                        });
+                        setFillerAssessment(null);
+                    }
+                } catch (e) {
+                    console.warn('Filler assessment failed, continuing with default:', e);
+                }
+
                 // Stage 3: Claude analysis (with frontend-level retry on overload)
                 setPipelineStage('analyzing');
                 let editDecisions = [];
+                let fillerStats = null;
                 let resolvedPreset = preset;
                 let lastError = '';
                 const analysisBody = JSON.stringify({
@@ -267,6 +289,7 @@
                     preset,
                     customInstructions,
                     isMultitrack: isMultitrack,
+                    ...(chosenFillerPct != null ? { filler_pct: chosenFillerPct } : {}),
                 });
 
                 for (let analysisAttempt = 0; analysisAttempt < 3; analysisAttempt++) {
@@ -298,6 +321,7 @@
                         if (pollData.status === 'analyzing') setPipelineStage('analyzing');
                         if (pollData.success) {
                             editDecisions = pollData.edit_decisions || [];
+                            fillerStats = pollData.filler_stats || null;
                             if (pollData.detected_preset) {
                                 resolvedPreset = pollData.detected_preset;
                                 console.log(`Auto-detected preset: ${resolvedPreset}`, pollData.detection_metrics);
@@ -382,7 +406,7 @@
                     const err = await safeJson(dlRes);
                     throw { stage: 'mastering', message: err?.error || 'Download failed' };
                 }
-                return { blob: await dlRes.blob(), transcriptId: transcript_id, review: completedReview, editDecisions };
+                return { blob: await dlRes.blob(), transcriptId: transcript_id, review: completedReview, editDecisions, fillerStats };
             };
 
             const runFullPipeline = async () => {
@@ -400,7 +424,7 @@
                         setBatchResults([{ filename: multiFilename, status: 'processing' }]);
                         const transcriptId = await uploadMultiTrack();
                         const result = await processOneEpisode(null, transcriptId, true);
-                        setBatchResults([{ filename: multiFilename, status: 'completed', downloadBlob: result.blob, transcriptId: result.transcriptId, review: result.review, editDecisions: result.editDecisions }]);
+                        setBatchResults([{ filename: multiFilename, status: 'completed', downloadBlob: result.blob, transcriptId: result.transcriptId, review: result.review, editDecisions: result.editDecisions, fillerStats: result.fillerStats }]);
                         setPipelineStage('done');
                         setScreen('download');
                         return;
@@ -416,7 +440,7 @@
                             const result = await processOneEpisode(files[i]);
                             setBatchResults(prev => {
                                 const next = [...prev];
-                                next[i] = { filename: files[i].name, status: 'completed', downloadBlob: result.blob, transcriptId: result.transcriptId, review: result.review, editDecisions: result.editDecisions };
+                                next[i] = { filename: files[i].name, status: 'completed', downloadBlob: result.blob, transcriptId: result.transcriptId, review: result.review, editDecisions: result.editDecisions, fillerStats: result.fillerStats };
                                 return next;
                             });
                         } catch (err) {
@@ -563,6 +587,7 @@
                 setShowNotesLoading(false);
                 setShowEditsIndex(null);
                 setEnhanceApproval(null);
+                setFillerAssessment(null);
                 downloadBlobRef.current = null;
                 transcriptIdRef.current = null;
                 editJobIdRef.current = null;
@@ -859,6 +884,79 @@
                                     })}
                                 </div>
 
+                                {/* Filler assessment UI */}
+                                {fillerAssessment && (
+                                    <div className="mt-4 bg-purple-500/10 border border-purple-500/30 rounded-xl p-5">
+                                        <h3 className="text-sm font-semibold text-purple-200 uppercase tracking-wide mb-3">Filler Assessment</h3>
+                                        <div className="grid grid-cols-3 gap-3 mb-4">
+                                            <div className="bg-white/5 rounded-lg p-3 text-center">
+                                                <p className="text-purple-300/60 text-xs mb-1">Total Fillers</p>
+                                                <p className="text-white text-lg font-semibold">{fillerAssessment.total_fillers}</p>
+                                            </div>
+                                            <div className="bg-white/5 rounded-lg p-3 text-center">
+                                                <p className="text-purple-300/60 text-xs mb-1">Per Minute</p>
+                                                <p className="text-white text-lg font-semibold">{fillerAssessment.fillers_per_minute}</p>
+                                            </div>
+                                            <div className="bg-white/5 rounded-lg p-3 text-center">
+                                                <p className="text-purple-300/60 text-xs mb-1">Duration</p>
+                                                <p className="text-white text-lg font-semibold">{fillerAssessment.duration_minutes}m</p>
+                                            </div>
+                                        </div>
+                                        {fillerAssessment.by_type && Object.keys(fillerAssessment.by_type).length > 0 && (
+                                            <div className="flex flex-wrap gap-1.5 mb-4">
+                                                {Object.entries(fillerAssessment.by_type)
+                                                    .sort((a, b) => b[1] - a[1])
+                                                    .map(([word, count]) => (
+                                                        <span key={word} className="bg-white/10 border border-white/20 text-purple-200 text-xs px-2 py-1 rounded-full">
+                                                            {word} <span className="text-purple-300/60">{count}</span>
+                                                        </span>
+                                                    ))}
+                                            </div>
+                                        )}
+                                        <p className="text-purple-300/70 text-xs mb-3">
+                                            {fillerAssessment.fillers_per_minute < 1 ? 'Low filler density — conservative removal recommended.' :
+                                             fillerAssessment.fillers_per_minute < 3 ? 'Moderate filler density — standard removal.' :
+                                             fillerAssessment.fillers_per_minute < 5 ? 'High filler density — more aggressive removal recommended.' :
+                                             'Very high filler density — aggressive removal recommended.'}
+                                        </p>
+                                        <div className="mb-3">
+                                            <label className="block text-xs text-purple-300/70 mb-1">Filler removal %</label>
+                                            <input
+                                                type="number"
+                                                min="0" max="100" step="5"
+                                                value={fillerAssessment.chosenPct ?? fillerAssessment.suggested_pct}
+                                                onChange={e => setFillerAssessment(prev => ({
+                                                    ...prev,
+                                                    chosenPct: Math.max(0, Math.min(100, parseInt(e.target.value) || 0))
+                                                }))}
+                                                className="w-24 p-2 rounded-lg bg-white/10 border border-white/20 text-white text-sm text-center"
+                                            />
+                                        </div>
+                                        <div className="flex gap-2 mb-4">
+                                            {[40, 60, 75, 85].map(pct => (
+                                                <button
+                                                    key={pct}
+                                                    onClick={() => setFillerAssessment(prev => ({ ...prev, chosenPct: pct }))}
+                                                    className={`text-xs px-3 py-1.5 rounded border transition-all ${
+                                                        (fillerAssessment.chosenPct ?? fillerAssessment.suggested_pct) === pct
+                                                            ? 'bg-purple-500/20 border-purple-400 text-purple-200'
+                                                            : 'bg-white/5 border-white/10 text-purple-300/60 hover:bg-white/10'
+                                                    }`}
+                                                >
+                                                    {pct}%{pct === fillerAssessment.suggested_pct ? ' (suggested)' : ''}
+                                                </button>
+                                            ))}
+                                        </div>
+                                        <button
+                                            onClick={() => fillerAssessment.resolve(fillerAssessment.chosenPct ?? fillerAssessment.suggested_pct)}
+                                            className="w-full bg-gradient-to-r from-purple-500 to-pink-500 text-white font-semibold py-3 rounded-xl hover:from-purple-600 hover:to-pink-600 transition-all flex items-center justify-center gap-2"
+                                        >
+                                            <Sparkles className="w-4 h-4" />
+                                            Continue to Analysis
+                                        </button>
+                                    </div>
+                                )}
+
                                 {/* Enhance approval UI */}
                                 {enhanceApproval && (
                                     <div className="mt-4 bg-purple-500/10 border border-purple-500/30 rounded-xl p-5">
@@ -1142,6 +1240,11 @@
                                     return (
                                         <div className="mb-4 bg-white/5 rounded-xl border border-white/10 p-4">
                                             <h3 className="text-sm font-semibold text-purple-200 uppercase tracking-wide mb-1">Edit Decisions</h3>
+                                            {(() => {
+                                                const fs = batchResults[showEditsIndex]?.fillerStats;
+                                                if (!fs || !fs.total) return null;
+                                                return <p className="text-purple-200 text-xs mb-1">{fs.removed} of {fs.total} fillers removed ({fs.pct_used}%)</p>;
+                                            })()}
                                             <p className="text-purple-300/70 text-xs mb-3">{decisions.length} edits: {summary}</p>
                                             <div className="max-h-72 overflow-y-auto space-y-4 pr-1">
                                                 {types.filter(t => grouped[t].length > 0).map(type => (

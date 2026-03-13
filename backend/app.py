@@ -1919,7 +1919,54 @@ def transcription_status(transcript_id):
         return jsonify({"error": str(e)}), 500
 
 
-def _run_analysis_job(job_id, transcript_data, filename, preset_name, transcript_id, custom_instructions, is_multitrack=False):
+@app.route('/api/filler-assessment/<transcript_id>', methods=['GET'])
+def filler_assessment(transcript_id):
+    """Lightweight filler stats from a completed transcript — called before Claude analysis."""
+    if not ASSEMBLYAI_API_KEY:
+        return jsonify({"error": "ASSEMBLYAI_API_KEY not configured"}), 500
+    try:
+        transcript_data = get_transcription(transcript_id)
+        status = transcript_data.get("status")
+        if status != "completed":
+            return jsonify({"error": f"Transcription not ready (status: {status})"}), 400
+
+        words = transcript_data.get("words", [])
+        fillers = _find_fillers(words)
+        duration_ms = transcript_data.get("audio_duration", 0)
+        duration_min = duration_ms / 60000 if duration_ms else 0
+
+        # Breakdown by filler type
+        by_type = {}
+        for f in fillers:
+            t = f["text"]
+            by_type[t] = by_type.get(t, 0) + 1
+
+        fillers_per_min = (len(fillers) / duration_min) if duration_min > 0 else 0
+
+        # Suggestion based on density
+        if fillers_per_min < 1:
+            suggested_pct = 40
+        elif fillers_per_min < 3:
+            suggested_pct = 60
+        elif fillers_per_min < 5:
+            suggested_pct = 75
+        else:
+            suggested_pct = 85
+
+        return jsonify({
+            "total_fillers": len(fillers),
+            "fillers_per_minute": round(fillers_per_min, 1),
+            "duration_minutes": round(duration_min, 1),
+            "by_type": by_type,
+            "suggested_pct": suggested_pct,
+        })
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
+def _run_analysis_job(job_id, transcript_data, filename, preset_name, transcript_id, custom_instructions, is_multitrack=False, filler_pct_override=None):
     """Background thread: auto-detect preset if needed, then run Claude analysis."""
     try:
         detected_preset = None
@@ -1945,6 +1992,10 @@ def _run_analysis_job(job_id, transcript_data, filename, preset_name, transcript
         else:
             preset_cfg = _get_preset(preset_name)
 
+        # Apply user's filler_pct override if provided
+        if filler_pct_override is not None:
+            preset_cfg = {**preset_cfg, 'filler_pct': filler_pct_override}
+
         with _jobs_lock:
             _jobs[job_id]['status'] = 'analyzing'
 
@@ -1952,11 +2003,22 @@ def _run_analysis_job(job_id, transcript_data, filename, preset_name, transcript
         report = generate_edit_report(filename, transcript_data, edit_analysis, preset_cfg)
         cuts_count = sum(1 for d in edit_analysis['edit_decisions'] if 'start_ms' in d and 'end_ms' in d)
 
+        # Filler stats: total detected vs removed by Claude
+        words = transcript_data.get('words', [])
+        all_fillers = _find_fillers(words)
+        filler_removed = sum(1 for d in edit_analysis['edit_decisions'] if d.get('type') == 'Remove Filler')
+        filler_pct_used = preset_cfg.get('filler_pct', 60)
+
         result = {
             "success": True,
             "edit_decisions": edit_analysis['edit_decisions'],
             "cuts_count": cuts_count,
             "report": report,
+            "filler_stats": {
+                "total": len(all_fillers),
+                "removed": filler_removed,
+                "pct_used": filler_pct_used,
+            },
             "transcript": {
                 "duration": transcript_data.get('audio_duration', 0),
                 "words": len(transcript_data.get('words', [])),
@@ -2002,6 +2064,7 @@ def process_podcast():
         preset_name = data.get('preset', 'auto')
         custom_instructions = data.get('customInstructions', '')
         is_multitrack = data.get('isMultitrack', False)
+        filler_pct = data.get('filler_pct')  # optional override from filler assessment
 
         if not transcript_id:
             return jsonify({"error": "No transcript_id provided"}), 400
@@ -2019,7 +2082,7 @@ def process_podcast():
 
         threading.Thread(
             target=_run_analysis_job,
-            args=(job_id, transcript_data, filename, preset_name, transcript_id, custom_instructions, is_multitrack),
+            args=(job_id, transcript_data, filename, preset_name, transcript_id, custom_instructions, is_multitrack, filler_pct),
             daemon=True,
         ).start()
 

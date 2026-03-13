@@ -582,6 +582,7 @@ EDITING PHILOSOPHY:
 
 FILLER WORD RULES:
 - Remove approximately {filler_pct}% of the filler words listed above \u2014 NOT all of them.
+- "Remove a filler" means cutting ONLY the filler word itself (using its exact start_ms and end_ms from the list above). Do NOT remove surrounding words, phrases, or sentences — only the filler word.
 - Keep fillers that serve as clear natural transitions between distinct thoughts.
 - Remove fillers that cluster together, interrupt flow, or appear mid-sentence.
 - Use the EXACT start_ms and end_ms provided. CRITICAL: Never adjust these timestamps \u2014 they are word-level boundaries from the transcription engine.
@@ -598,9 +599,9 @@ Each pause above is tagged [EMPHATIC] or [UNCERTAIN] based on surrounding contex
 - STUTTERS: Remove ALL pre-detected stutters listed above. For each stutter, cut the partial/duplicate word using its start_ms and end_ms. These are the safest type of content cut.
 - STUTTERS (scan independently): Also look through the transcript for stutters the pre-detection missed. These include: exact word duplicates ("so so"), partial-word false starts where a speaker begins a word then restarts it ("comm community", "compu computer", "tic particularly"), and repeated short phrases ("I think I think"). The transcriber may garble the partial word, so look for any short word immediately before a longer word that sounds like a false start of that word. Cut the partial/duplicate.
 - FALSE STARTS: Only cut when a speaker clearly abandons a sentence and restarts it. You must be very confident the restart is cleaner. If in doubt, leave both.
-- RESTATED THOUGHTS: When a speaker says something then immediately rephrases it more clearly (e.g. "the way we approach it is... well really what it comes down to is X"), cut the weaker first attempt and keep the cleaner version. Look for rephrase signals: "I mean", "well actually", "what I'm trying to say is", "so basically", "or rather". Only cut if the second version fully replaces the first \u2014 the result must read as a single clean sentence.
-- HEDGING CLUSTERS: In regions flagged as hedging clusters above, selectively remove 1-2 of the weakest hedging phrases ("you know", "I mean", "kind of") where removing them does not change the meaning. Do NOT strip all hedging \u2014 some is natural. Only thin out obvious clusters where the speaker sounds uncertain.
-- REPEATED POINTS: When a speaker makes the same point multiple times with different words in quick succession ("it's really important, I mean it's crucial"), keep the strongest version and cut the weaker one(s). The speaker should sound like they said it once, confidently.
+- RESTATED THOUGHTS: Only cut when a speaker says something then IMMEDIATELY rephrases the exact same idea and BOTH versions are complete sentences. The second version must fully replace the first with zero loss of meaning. This should be very rare. If the two versions add different nuance or context, keep both.
+- HEDGING CLUSTERS: In regions flagged as hedging clusters above, you may remove 1-2 individual hedging phrases ("you know", "I mean", "kind of") — cut ONLY those exact words, not the sentence around them. Do NOT strip all hedging \u2014 some is natural.
+- REPEATED POINTS: When a speaker makes the exact same point twice in immediate succession, keep the stronger version. This should be rare — only when the repetition is truly redundant.
 - NEVER remove an entire sentence or clause just because it contains filler words like "kind of", "sort of", "you know". Remove the filler words themselves if needed, but KEEP the surrounding sentence — it carries meaning and context. A sentence with a filler removed is always better than a sentence deleted entirely.
 - Do NOT make speculative content cuts. Only cut content you are 90%+ confident should be removed.
 - Do NOT rewrite or paraphrase content. Do NOT change the meaning or tone of the speaker.
@@ -615,7 +616,7 @@ PRESERVE RULES (do NOT cut these):
 - SPEAKER TRANSITIONS where one person hands off to another \u2014 keep the social glue that makes dialogue sound natural.
 
 STRUCTURAL RULES:
-- PRE-RECORDING CHAT: Scan the first 60 seconds for obvious pre-recording cues — "okay recording now", "are we recording?", "let me hit record", "alright let's go", casual setup chatter, mic checks, etc. Mark everything before the actual episode content begins for removal as a Content Cut. This is critical — listeners should never hear recording logistics.
+- PRE-RECORDING CHAT: Look for obvious recording-start cues in the first 30 seconds — "okay recording now", "are we recording?", "let me hit record", mic checks, etc. ONLY cut the logistics chatter itself. Be extremely careful NOT to cut into the actual episode start (e.g. "welcome to...", introductions). The cut must end BEFORE the first word of real content. If unsure where pre-chat ends and content begins, err on the side of keeping too much.
 - POST-INTERVIEW CHAT: If there is chat after the episode has clearly concluded ("okay I'll stop recording", "that was great", wrap-up logistics), mark it for removal.
 - Preserve the full interview/episode content itself.
 

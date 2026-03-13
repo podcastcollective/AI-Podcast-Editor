@@ -616,7 +616,7 @@ PRESERVE RULES (do NOT cut these):
 - SPEAKER TRANSITIONS where one person hands off to another \u2014 keep the social glue that makes dialogue sound natural.
 
 STRUCTURAL RULES:
-- PRE-RECORDING CHAT: Look for obvious recording-start cues in the first 30 seconds — "okay recording now", "are we recording?", "let me hit record", mic checks, etc. ONLY cut the logistics chatter itself. Be extremely careful NOT to cut into the actual episode start (e.g. "welcome to...", introductions). The cut must end BEFORE the first word of real content. If unsure where pre-chat ends and content begins, err on the side of keeping too much.
+- PRE-RECORDING CHAT: Look for recording logistics in the first 30 seconds — "okay recording now", "we are now recording", "are we recording?", "let me hit record", mic checks, countdown cues, etc. These MUST be removed — listeners should never hear them. Cut from the start of the audio up to (but not including) the first word of actual episode content (e.g. "welcome to...", "hey everyone", the first real sentence). Find the exact word boundary where content begins and set your cut end_ms to just before that word's start_ms.
 - POST-INTERVIEW CHAT: If there is chat after the episode has clearly concluded ("okay I'll stop recording", "that was great", wrap-up logistics), mark it for removal.
 - Preserve the full interview/episode content itself.
 

@@ -1397,7 +1397,7 @@ def _analyze_for_enhance(wav_path):
 
 
 def _run_edit_job(job_id, audio_path, cuts_ms, transcript_id=None,
-                  intro_path=None, outro_path=None, enhance_mix=None):
+                  intro_path=None, outro_path=None):
     """
     Background thread: apply cuts, enhance, optionally merge intro/outro, finalize.
     Pipeline: cuts → Adobe enhance → merge (if intro/outro) → mastering → review → completed
@@ -2142,22 +2142,14 @@ def edit_audio():
                 outro_file.save(outro_path)
                 print(f"Outro saved: {outro_path} ({os.path.getsize(outro_path) // 1024}KB)")
 
-        # Parse optional Adobe enhance mix ratios and multitrack flag
-        enhance_mix = None
+        # Parse multitrack flag
         is_multitrack = False
         if request.content_type and 'multipart' in request.content_type:
-            enhance_mix_raw = request.form.get('enhance_mix')
             is_multitrack = request.form.get('is_multitrack') == 'true'
         else:
-            enhance_mix_raw = data.get('enhance_mix')
             is_multitrack = data.get('is_multitrack', False)
-        if enhance_mix_raw:
-            try:
-                enhance_mix = _json.loads(enhance_mix_raw) if isinstance(enhance_mix_raw, str) else enhance_mix_raw
-            except Exception:
-                pass
 
-        print(f"Edit job: {len(cuts_ms)} cuts, intro={'yes' if intro_path else 'no'}, outro={'yes' if outro_path else 'no'}, mix={enhance_mix}, is_multitrack={is_multitrack}")
+        print(f"Edit job: {len(cuts_ms)} cuts, intro={'yes' if intro_path else 'no'}, outro={'yes' if outro_path else 'no'}, is_multitrack={is_multitrack}")
 
         with _edit_jobs_lock:
             _edit_jobs[job_id] = {'status': 'pending'}
@@ -2167,7 +2159,7 @@ def edit_audio():
         threading.Thread(
             target=_run_edit_job,
             args=(job_id, audio_path, cuts_ms, transcript_id),
-            kwargs={'intro_path': intro_path, 'outro_path': outro_path, 'enhance_mix': enhance_mix},
+            kwargs={'intro_path': intro_path, 'outro_path': outro_path},
             daemon=True,
         ).start()
 

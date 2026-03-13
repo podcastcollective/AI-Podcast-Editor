@@ -601,10 +601,12 @@ Each pause above is tagged [EMPHATIC] or [UNCERTAIN] based on surrounding contex
 - RESTATED THOUGHTS: When a speaker says something then immediately rephrases it more clearly (e.g. "the way we approach it is... well really what it comes down to is X"), cut the weaker first attempt and keep the cleaner version. Look for rephrase signals: "I mean", "well actually", "what I'm trying to say is", "so basically", "or rather". Only cut if the second version fully replaces the first \u2014 the result must read as a single clean sentence.
 - HEDGING CLUSTERS: In regions flagged as hedging clusters above, selectively remove 1-2 of the weakest hedging phrases ("you know", "I mean", "kind of") where removing them does not change the meaning. Do NOT strip all hedging \u2014 some is natural. Only thin out obvious clusters where the speaker sounds uncertain.
 - REPEATED POINTS: When a speaker makes the same point multiple times with different words in quick succession ("it's really important, I mean it's crucial"), keep the strongest version and cut the weaker one(s). The speaker should sound like they said it once, confidently.
+- NEVER remove an entire sentence or clause just because it contains filler words like "kind of", "sort of", "you know". Remove the filler words themselves if needed, but KEEP the surrounding sentence — it carries meaning and context. A sentence with a filler removed is always better than a sentence deleted entirely.
 - Do NOT make speculative content cuts. Only cut content you are 90%+ confident should be removed.
 - Do NOT rewrite or paraphrase content. Do NOT change the meaning or tone of the speaker.
 - All content cuts MUST start at the beginning of a word (use the word's start_ms) and end at the end of a word (use the word's end_ms). NEVER cut mid-word.
 - SAFETY CHECK: Before finalizing any Content Cut, mentally read the sentence with the cut applied. If the remaining words do not form a complete, grammatical sentence, do NOT make the cut.
+- SCOPE CHECK: If a Content Cut spans more than 5 seconds, you are almost certainly cutting too much. Re-examine whether you are removing an entire thought that should be kept. Long content cuts should be extremely rare and only for clear pre/post-recording chat or fully abandoned false starts.
 
 PRESERVE RULES (do NOT cut these):
 - TRANSITIONAL PHRASES that connect topics or introduce new points, even if they seem tangential. E.g. "I think the other thing I'd flag which maybe doesn't fall under compliance but it's part of it" \u2014 these bridge ideas and must be kept.
@@ -613,9 +615,9 @@ PRESERVE RULES (do NOT cut these):
 - SPEAKER TRANSITIONS where one person hands off to another \u2014 keep the social glue that makes dialogue sound natural.
 
 STRUCTURAL RULES:
-- If there is pre-interview chat before the official episode begins, mark it for removal.
-- If there is post-interview chat after the episode has clearly concluded, mark it for removal.
-- Preserve the full interview content itself.
+- PRE-RECORDING CHAT: Scan the first 60 seconds for obvious pre-recording cues — "okay recording now", "are we recording?", "let me hit record", "alright let's go", casual setup chatter, mic checks, etc. Mark everything before the actual episode content begins for removal as a Content Cut. This is critical — listeners should never hear recording logistics.
+- POST-INTERVIEW CHAT: If there is chat after the episode has clearly concluded ("okay I'll stop recording", "that was great", wrap-up logistics), mark it for removal.
+- Preserve the full interview/episode content itself.
 
 OUTPUT RULES:
 - Add at least one "Note" decision (no start_ms/end_ms) summarizing the overall edit.

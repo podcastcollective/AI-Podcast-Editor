@@ -9,7 +9,6 @@
     <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
     <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://cdn.jsdelivr.net/npm/docx@9.6.1/build/index.umd.min.js"></script>
 </head>
 <body>
     <div id="root"></div>
@@ -602,48 +601,20 @@
                 if (showNotes) navigator.clipboard.writeText(showNotes);
             };
 
-            const downloadShowNotes = async () => {
+            const downloadShowNotes = () => {
                 if (!showNotes) return;
-                const { Document, Paragraph, TextRun, HeadingLevel, Packer } = window.docx;
-
-                const children = [];
-                for (const line of showNotes.split('\n')) {
-                    const trimmed = line.trim();
-                    if (!trimmed) continue;
-
-                    if (trimmed.startsWith('### ')) {
-                        children.push(new Paragraph({ text: trimmed.slice(4), heading: HeadingLevel.HEADING_3 }));
-                    } else if (trimmed.startsWith('## ')) {
-                        children.push(new Paragraph({ text: trimmed.slice(3), heading: HeadingLevel.HEADING_2 }));
-                    } else if (trimmed.startsWith('# ')) {
-                        children.push(new Paragraph({ text: trimmed.slice(2), heading: HeadingLevel.HEADING_1 }));
-                    } else if (trimmed.startsWith('- ')) {
-                        const bulletText = trimmed.slice(2);
-                        // Parse bold segments: **text**
-                        const parts = bulletText.split(/(\*\*.+?\*\*)/g);
-                        const runs = parts.filter(Boolean).map(p =>
-                            p.startsWith('**') && p.endsWith('**')
-                                ? new TextRun({ text: p.slice(2, -2), bold: true })
-                                : new TextRun(p)
-                        );
-                        children.push(new Paragraph({ children: runs, bullet: { level: 0 } }));
-                    } else {
-                        // Regular paragraph — parse bold
-                        const parts = trimmed.split(/(\*\*.+?\*\*)/g);
-                        const runs = parts.filter(Boolean).map(p =>
-                            p.startsWith('**') && p.endsWith('**')
-                                ? new TextRun({ text: p.slice(2, -2), bold: true })
-                                : new TextRun(p)
-                        );
-                        children.push(new Paragraph({ children: runs }));
-                    }
-                }
-
-                const doc = new Document({
-                    sections: [{ children }],
-                });
-
-                const blob = await Packer.toBlob(doc);
+                const html = showNotes
+                    .replace(/^### (.+)$/gm, '<h3>$1</h3>')
+                    .replace(/^## (.+)$/gm, '<h2>$1</h2>')
+                    .replace(/^# (.+)$/gm, '<h1>$1</h1>')
+                    .replace(/^\- \[(\d{2}:\d{2}:\d{2})\] (.+)$/gm, '<li><b>[$1]</b> $2</li>')
+                    .replace(/^\- (.+)$/gm, '<li>$1</li>')
+                    .replace(/(<li>.*<\/li>\n?)+/g, '<ul>$&</ul>')
+                    .replace(/\*\*(.+?)\*\*/g, '<b>$1</b>')
+                    .replace(/\n{2,}/g, '<br><br>')
+                    .replace(/\n/g, '<br>');
+                const doc = `<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w="urn:schemas-microsoft-com:office:word" xmlns="http://www.w3.org/TR/REC-html40"><head><meta charset="utf-8"><style>body{font-family:Arial,sans-serif;font-size:11pt;line-height:1.5}h1{font-size:18pt}h2{font-size:14pt;margin-top:16pt}h3{font-size:12pt}ul{margin:4pt 0}li{margin:2pt 0}</style></head><body>${html}</body></html>`;
+                const blob = new Blob([doc], { type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' });
                 const url = URL.createObjectURL(blob);
                 const a = document.createElement('a');
                 a.href = url;

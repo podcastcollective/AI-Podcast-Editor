@@ -2439,5 +2439,139 @@ def token_status():
         return jsonify({"refresh_needed": _adobe_token_refresh_needed})
 
 
+# ============================================================================
+# GOOGLE DOCS EXPORT
+# ============================================================================
+
+def _markdown_to_docs_requests(markdown_text):
+    """Convert markdown show notes to Google Docs API batch update requests."""
+    requests_list = []
+    idx = 1  # cursor position (1-based, after initial newline)
+
+    for line in markdown_text.split('\n'):
+        stripped = line.strip()
+        if not stripped:
+            continue
+
+        # Determine heading level or bullet
+        heading_level = None
+        text = stripped
+        is_bullet = False
+
+        if stripped.startswith('### '):
+            heading_level = 'HEADING_3'
+            text = stripped[4:]
+        elif stripped.startswith('## '):
+            heading_level = 'HEADING_2'
+            text = stripped[3:]
+        elif stripped.startswith('# '):
+            heading_level = 'HEADING_1'
+            text = stripped[2:]
+        elif stripped.startswith('- '):
+            is_bullet = True
+            text = stripped[2:]
+
+        # Strip bold markers for plain text insertion
+        clean_text = re.sub(r'\*\*(.+?)\*\*', r'\1', text)
+        insert_text = clean_text + '\n'
+
+        # Insert text
+        requests_list.append({
+            'insertText': {
+                'location': {'index': idx},
+                'text': insert_text,
+            }
+        })
+
+        # Apply heading style
+        if heading_level:
+            requests_list.append({
+                'updateParagraphStyle': {
+                    'range': {'startIndex': idx, 'endIndex': idx + len(insert_text)},
+                    'paragraphStyle': {'namedStyleType': heading_level},
+                    'fields': 'namedStyleType',
+                }
+            })
+
+        # Apply bullet
+        if is_bullet:
+            requests_list.append({
+                'createParagraphBullets': {
+                    'range': {'startIndex': idx, 'endIndex': idx + len(insert_text)},
+                    'bulletPreset': 'BULLET_DISC_CIRCLE_SQUARE',
+                }
+            })
+
+        # Apply bold to **text** segments
+        bold_pattern = re.compile(r'\*\*(.+?)\*\*')
+        offset = 0
+        for match in bold_pattern.finditer(text):
+            # Calculate position in clean text
+            bold_text = match.group(1)
+            # Find where this bold text is in clean_text
+            bold_start = clean_text.find(bold_text, offset)
+            if bold_start >= 0:
+                requests_list.append({
+                    'updateTextStyle': {
+                        'range': {
+                            'startIndex': idx + bold_start,
+                            'endIndex': idx + bold_start + len(bold_text),
+                        },
+                        'textStyle': {'bold': True},
+                        'fields': 'bold',
+                    }
+                })
+                offset = bold_start + len(bold_text)
+
+        idx += len(insert_text)
+
+    return requests_list
+
+
+@app.route('/api/export-google-doc', methods=['POST', 'OPTIONS'])
+def export_google_doc():
+    """Create a Google Doc from show notes markdown."""
+    if request.method == 'OPTIONS':
+        return '', 204
+    try:
+        import google.auth
+        from googleapiclient.discovery import build
+
+        data = request.json
+        show_notes = data.get('show_notes', '').strip()
+        title = data.get('title', 'Show Notes')
+        if not show_notes:
+            return jsonify({"error": "No show_notes provided"}), 400
+
+        creds, _ = google.auth.default(
+            scopes=['https://www.googleapis.com/auth/documents',
+                    'https://www.googleapis.com/auth/drive']
+        )
+
+        docs_service = build('docs', 'v1', credentials=creds)
+
+        # Create empty doc
+        doc = docs_service.documents().create(body={'title': title}).execute()
+        doc_id = doc['documentId']
+        doc_url = f"https://docs.google.com/document/d/{doc_id}/edit"
+
+        # Build formatting requests
+        reqs = _markdown_to_docs_requests(show_notes)
+        if reqs:
+            docs_service.documents().batchUpdate(
+                documentId=doc_id,
+                body={'requests': reqs},
+            ).execute()
+
+        print(f"Created Google Doc: {doc_url}")
+        return jsonify({"success": True, "url": doc_url, "doc_id": doc_id})
+    except ImportError:
+        return jsonify({"error": "Google API libraries not installed"}), 500
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)), debug=False)

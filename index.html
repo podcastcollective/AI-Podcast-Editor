@@ -629,6 +629,28 @@
                 URL.revokeObjectURL(url);
             };
 
+            const [exportingDoc, setExportingDoc] = useState(false);
+
+            const exportToGoogleDocs = async () => {
+                if (!showNotes || exportingDoc) return;
+                setExportingDoc(true);
+                try {
+                    const res = await fetch(`${API_URL}/api/export-google-doc`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ show_notes: showNotes, title: 'Show Notes' }),
+                    });
+                    const data = await res.json();
+                    if (!res.ok) throw new Error(data.error || 'Export failed');
+                    window.open(data.url, '_blank');
+                } catch (e) {
+                    console.error('Google Docs export error:', e);
+                    alert('Export failed: ' + e.message);
+                } finally {
+                    setExportingDoc(false);
+                }
+            };
+
             const resetToUpload = () => {
                 setScreen('upload');
                 setPipelineStage(null);
@@ -836,6 +858,7 @@
                                                     <div className="flex gap-2">
                                                         <button onClick={copyShowNotes} className="text-xs text-purple-300 hover:text-white transition-all">Copy</button>
                                                         <button onClick={downloadShowNotes} className="text-xs text-purple-300 hover:text-white transition-all">Download</button>
+                                                        <button onClick={exportToGoogleDocs} disabled={exportingDoc} className="text-xs text-purple-300 hover:text-white transition-all disabled:opacity-50">{exportingDoc ? 'Exporting...' : 'Google Docs'}</button>
                                                     </div>
                                                 </div>
                                                 <pre className="bg-black/20 rounded-lg border border-white/10 p-4 text-purple-100 text-sm whitespace-pre-wrap max-h-80 overflow-y-auto">{showNotes}</pre>
@@ -1550,6 +1573,7 @@
                                                     <div className="flex gap-2">
                                                         <button onClick={copyShowNotes} className="text-xs text-purple-300 hover:text-white transition-all">Copy</button>
                                                         <button onClick={downloadShowNotes} className="text-xs text-purple-300 hover:text-white transition-all">Download</button>
+                                                        <button onClick={exportToGoogleDocs} disabled={exportingDoc} className="text-xs text-purple-300 hover:text-white transition-all disabled:opacity-50">{exportingDoc ? 'Exporting...' : 'Google Docs'}</button>
                                                     </div>
                                                 </div>
                                                 <pre className="bg-black/20 rounded-lg border border-white/10 p-4 text-purple-100 text-sm whitespace-pre-wrap max-h-80 overflow-y-auto">{showNotes}</pre>

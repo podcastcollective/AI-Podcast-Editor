@@ -50,17 +50,17 @@ def _mark_token_used():
         _adobe_token_refresh_needed = True
 
 
-# Google credentials from env var (base64-encoded JSON)
-_google_creds_b64 = os.environ.get('GOOGLE_CREDENTIALS_B64')
-if _google_creds_b64:
+# Google credentials from env var (raw JSON string)
+_google_creds_json = os.environ.get('GOOGLE_CREDENTIALS_JSON')
+if _google_creds_json:
     import tempfile as _tmpmod
     _gcp_creds_path = os.path.join(_tmpmod.gettempdir(), 'gcp_credentials.json')
     with open(_gcp_creds_path, 'w') as _f:
-        _f.write(base64.b64decode(_google_creds_b64).decode())
+        _f.write(_google_creds_json)
     os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = _gcp_creds_path
     print("Google credentials: configured")
 else:
-    print("WARNING: GOOGLE_CREDENTIALS_B64 not set — Google Docs export will fail on Railway")
+    print("WARNING: GOOGLE_CREDENTIALS_JSON not set — Google Docs export will fail on Railway")
 
 if not ASSEMBLYAI_API_KEY or not CLAUDE_API_KEY:
     print("WARNING: ASSEMBLYAI_API_KEY and CLAUDE_API_KEY are required")

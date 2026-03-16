@@ -3,7 +3,7 @@ flask-cors==4.0.0
 anthropic>=0.49.0
 requests>=2.31.0
 gunicorn==21.2.0
-google-auth>=2.22.0
-google-api-python-client>=2.100.0
+google-auth
+google-api-python-client
 pydub==0.25.1
 audioop-lts==0.2.2; python_version >= "3.13"

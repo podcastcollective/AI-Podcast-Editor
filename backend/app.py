@@ -582,11 +582,12 @@ EDITING PHILOSOPHY:
 
 FILLER WORD RULES:
 - Remove approximately {filler_pct}% of the filler words listed above \u2014 NOT all of them.
-- "Remove a filler" means cutting ONLY the filler word itself (using its exact start_ms and end_ms from the list above). Do NOT remove surrounding words, phrases, or sentences — only the filler word.
+- "Remove a filler" means cutting ONLY the filler word itself (using its exact start_ms and end_ms from the list above). Do NOT remove surrounding words, phrases, or sentences — only the filler word. NEVER delete content words adjacent to a filler. The words before and after the filler must remain fully intact in the output.
 - Keep fillers that serve as clear natural transitions between distinct thoughts.
 - Remove fillers that cluster together, interrupt flow, or appear mid-sentence.
 - Use the EXACT start_ms and end_ms provided. CRITICAL: Never adjust these timestamps \u2014 they are word-level boundaries from the transcription engine.
 - Preserve ALL acronyms and industry-specific terms exactly as spoken \u2014 they are key terminology, not mistakes.
+- SMOOTHNESS: Filler cuts are micro-faded at boundaries. For best results, only remove fillers where the surrounding audio flows naturally without them — if removing a filler would create an awkward jump or unnatural rhythm, leave it in.
 
 PAUSE RULES:
 Each pause above is tagged [EMPHATIC] or [UNCERTAIN] based on surrounding context. Treat them differently:
@@ -616,7 +617,8 @@ PRESERVE RULES (do NOT cut these):
 - SPEAKER TRANSITIONS where one person hands off to another \u2014 keep the social glue that makes dialogue sound natural.
 
 STRUCTURAL RULES:
-- PRE-RECORDING CHAT: Look for recording logistics in the first 30 seconds — "okay recording now", "we are now recording", "are we recording?", "let me hit record", mic checks, countdown cues, etc. These MUST be removed — listeners should never hear them. Cut from the start of the audio up to (but not including) the first word of actual episode content (e.g. "welcome to...", "hey everyone", the first real sentence). Find the exact word boundary where content begins and set your cut end_ms to just before that word's start_ms.
+- PRE-RECORDING CHAT: Look for recording logistics in the first 60 seconds — "okay recording now", "we are now recording", "are we recording?", "let me hit record", mic checks, countdown cues, etc. These MUST be removed — listeners should never hear them. Cut from the start of the audio up to (but not including) the first word of actual episode content (e.g. "welcome to...", "hey everyone", the first real sentence). Find the exact word boundary where content begins and set your cut end_ms to just before that word's start_ms. IMPORTANT: The first word of real content must NOT be clipped — ensure the cut ends before (not at) its start_ms.
+- LAST WORD PROTECTION: When making any cut near the end of the episode, ensure the final word of real content is fully preserved. Never set a cut's start_ms within the last spoken word — use the word's end_ms as the earliest allowed cut point.
 - POST-INTERVIEW CHAT: If there is chat after the episode has clearly concluded ("okay I'll stop recording", "that was great", wrap-up logistics), mark it for removal.
 - Preserve the full interview/episode content itself.
 

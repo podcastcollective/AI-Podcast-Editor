@@ -2554,8 +2554,8 @@ def export_google_doc():
             token=None,
             refresh_token=_GOOGLE_REFRESH_TOKEN,
             token_uri='https://oauth2.googleapis.com/token',
-            client_id='764086051850-6qr4p6gpi6hn506pt8ejuq83di341hur.apps.googleusercontent.com',
-            client_secret='d-FL95Q19q7MQmFpd7hHD0Ty',
+            client_id=os.environ.get('GOOGLE_CLIENT_ID', ''),
+            client_secret=os.environ.get('GOOGLE_CLIENT_SECRET', ''),
         )
 
         docs_service = build('docs', 'v1', credentials=creds)

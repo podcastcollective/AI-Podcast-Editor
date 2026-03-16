@@ -79,7 +79,9 @@
 
         function PodcastEditor() {
             const [screen, setScreen] = useState('upload');
+            const [appMode, setAppMode] = useState('edit'); // 'edit' | 'shownotes'
             const [uploadMode, setUploadMode] = useState('single'); // 'single' | 'multi'
+            const [transcriptText, setTranscriptText] = useState('');
             const [tracks, setTracks] = useState([]); // [{file, label}]
             const [files, setFiles] = useState([]);
             const [introFile, setIntroFile] = useState(null);
@@ -542,6 +544,46 @@
                 }
             };
 
+            const handleGenerateShowNotesFromText = async (text) => {
+                if (!text.trim()) return;
+                setShowNotesLoading(true);
+                setShowNotes(null);
+                try {
+                    const res = await fetch(`${API_URL}/api/show-notes-from-text`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ transcript_text: text }),
+                    });
+                    const data = await res.json();
+                    if (!res.ok) throw new Error(data.error || 'Failed to start show notes');
+                    const jobId = data.job_id;
+
+                    while (true) {
+                        await new Promise(r => setTimeout(r, 3000));
+                        const pollRes = await fetch(`${API_URL}/api/show-notes-status/${jobId}`);
+                        const pollData = await pollRes.json();
+                        if (pollData.status === 'completed') {
+                            setShowNotes(pollData.show_notes);
+                            break;
+                        }
+                        if (!pollRes.ok) throw new Error(pollData.error || 'Show notes generation failed');
+                    }
+                } catch (e) {
+                    console.error('Show notes from text error:', e);
+                    setShowNotes(`Error: ${e.message}`);
+                } finally {
+                    setShowNotesLoading(false);
+                }
+            };
+
+            const handleTranscriptFileUpload = (e) => {
+                const file = e.target.files[0];
+                if (!file) return;
+                const reader = new FileReader();
+                reader.onload = (ev) => setTranscriptText(ev.target.result);
+                reader.readAsText(file);
+            };
+
             const copyShowNotes = () => {
                 if (showNotes) navigator.clipboard.writeText(showNotes);
             };
@@ -585,6 +627,7 @@
                 setBatchResults([]);
                 setShowNotes(null);
                 setShowNotesLoading(false);
+                setTranscriptText('');
                 setShowEditsIndex(null);
                 setEnhanceApproval(null);
                 setFillerAssessment(null);
@@ -607,8 +650,94 @@
                             </div>
                         </div>
 
-                        {/* Screen 1: Upload */}
+                        {/* Top-level mode toggle */}
                         {screen === 'upload' && (
+                            <div className="flex gap-2 mb-4">
+                                <button
+                                    onClick={() => { setAppMode('edit'); setShowNotes(null); setShowNotesLoading(false); }}
+                                    className={`flex-1 py-2.5 px-4 rounded-xl text-sm font-medium transition-all ${
+                                        appMode === 'edit'
+                                            ? 'bg-purple-500/30 border border-purple-400 text-white'
+                                            : 'bg-white/5 border border-white/10 text-purple-300/70 hover:bg-white/10'
+                                    }`}
+                                >
+                                    Edit Audio
+                                </button>
+                                <button
+                                    onClick={() => { setAppMode('shownotes'); setShowNotes(null); setShowNotesLoading(false); }}
+                                    className={`flex-1 py-2.5 px-4 rounded-xl text-sm font-medium transition-all ${
+                                        appMode === 'shownotes'
+                                            ? 'bg-purple-500/30 border border-purple-400 text-white'
+                                            : 'bg-white/5 border border-white/10 text-purple-300/70 hover:bg-white/10'
+                                    }`}
+                                >
+                                    Show Notes
+                                </button>
+                            </div>
+                        )}
+
+                        {/* Screen 1a: Show Notes from transcript */}
+                        {screen === 'upload' && appMode === 'shownotes' && (
+                            <div className="bg-white/10 backdrop-blur-lg rounded-2xl border border-white/20 p-8">
+                                <h2 className="text-xl font-semibold text-white mb-6">Generate Show Notes</h2>
+                                <p className="text-purple-200/70 text-sm mb-4">Paste a transcript or upload a text file to generate show notes — no audio needed.</p>
+
+                                <textarea
+                                    placeholder="Paste your transcript here..."
+                                    value={transcriptText}
+                                    onChange={e => setTranscriptText(e.target.value)}
+                                    className="w-full p-3 rounded-lg bg-white/10 border border-white/20 text-white placeholder-purple-300/50 text-sm h-48 resize-none mb-3"
+                                />
+
+                                <div className="flex items-center gap-3 mb-6">
+                                    <input type="file" accept=".txt,.srt,.vtt" onChange={handleTranscriptFileUpload} className="hidden" id="transcript-upload" />
+                                    <label htmlFor="transcript-upload" className="cursor-pointer text-sm text-purple-300 hover:text-white bg-white/5 border border-dashed border-white/20 rounded-lg px-4 py-2 hover:bg-white/10 transition-all">
+                                        Upload .txt / .srt / .vtt
+                                    </label>
+                                    {transcriptText && (
+                                        <span className="text-purple-300/50 text-xs">{transcriptText.length.toLocaleString()} characters</span>
+                                    )}
+                                </div>
+
+                                <button
+                                    onClick={() => handleGenerateShowNotesFromText(transcriptText)}
+                                    disabled={!transcriptText.trim() || showNotesLoading}
+                                    className="w-full bg-gradient-to-r from-purple-500 to-pink-500 text-white font-semibold py-4 rounded-xl hover:from-purple-600 hover:to-pink-600 transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+                                >
+                                    <Sparkles className="w-5 h-5" />
+                                    {showNotesLoading ? 'Generating...' : 'Generate Show Notes'}
+                                </button>
+
+                                {/* Show notes display */}
+                                {(showNotes || showNotesLoading) && (
+                                    <div className="mt-6">
+                                        {showNotesLoading && !showNotes && (
+                                            <div className="flex items-center gap-2 text-purple-300 text-sm justify-center py-4">
+                                                <svg className="w-4 h-4 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                                    <path d="M21 12a9 9 0 1 1-6.219-8.56" />
+                                                </svg>
+                                                Generating show notes...
+                                            </div>
+                                        )}
+                                        {showNotes && (
+                                            <div>
+                                                <div className="flex items-center justify-between mb-2">
+                                                    <h3 className="text-sm font-semibold text-purple-200 uppercase tracking-wide">Show Notes</h3>
+                                                    <div className="flex gap-2">
+                                                        <button onClick={copyShowNotes} className="text-xs text-purple-300 hover:text-white transition-all">Copy</button>
+                                                        <button onClick={downloadShowNotes} className="text-xs text-purple-300 hover:text-white transition-all">Download</button>
+                                                    </div>
+                                                </div>
+                                                <pre className="bg-black/20 rounded-lg border border-white/10 p-4 text-purple-100 text-sm whitespace-pre-wrap max-h-80 overflow-y-auto">{showNotes}</pre>
+                                            </div>
+                                        )}
+                                    </div>
+                                )}
+                            </div>
+                        )}
+
+                        {/* Screen 1: Upload */}
+                        {screen === 'upload' && appMode === 'edit' && (
                             <div className="bg-white/10 backdrop-blur-lg rounded-2xl border border-white/20 p-8">
                                 <h2 className="text-xl font-semibold text-white mb-6">Upload Episode</h2>
 

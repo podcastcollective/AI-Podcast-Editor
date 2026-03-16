@@ -1677,7 +1677,7 @@ def generate_show_notes(transcript_data):
         speaker = utt.get('speaker', '?')
         text = utt.get('text', '')
         utt_lines.append(f"[{start}] Speaker {speaker}: {text}")
-    utt_text = "\n".join(utt_lines) if utt_lines else transcript_data.get('text', '')[:6000]
+    utt_text = "\n".join(utt_lines) if utt_lines else transcript_data.get('text', '')[:30000]
 
     duration_ms = transcript_data.get('audio_duration', 0)
     duration_str = format_timestamp(duration_ms) if duration_ms else 'unknown'
@@ -1747,6 +1747,21 @@ def _run_show_notes_job(job_id, transcript_id):
         with _jobs_lock:
             _jobs[job_id] = {'status': 'completed', 'result': {'show_notes': notes}}
         print(f"Show notes job {job_id} complete")
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        with _jobs_lock:
+            _jobs[job_id] = {'status': 'error', 'error': str(e)}
+
+
+def _run_show_notes_from_text_job(job_id, text):
+    """Background thread: generate show notes from raw transcript text."""
+    try:
+        transcript_data = {'text': text}
+        notes = generate_show_notes(transcript_data)
+        with _jobs_lock:
+            _jobs[job_id] = {'status': 'completed', 'result': {'show_notes': notes}}
+        print(f"Show notes from text job {job_id} complete")
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -2184,6 +2199,36 @@ def show_notes_status(job_id):
     if job['status'] == 'error':
         return jsonify({"error": job['error']}), 500
     return jsonify({"status": job['status']})
+
+
+@app.route('/api/show-notes-from-text', methods=['POST', 'OPTIONS'])
+def show_notes_from_text():
+    """Generate show notes from raw transcript text (no audio upload needed)."""
+    if request.method == 'OPTIONS':
+        return '', 204
+    try:
+        if not CLAUDE_API_KEY:
+            return jsonify({"error": "CLAUDE_API_KEY not configured"}), 500
+        data = request.json
+        text = data.get('transcript_text', '').strip()
+        if not text:
+            return jsonify({"error": "No transcript_text provided"}), 400
+
+        job_id = str(uuid.uuid4())
+        with _jobs_lock:
+            _jobs[job_id] = {'status': 'pending'}
+
+        threading.Thread(
+            target=_run_show_notes_from_text_job,
+            args=(job_id, text),
+            daemon=True,
+        ).start()
+
+        return jsonify({"success": True, "job_id": job_id})
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route('/api/edit-audio', methods=['POST', 'OPTIONS'])

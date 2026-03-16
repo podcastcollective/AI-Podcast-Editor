@@ -2556,8 +2556,6 @@ def export_google_doc():
             token_uri='https://oauth2.googleapis.com/token',
             client_id='764086051850-6qr4p6gpi6hn506pt8ejuq83di341hur.apps.googleusercontent.com',
             client_secret='d-FL95Q19q7MQmFpd7hHD0Ty',
-            scopes=['https://www.googleapis.com/auth/documents',
-                    'https://www.googleapis.com/auth/drive'],
         )
 
         docs_service = build('docs', 'v1', credentials=creds)

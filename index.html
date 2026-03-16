@@ -89,6 +89,7 @@
             const [outroFile, setOutroFile] = useState(null);
             const preset = 'auto';
             const [customInstructions, setCustomInstructions] = useState('');
+            const [showNotesInstructions, setShowNotesInstructions] = useState('');
             const [pipelineStage, setPipelineStage] = useState(null);
             const [pipelineProgress, setPipelineProgress] = useState(null);
             const [pipelineError, setPipelineError] = useState(null);
@@ -130,8 +131,11 @@
 
             const saveInstructionsToProfile = () => {
                 if (!selectedProfile) return;
+                const updates = appMode === 'shownotes'
+                    ? { showNotesInstructions }
+                    : { customInstructions };
                 setProfiles(prev => prev.map(p =>
-                    p.id === selectedProfile ? { ...p, customInstructions } : p
+                    p.id === selectedProfile ? { ...p, ...updates } : p
                 ));
                 setInstructionsSaved(true);
                 setTimeout(() => setInstructionsSaved(false), 2000);
@@ -140,6 +144,7 @@
             const selectProfile = (profile) => {
                 setSelectedProfile(profile.id);
                 setCustomInstructions(profile.customInstructions || '');
+                setShowNotesInstructions(profile.showNotesInstructions || '');
                 setInstructionsSaved(false);
             };
 
@@ -150,6 +155,7 @@
                     id: crypto.randomUUID(),
                     name,
                     customInstructions,
+                    showNotesInstructions,
                     createdAt: Date.now(),
                 };
                 setProfiles(prev => [...prev, newProfile]);
@@ -565,7 +571,7 @@
                     const res = await fetch(`${API_URL}/api/show-notes-from-text`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ transcript_text: text, custom_instructions: customInstructions }),
+                        body: JSON.stringify({ transcript_text: text, custom_instructions: showNotesInstructions }),
                     });
                     const data = await res.json();
                     if (!res.ok) throw new Error(data.error || 'Failed to start show notes');
@@ -634,6 +640,7 @@
                 setOutroFile(null);
                 if (!selectedProfile) {
                     setCustomInstructions('');
+                    setShowNotesInstructions('');
                 }
                 setBatchIndex(0);
                 setBatchResults([]);
@@ -774,8 +781,8 @@
                                     <h3 className="text-sm font-semibold text-purple-200 uppercase tracking-wide mb-3">Custom Instructions <span className="font-normal normal-case text-purple-300/70">(optional)</span></h3>
                                     <textarea
                                         placeholder="e.g., Include links to mentioned resources, use a casual tone, highlight action items..."
-                                        value={customInstructions}
-                                        onChange={e => { setCustomInstructions(e.target.value); setInstructionsSaved(false); }}
+                                        value={showNotesInstructions}
+                                        onChange={e => { setShowNotesInstructions(e.target.value); setInstructionsSaved(false); }}
                                         className="w-full p-2.5 rounded-lg bg-white/10 border border-white/20 text-white placeholder-purple-300 text-sm h-24 resize-none"
                                     />
                                     {selectedProfile && (

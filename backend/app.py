@@ -612,7 +612,7 @@ Each pause above is tagged [EMPHATIC] or [UNCERTAIN] based on surrounding contex
 - Do NOT rewrite or paraphrase content. Do NOT change the meaning or tone of the speaker.
 - All content cuts MUST start at the beginning of a word (use the word's start_ms) and end at the end of a word (use the word's end_ms). NEVER cut mid-word.
 - SAFETY CHECK: Before finalizing any Content Cut, mentally read the sentence with the cut applied. If the remaining words do not form a complete, grammatical sentence, do NOT make the cut.
-- SCOPE CHECK: If a Content Cut spans more than 5 seconds, you are almost certainly cutting too much. Re-examine whether you are removing an entire thought that should be kept. Long content cuts should be extremely rare and only for clear pre/post-recording chat or fully abandoned false starts.
+- SCOPE CHECK: If a Content Cut spans more than 5 seconds, you are almost certainly cutting too much. Re-examine whether you are removing an entire thought that should be kept. Long content cuts should be extremely rare and only for clear pre/post-recording chat or fully abandoned false starts. NEVER make a content cut longer than 3 seconds for stutters, restated thoughts, or false starts — these should be micro-edits, not wholesale removal of sentences.
 
 PRESERVE RULES (do NOT cut these):
 - TRANSITIONAL PHRASES that connect topics or introduce new points, even if they seem tangential. E.g. "I think the other thing I'd flag which maybe doesn't fall under compliance but it's part of it" \u2014 these bridge ideas and must be kept.
@@ -623,7 +623,8 @@ PRESERVE RULES (do NOT cut these):
 STRUCTURAL RULES:
 - PRE-RECORDING CHAT: Look for recording logistics in the first 60 seconds — "okay recording now", "we are now recording", "are we recording?", "let me hit record", mic checks, countdown cues, etc. These MUST be removed — listeners should never hear them. CRITICAL STEPS: (1) Scan the transcript and identify the EXACT first word of the episode opener — phrases like "welcome back", "welcome to", "hey everyone", "hello and welcome", "so today". (2) Look up that word's start_ms in the word list. (3) Set your cut end_ms to that word's start_ms MINUS 500ms. This 500ms buffer ensures the opener is never clipped even partially. (4) If there is no pre-recording chat, do NOT make this cut at all. When in doubt, keep more — it is far worse to clip the opener than to leave in pre-chat.
 - LAST WORD PROTECTION: When making any cut near the end of the episode, ensure the final word of real content is fully preserved. Never set a cut's start_ms within the last spoken word — use the word's end_ms as the earliest allowed cut point.
-- POST-INTERVIEW CHAT: If there is chat after the episode has clearly concluded ("okay I'll stop recording", "that was great", wrap-up logistics), mark it for removal.
+- END-OF-EPISODE PROTECTION: In the last 25% of the episode, be EXTREMELY conservative with Content Cuts. Speakers often deliver concluding thoughts, summaries, or sign-offs that may sound like restated ideas but are actually the intended wrap-up. Do NOT cut restated thoughts or verbal stumbles in the final quarter — only remove pre-detected fillers, stutters, and clearly abandoned false starts (< 3 seconds). If a speaker repeats an idea near the end, they are likely emphasizing it deliberately.
+- POST-INTERVIEW CHAT: If there is chat after the episode has clearly concluded ("okay I'll stop recording", "that was great", wrap-up logistics), mark it for removal. Do NOT confuse a speaker's concluding remarks or sign-off with post-interview chat — if they are still addressing the audience or making a point, it is content.
 - Preserve the full interview/episode content itself.
 
 OUTPUT RULES:
@@ -886,6 +887,18 @@ def apply_audio_edits(audio_path, cuts_ms, words=None):
         # Protect first content word from pre-chat cuts (first cut starting near 0)
         if merged and merged[0][0] < 2000:
             merged[0][1] = _protect_first_content(merged[0][1], words or [])
+
+    # Safety: reject mid-episode content cuts > 5s (keep pre/post-chat cuts)
+    safe_merged = []
+    for s, e in merged:
+        duration = e - s
+        is_start = s < 60000  # first 60s — could be pre-chat
+        is_end = e > total_ms * 0.85  # last 15% — could be post-chat
+        if duration > 5000 and not is_start and not is_end:
+            print(f"SAFETY: Dropping suspicious mid-episode cut {s}ms-{e}ms ({duration/1000:.1f}s) — too long for a stutter/filler edit")
+        else:
+            safe_merged.append([s, e])
+    merged = safe_merged
 
     # Log final cuts
     for i, (s, e) in enumerate(merged):

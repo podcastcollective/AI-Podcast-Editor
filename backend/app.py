@@ -749,27 +749,116 @@ def apply_audio_edits(audio_path, cuts_ms, words=None):
         hit = _lands_inside_word(ms)
         return hit[0] if hit else ms
 
-    OPENER_WORDS = {'welcome', 'hello', 'hey', 'hi', 'greetings', 'good', 'today', 'so'}
+    # Strong opener phrases — 2-3 word sequences that reliably signal "on air"
+    OPENER_PHRASES = [
+        # "welcome" combos — very strong signal
+        ('welcome', 'to'), ('welcome', 'back'), ('welcome', 'everyone'),
+        ('welcome', 'ladies'), ('welcome', 'listeners'),
+        # "hello/hey/hi" + audience word — strong signal
+        ('hello', 'and'), ('hello', 'everyone'), ('hello', 'listeners'),
+        ('hey', 'everyone'), ('hey', 'folks'), ('hey', 'guys'), ('hey', 'listeners'),
+        ('hi', 'everyone'), ('hi', 'folks'), ('hi', 'guys'), ('hi', 'listeners'),
+        ('hi', 'there'),
+        # "good morning/afternoon/evening" — strong signal
+        ('good', 'morning'), ('good', 'afternoon'), ('good', 'evening'),
+        # "thanks/thank you for" — strong signal
+        ('thanks', 'for', 'joining'), ('thanks', 'for', 'tuning'),
+        ('thank', 'you', 'for'),
+        # "today/this episode" — moderate signal
+        ('today', 'we'), ("today's", 'episode'), ('today', 'on'),
+        ('in', 'this', 'episode'), ('on', 'this', 'episode'),
+        ("on", "today's", "episode"),
+        # "I'm your host" — strong signal
+        ("i'm", 'your', 'host'), ('my', 'name', 'is'),
+        # "episode X" — moderate signal
+        ('episode', 'number'), ('episode', 'one'), ('episode', 'two'),
+    ]
+
+    # Pre-chat indicators — if these appear before an opener, they confirm pre-chat exists
+    PRECHAT_PHRASES = [
+        ('are', 'we', 'recording'), ('is', 'it', 'recording'),
+        ('hit', 'record'), ('start', 'recording'), ('stop', 'recording'),
+        ('can', 'you', 'hear'), ('mic', 'check'), ('sound', 'check'),
+        ('ready', 'to', 'go'), ('shall', 'we', 'start'),
+        ('okay', 'recording'), ("we're", 'recording'), ('we', 'are', 'recording'),
+        ("i'll", 'hit', 'record'), ('let', 'me', 'record'),
+    ]
+
+    def _get_word_tokens(words_list, max_ms=90000):
+        """Extract (lowercase_token, start_ms) pairs from word list."""
+        tokens = []
+        for w in words_list:
+            ws = w.get('start', 0)
+            if ws > max_ms:
+                break
+            tok = w.get('text', '').lower().strip('.,!?;:\'"')
+            tokens.append((tok, ws))
+        return tokens
+
+    def _find_phrase(tokens, phrase):
+        """Find a phrase (tuple of words) in token list. Returns start_ms or None."""
+        plen = len(phrase)
+        for i in range(len(tokens) - plen + 1):
+            if all(tokens[i + j][0] == phrase[j] for j in range(plen)):
+                return tokens[i][1]
+        return None
 
     def _find_opener_start(words_list):
-        """Find the start_ms of the first episode opener word in the first 90s."""
-        for w in words_list:
-            tok = w.get('text', '').lower().strip('.,!?;:')
-            ws = w.get('start', 0)
-            if ws > 90000:
-                break
-            if tok in OPENER_WORDS:
-                print(f"Opener detected: '{tok}' at {ws}ms")
-                return ws
+        """Find the start_ms of the episode opener using phrase-based detection."""
+        tokens = _get_word_tokens(words_list, max_ms=90000)
+        if not tokens:
+            return None
+
+        # First: look for strong opener phrases
+        best_ms = None
+        best_phrase = None
+        for phrase in OPENER_PHRASES:
+            ms = _find_phrase(tokens, phrase)
+            if ms is not None and (best_ms is None or ms < best_ms):
+                best_ms = ms
+                best_phrase = ' '.join(phrase)
+
+        if best_ms is not None:
+            print(f"Opener phrase detected: '{best_phrase}' at {best_ms}ms")
+            return best_ms
+
+        # Fallback: if pre-chat logistics are detected, find the first substantial
+        # speech after them (pause > 1.5s or speaker change) as the likely opener
+        has_prechat = False
+        prechat_end_ms = 0
+        for phrase in PRECHAT_PHRASES:
+            ms = _find_phrase(tokens, phrase)
+            if ms is not None:
+                has_prechat = True
+                # Find end of this phrase
+                plen = len(phrase)
+                for i in range(len(tokens) - plen + 1):
+                    if all(tokens[i + j][0] == phrase[j] for j in range(plen)):
+                        prechat_end_ms = max(prechat_end_ms, tokens[i + plen - 1][1])
+                        break
+                print(f"Pre-chat indicator: '{' '.join(phrase)}' at {ms}ms")
+
+        if has_prechat and prechat_end_ms > 0:
+            # Find the next word after a gap > 1500ms following the pre-chat
+            for i in range(len(tokens) - 1):
+                if tokens[i][1] < prechat_end_ms:
+                    continue
+                if i + 1 < len(tokens):
+                    gap = tokens[i + 1][1] - tokens[i][1]
+                    if gap > 1500:
+                        print(f"Post-prechat gap of {gap}ms detected, opener likely at {tokens[i+1][1]}ms")
+                        return tokens[i + 1][1]
+
+        print("No opener phrase or pre-chat indicator found")
         return None
 
     def _protect_first_content(cut_end_ms, words_list):
         """For pre-chat cuts, ensure we never cut past the episode opener."""
         opener_ms = _find_opener_start(words_list)
-        if opener_ms is not None and cut_end_ms > opener_ms - 200:
-            safe_end = max(0, opener_ms - 200)
+        if opener_ms is not None and cut_end_ms > opener_ms - 500:
+            safe_end = max(0, opener_ms - 500)
             print(f"Pre-chat protection: cut end {cut_end_ms}ms would clip opener at {opener_ms}ms, "
-                  f"pulling back to {safe_end}ms")
+                  f"pulling back to {safe_end}ms (500ms buffer)")
             return safe_end
         return cut_end_ms
 

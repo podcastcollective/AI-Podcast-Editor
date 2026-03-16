@@ -745,6 +745,19 @@ def apply_audio_edits(audio_path, cuts_ms, words=None):
         hit = _lands_inside_word(ms)
         return hit[0] if hit else ms
 
+    def _protect_first_content(cut_end_ms):
+        """For cuts starting near 0 (pre-chat removal), ensure we don't swallow
+        the first real content word. Find the first word that starts AFTER the
+        pre-chat region and pull cut_end back to 500ms before it."""
+        # Find first word whose start_ms is within 2s of cut_end (might be swallowed)
+        for ws, we in word_intervals:
+            if ws >= cut_end_ms - 2000 and ws < cut_end_ms:
+                # This word starts before the cut ends — it would be swallowed
+                safe_end = max(0, ws - 500)
+                print(f"Pre-chat protection: cut end {cut_end_ms}ms would swallow word at {ws}ms, pulling back to {safe_end}ms")
+                return safe_end
+        return cut_end_ms
+
     # Clamp, sort, merge overlapping cuts
     adjusted = []
     for s, e in cuts_ms:
@@ -766,6 +779,9 @@ def apply_audio_edits(audio_path, cuts_ms, words=None):
         for cut in merged:
             cut[0] = _safe_cut_start(cut[0])
             cut[1] = _safe_cut_end(cut[1])
+        # Protect first content word from pre-chat cuts (first cut starting near 0)
+        if merged and merged[0][0] < 2000:
+            merged[0][1] = _protect_first_content(merged[0][1])
 
     # Calculate keep segments
     keeps = []

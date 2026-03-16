@@ -126,6 +126,14 @@
                 localStorage.setItem('showProfiles', JSON.stringify(profiles));
             }, [profiles]);
 
+            // Auto-save custom instructions back to the selected profile
+            useEffect(() => {
+                if (!selectedProfile) return;
+                setProfiles(prev => prev.map(p =>
+                    p.id === selectedProfile ? { ...p, customInstructions } : p
+                ));
+            }, [customInstructions]);
+
             const selectProfile = (profile) => {
                 setSelectedProfile(profile.id);
                 setCustomInstructions(profile.customInstructions || '');

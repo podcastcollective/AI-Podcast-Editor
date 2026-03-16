@@ -50,17 +50,29 @@ def _mark_token_used():
         _adobe_token_refresh_needed = True
 
 
-# Google credentials from env var (raw JSON string)
-_google_creds_json = os.environ.get('GOOGLE_CREDENTIALS_JSON')
-if _google_creds_json:
+# Google credentials from individual env vars
+_gc_client_id = os.environ.get('GOOGLE_CLIENT_ID')
+_gc_client_secret = os.environ.get('GOOGLE_CLIENT_SECRET')
+_gc_refresh_token = os.environ.get('GOOGLE_REFRESH_TOKEN')
+_gc_project_id = os.environ.get('GOOGLE_PROJECT_ID', '')
+if _gc_client_id and _gc_client_secret and _gc_refresh_token:
     import tempfile as _tmpmod
+    import json as _json_mod
     _gcp_creds_path = os.path.join(_tmpmod.gettempdir(), 'gcp_credentials.json')
     with open(_gcp_creds_path, 'w') as _f:
-        _f.write(_google_creds_json)
+        _json_mod.dump({
+            "account": "",
+            "client_id": _gc_client_id,
+            "client_secret": _gc_client_secret,
+            "quota_project_id": _gc_project_id,
+            "refresh_token": _gc_refresh_token,
+            "type": "authorized_user",
+            "universe_domain": "googleapis.com"
+        }, _f)
     os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = _gcp_creds_path
     print("Google credentials: configured")
 else:
-    print("WARNING: GOOGLE_CREDENTIALS_JSON not set — Google Docs export will fail on Railway")
+    print("WARNING: GOOGLE_CLIENT_ID/SECRET/REFRESH_TOKEN not set — Google Docs export will fail on Railway")
 
 if not ASSEMBLYAI_API_KEY or not CLAUDE_API_KEY:
     print("WARNING: ASSEMBLYAI_API_KEY and CLAUDE_API_KEY are required")

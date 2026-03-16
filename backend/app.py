@@ -1665,7 +1665,7 @@ def _finalize_audio(job_id, enhanced_path):
 # SHOW NOTES — on-demand episode summary via Claude
 # ============================================================================
 
-def generate_show_notes(transcript_data):
+def generate_show_notes(transcript_data, custom_instructions=''):
     """Call Claude to generate show notes from transcript."""
     print("Generating show notes with Claude...")
     client = anthropic.Anthropic(api_key=CLAUDE_API_KEY)
@@ -1682,12 +1682,14 @@ def generate_show_notes(transcript_data):
     duration_ms = transcript_data.get('audio_duration', 0)
     duration_str = format_timestamp(duration_ms) if duration_ms else 'unknown'
 
+    custom_block = f"\n\nADDITIONAL INSTRUCTIONS FROM PRODUCER:\n{custom_instructions}" if custom_instructions.strip() else ''
+
     prompt = f"""You are a podcast producer writing show notes for an episode. Based on the transcript below, generate concise, well-structured show notes.
 
 TRANSCRIPT:
 {utt_text}
 
-EPISODE DURATION: {duration_str}
+EPISODE DURATION: {duration_str}{custom_block}
 
 Generate the following sections:
 
@@ -1754,11 +1756,11 @@ def _run_show_notes_job(job_id, transcript_id):
             _jobs[job_id] = {'status': 'error', 'error': str(e)}
 
 
-def _run_show_notes_from_text_job(job_id, text):
+def _run_show_notes_from_text_job(job_id, text, custom_instructions=''):
     """Background thread: generate show notes from raw transcript text."""
     try:
         transcript_data = {'text': text}
-        notes = generate_show_notes(transcript_data)
+        notes = generate_show_notes(transcript_data, custom_instructions)
         with _jobs_lock:
             _jobs[job_id] = {'status': 'completed', 'result': {'show_notes': notes}}
         print(f"Show notes from text job {job_id} complete")
@@ -2213,6 +2215,7 @@ def show_notes_from_text():
         text = data.get('transcript_text', '').strip()
         if not text:
             return jsonify({"error": "No transcript_text provided"}), 400
+        custom_instructions = data.get('custom_instructions', '')
 
         job_id = str(uuid.uuid4())
         with _jobs_lock:
@@ -2220,7 +2223,7 @@ def show_notes_from_text():
 
         threading.Thread(
             target=_run_show_notes_from_text_job,
-            args=(job_id, text),
+            args=(job_id, text, custom_instructions),
             daemon=True,
         ).start()
 

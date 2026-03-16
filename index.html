@@ -552,7 +552,7 @@
                     const res = await fetch(`${API_URL}/api/show-notes-from-text`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ transcript_text: text }),
+                        body: JSON.stringify({ transcript_text: text, custom_instructions: customInstructions }),
                     });
                     const data = await res.json();
                     if (!res.ok) throw new Error(data.error || 'Failed to start show notes');
@@ -680,6 +680,64 @@
                         {screen === 'upload' && appMode === 'shownotes' && (
                             <div className="bg-white/10 backdrop-blur-lg rounded-2xl border border-white/20 p-8">
                                 <h2 className="text-xl font-semibold text-white mb-6">Generate Show Notes</h2>
+
+                                {/* Profile bar */}
+                                <div className="flex items-center gap-2 mb-4 flex-wrap">
+                                    {profiles.length > 0 && (
+                                        <select
+                                            value={selectedProfile || ''}
+                                            onChange={e => {
+                                                const p = profiles.find(p => p.id === e.target.value);
+                                                if (p) selectProfile(p);
+                                                else { setSelectedProfile(null); setCustomInstructions(''); }
+                                            }}
+                                            className="bg-white/10 border border-white/20 text-white text-sm rounded-lg px-3 py-2 appearance-none cursor-pointer"
+                                        >
+                                            <option value="" className="bg-slate-800">No profile</option>
+                                            {profiles.map(p => (
+                                                <option key={p.id} value={p.id} className="bg-slate-800">{p.name}</option>
+                                            ))}
+                                        </select>
+                                    )}
+                                    <button
+                                        onClick={saveProfile}
+                                        className="text-xs bg-purple-500/20 border border-purple-400/40 text-purple-300 px-3 py-2 rounded-lg hover:bg-purple-500/30 transition-all"
+                                    >
+                                        + Save Profile
+                                    </button>
+                                    {profiles.length > 0 && (
+                                        <button
+                                            onClick={() => setShowProfileManager(!showProfileManager)}
+                                            className="text-xs text-purple-300/60 hover:text-purple-300 px-2 py-2 transition-all"
+                                        >
+                                            Manage
+                                        </button>
+                                    )}
+                                </div>
+
+                                {/* Profile manager */}
+                                {showProfileManager && profiles.length > 0 && (
+                                    <div className="mb-4 bg-white/5 rounded-lg border border-white/10 p-3 space-y-2">
+                                        {profiles.map(p => (
+                                            <div key={p.id} className="flex items-center gap-2 text-sm">
+                                                {editingProfileName === p.id ? (
+                                                    <input
+                                                        autoFocus
+                                                        defaultValue={p.name}
+                                                        onBlur={e => renameProfile(p.id, e.target.value)}
+                                                        onKeyDown={e => { if (e.key === 'Enter') renameProfile(p.id, e.target.value); }}
+                                                        className="flex-1 bg-white/10 border border-white/20 text-white px-2 py-1 rounded text-sm"
+                                                    />
+                                                ) : (
+                                                    <span className="flex-1 text-white truncate">{p.name}</span>
+                                                )}
+                                                <button onClick={() => setEditingProfileName(p.id)} className="text-purple-300/60 hover:text-purple-300 text-xs transition-all">Rename</button>
+                                                <button onClick={() => deleteProfile(p.id)} className="text-red-400/60 hover:text-red-400 text-xs transition-all">Delete</button>
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
+
                                 <p className="text-purple-200/70 text-sm mb-4">Paste a transcript or upload a text file to generate show notes — no audio needed.</p>
 
                                 <textarea
@@ -689,7 +747,7 @@
                                     className="w-full p-3 rounded-lg bg-white/10 border border-white/20 text-white placeholder-purple-300/50 text-sm h-48 resize-none mb-3"
                                 />
 
-                                <div className="flex items-center gap-3 mb-6">
+                                <div className="flex items-center gap-3 mb-4">
                                     <input type="file" accept=".txt,.srt,.vtt" onChange={handleTranscriptFileUpload} className="hidden" id="transcript-upload" />
                                     <label htmlFor="transcript-upload" className="cursor-pointer text-sm text-purple-300 hover:text-white bg-white/5 border border-dashed border-white/20 rounded-lg px-4 py-2 hover:bg-white/10 transition-all">
                                         Upload .txt / .srt / .vtt
@@ -697,6 +755,17 @@
                                     {transcriptText && (
                                         <span className="text-purple-300/50 text-xs">{transcriptText.length.toLocaleString()} characters</span>
                                     )}
+                                </div>
+
+                                {/* Custom instructions */}
+                                <div className="mb-6">
+                                    <h3 className="text-sm font-semibold text-purple-200 uppercase tracking-wide mb-3">Custom Instructions <span className="font-normal normal-case text-purple-300/70">(optional)</span></h3>
+                                    <textarea
+                                        placeholder="e.g., Include links to mentioned resources, use a casual tone, highlight action items..."
+                                        value={customInstructions}
+                                        onChange={e => setCustomInstructions(e.target.value)}
+                                        className="w-full p-2.5 rounded-lg bg-white/10 border border-white/20 text-white placeholder-purple-300 text-sm h-24 resize-none"
+                                    />
                                 </div>
 
                                 <button

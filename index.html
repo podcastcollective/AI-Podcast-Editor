@@ -127,17 +127,21 @@
                 localStorage.setItem('showProfiles', JSON.stringify(profiles));
             }, [profiles]);
 
-            // Auto-save custom instructions back to the selected profile
-            useEffect(() => {
+            const [instructionsSaved, setInstructionsSaved] = useState(false);
+
+            const saveInstructionsToProfile = () => {
                 if (!selectedProfile) return;
                 setProfiles(prev => prev.map(p =>
                     p.id === selectedProfile ? { ...p, customInstructions } : p
                 ));
-            }, [customInstructions]);
+                setInstructionsSaved(true);
+                setTimeout(() => setInstructionsSaved(false), 2000);
+            };
 
             const selectProfile = (profile) => {
                 setSelectedProfile(profile.id);
                 setCustomInstructions(profile.customInstructions || '');
+                setInstructionsSaved(false);
             };
 
             const saveProfile = () => {
@@ -800,9 +804,31 @@
                                     <textarea
                                         placeholder="e.g., Include links to mentioned resources, use a casual tone, highlight action items..."
                                         value={customInstructions}
-                                        onChange={e => setCustomInstructions(e.target.value)}
+                                        onChange={e => { setCustomInstructions(e.target.value); setInstructionsSaved(false); }}
                                         className="w-full p-2.5 rounded-lg bg-white/10 border border-white/20 text-white placeholder-purple-300 text-sm h-24 resize-none"
                                     />
+                                    {selectedProfile && (
+                                        <div className="flex items-center gap-2 mt-2">
+                                            <button
+                                                onClick={saveInstructionsToProfile}
+                                                disabled={instructionsSaved}
+                                                className={`text-xs px-3 py-1.5 rounded-lg transition-all flex items-center gap-1.5 ${
+                                                    instructionsSaved
+                                                        ? 'bg-green-500/20 border border-green-400/40 text-green-300'
+                                                        : 'bg-purple-500/20 border border-purple-400/40 text-purple-300 hover:bg-purple-500/30'
+                                                }`}
+                                            >
+                                                {instructionsSaved ? (
+                                                    <>
+                                                        <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
+                                                        Saved to profile
+                                                    </>
+                                                ) : (
+                                                    'Save to profile'
+                                                )}
+                                            </button>
+                                        </div>
+                                    )}
                                 </div>
 
                                 <button
@@ -1028,9 +1054,31 @@
                                     <textarea
                                         placeholder="e.g., Keep the banter between hosts, remove technical difficulties around 15:30..."
                                         value={customInstructions}
-                                        onChange={e => setCustomInstructions(e.target.value)}
+                                        onChange={e => { setCustomInstructions(e.target.value); setInstructionsSaved(false); }}
                                         className="w-full p-2.5 rounded-lg bg-white/10 border border-white/20 text-white placeholder-purple-300 text-sm h-24 resize-none"
                                     />
+                                    {selectedProfile && (
+                                        <div className="flex items-center gap-2 mt-2">
+                                            <button
+                                                onClick={saveInstructionsToProfile}
+                                                disabled={instructionsSaved}
+                                                className={`text-xs px-3 py-1.5 rounded-lg transition-all flex items-center gap-1.5 ${
+                                                    instructionsSaved
+                                                        ? 'bg-green-500/20 border border-green-400/40 text-green-300'
+                                                        : 'bg-purple-500/20 border border-purple-400/40 text-purple-300 hover:bg-purple-500/30'
+                                                }`}
+                                            >
+                                                {instructionsSaved ? (
+                                                    <>
+                                                        <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
+                                                        Saved to profile
+                                                    </>
+                                                ) : (
+                                                    'Save to profile'
+                                                )}
+                                            </button>
+                                        </div>
+                                    )}
                                 </div>
 
                                 <button

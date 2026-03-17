@@ -656,6 +656,24 @@
                 }
             };
 
+            const [exportingTranscriptDoc, setExportingTranscriptDoc] = useState(false);
+            const exportTranscriptToGoogleDocs = async (tid) => {
+                const id = tid || transcriptIdRef.current;
+                if (!id || exportingTranscriptDoc) return;
+                setExportingTranscriptDoc(true);
+                try {
+                    const res = await fetch(`${API_URL}/api/export-transcript-google-doc/${id}`, { method: 'POST' });
+                    const data = await res.json();
+                    if (!res.ok) throw new Error(data.error || 'Export failed');
+                    window.open(data.url, '_blank');
+                } catch (e) {
+                    console.error('Transcript Google Docs export error:', e);
+                    alert('Export failed: ' + e.message);
+                } finally {
+                    setExportingTranscriptDoc(false);
+                }
+            };
+
             const resetToUpload = () => {
                 setScreen('upload');
                 setPipelineStage(null);
@@ -1432,13 +1450,22 @@
                                             <Download className="w-5 h-5" />
                                             Download Edited Audio
                                         </button>
-                                        <button
-                                            onClick={() => handleTranscriptDownload(batchResults[0]?.transcriptId)}
-                                            className="bg-white/10 border border-white/20 text-white font-semibold py-4 px-8 rounded-xl hover:bg-white/20 transition-all flex items-center justify-center gap-2"
-                                        >
-                                            <FileAudio className="w-5 h-5" />
-                                            Download Transcript
-                                        </button>
+                                        <div className="flex flex-col gap-2">
+                                            <button
+                                                onClick={() => handleTranscriptDownload(batchResults[0]?.transcriptId)}
+                                                className="bg-white/10 border border-white/20 text-white font-semibold py-4 px-8 rounded-xl hover:bg-white/20 transition-all flex items-center justify-center gap-2"
+                                            >
+                                                <FileAudio className="w-5 h-5" />
+                                                Download Transcript
+                                            </button>
+                                            <button
+                                                onClick={() => exportTranscriptToGoogleDocs(batchResults[0]?.transcriptId)}
+                                                disabled={exportingTranscriptDoc}
+                                                className="text-xs text-purple-300 hover:text-white transition-all disabled:opacity-50"
+                                            >
+                                                {exportingTranscriptDoc ? 'Exporting...' : 'Google Docs'}
+                                            </button>
+                                        </div>
                                         <button
                                             onClick={() => handleGenerateShowNotes(batchResults[0]?.transcriptId)}
                                             disabled={showNotesLoading}

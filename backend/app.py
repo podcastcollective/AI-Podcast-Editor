@@ -2730,5 +2730,62 @@ def export_google_doc():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route('/api/export-transcript-google-doc/<transcript_id>', methods=['POST', 'OPTIONS'])
+def export_transcript_google_doc(transcript_id):
+    """Create a Google Doc from a transcript."""
+    if request.method == 'OPTIONS':
+        return '', 204
+    try:
+        from google.oauth2.credentials import Credentials
+        from googleapiclient.discovery import build
+
+        if not ASSEMBLYAI_API_KEY:
+            return jsonify({"error": "ASSEMBLYAI_API_KEY not configured"}), 500
+        if not _GOOGLE_REFRESH_TOKEN:
+            return jsonify({"error": "GOOGLE_REFRESH_TOKEN not configured"}), 500
+
+        data = get_transcription(transcript_id)
+        if data.get('status') != 'completed':
+            return jsonify({"error": "Transcript not ready"}), 404
+
+        utterances = data.get('utterances', [])
+        lines = []
+        for utt in utterances:
+            start = format_timestamp(utt.get('start', 0))
+            speaker = utt.get('speaker', '?')
+            text = utt.get('text', '')
+            lines.append(f"[{start}] Speaker {speaker}: {text}")
+        transcript_text = "\n\n".join(lines)
+
+        creds = Credentials(
+            token=None,
+            refresh_token=_GOOGLE_REFRESH_TOKEN,
+            token_uri='https://oauth2.googleapis.com/token',
+            client_id=os.environ.get('GOOGLE_CLIENT_ID', ''),
+            client_secret=os.environ.get('GOOGLE_CLIENT_SECRET', ''),
+        )
+
+        docs_service = build('docs', 'v1', credentials=creds)
+        doc = docs_service.documents().create(body={'title': 'Transcript'}).execute()
+        doc_id = doc['documentId']
+        doc_url = f"https://docs.google.com/document/d/{doc_id}/edit"
+
+        # Insert transcript text
+        if transcript_text:
+            docs_service.documents().batchUpdate(
+                documentId=doc_id,
+                body={'requests': [{'insertText': {'location': {'index': 1}, 'text': transcript_text}}]},
+            ).execute()
+
+        print(f"Created Transcript Google Doc: {doc_url}")
+        return jsonify({"success": True, "url": doc_url, "doc_id": doc_id})
+    except ImportError:
+        return jsonify({"error": "Google API libraries not installed"}), 500
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)), debug=False)

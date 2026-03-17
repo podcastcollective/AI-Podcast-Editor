@@ -628,7 +628,7 @@ STRUCTURAL RULES:
   - Greeting + guest name: "Hi, John", "Hello, Sarah", "Welcome, David"
   - Audience greeting: "welcome back", "welcome to", "hey everyone", "hello and welcome", "good morning"
   - Topic launch: "so today we're going to", "today I'm joined by", "in this episode"
-  EVERYTHING before the episode opener is pre-chat and MUST be removed. CRITICAL STEPS: (1) Find the readiness cue or logistics phrase. (2) Find the episode opener AFTER that cue. (3) Set your cut start_ms to 0 and cut end_ms to the opener word's start_ms MINUS 500ms. This 500ms buffer ensures the opener is never clipped. (4) If there is no pre-recording chat or readiness cue, do NOT make this cut. When in doubt, keep more — it is far worse to clip the opener than to leave in pre-chat.
+  EVERYTHING before the episode opener is pre-chat and MUST be removed. CRITICAL STEPS: (1) Find the readiness cue or logistics phrase. (2) Find the episode opener AFTER that cue. (3) Set your cut start_ms to 0 and cut end_ms to the opener word's start_ms. The system will add a tiny buffer automatically — do NOT subtract manually. The opener word must start cleanly and completely. (4) If there is no pre-recording chat or readiness cue, do NOT make this cut. When in doubt, keep more — it is far worse to clip the opener than to leave in pre-chat.
 - LAST WORD PROTECTION: When making any cut near the end of the episode, ensure the final word of real content is fully preserved. Never set a cut's start_ms within the last spoken word — use the word's end_ms as the earliest allowed cut point.
 - END-OF-EPISODE PROTECTION: In the last 25% of the episode, be EXTREMELY conservative with Content Cuts. Speakers often deliver concluding thoughts, summaries, or sign-offs that may sound like restated ideas but are actually the intended wrap-up. Do NOT cut restated thoughts or verbal stumbles in the final quarter — only remove pre-detected fillers, stutters, and clearly abandoned false starts (< 3 seconds). If a speaker repeats an idea near the end, they are likely emphasizing it deliberately.
 - POST-INTERVIEW CHAT: If there is chat after the episode has clearly concluded ("okay I'll stop recording", "that was great", wrap-up logistics), mark it for removal. Do NOT confuse a speaker's concluding remarks or sign-off with post-interview chat — if they are still addressing the audience or making a point, it is content.
@@ -932,17 +932,18 @@ def apply_audio_edits(audio_path, cuts_ms, words=None):
             cut[1] = _safe_cut_end(cut[1])
         # Pre-chat cut enforcement: if we detect pre-chat indicators, ensure the
         # cut extends all the way to the opener (not just where Claude placed it)
+        # Buffer is only 50ms — just enough for the crossfade, so no pre-chat audio leaks
         if words:
             opener_ms = _find_opener_start(words)
             if opener_ms is not None:
-                safe_end = max(0, opener_ms - 500)
+                safe_end = max(0, opener_ms - 50)
                 if merged and merged[0][0] < 2000:
                     # There's already a pre-chat cut — extend it to the opener if needed
                     if merged[0][1] < safe_end:
                         print(f"Pre-chat enforcement: extending cut from {merged[0][1]}ms to {safe_end}ms (opener at {opener_ms}ms)")
                         merged[0][1] = safe_end
-                    elif merged[0][1] > opener_ms - 500:
-                        # Cut overshoots the opener — pull it back
+                    elif merged[0][1] > opener_ms:
+                        # Cut overshoots into the opener word — pull it back
                         print(f"Pre-chat protection: cut end {merged[0][1]}ms would clip opener at {opener_ms}ms, pulling back to {safe_end}ms")
                         merged[0][1] = safe_end
                 elif not merged or merged[0][0] >= 2000:

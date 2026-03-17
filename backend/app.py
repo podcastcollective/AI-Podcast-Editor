@@ -518,11 +518,12 @@ def _find_pauses(words, min_ms=1000):
 
 def _find_stumbles(words):
     """Detect stumble regions where a speaker repeats a phrase multiple times
-    trying to land on the clean version. Conservative: only flags genuine stumbles
-    where the between-words are abandoned/filler, not new content.
+    trying to land on the clean version.
 
-    Returns regions with exact word-level timestamps for the stumble start
-    and the start of the final clean version."""
+    Approach: find repeated 2-3 word phrases from the same speaker within 10s.
+    The words between repetitions are expected to be abandoned attempts at the
+    same idea — they'll contain variations of the same words, fillers, and
+    false starts. Only reject if a completely unrelated topic appears between."""
     if len(words) < 6:
         return []
 
@@ -532,12 +533,12 @@ def _find_stumbles(words):
     def clean(w):
         return w.get('text', '').lower().strip('.,!?;:\'"')
 
-    # Words that are expected between stumble repetitions (fillers, abandoned fragments)
-    noise_words = {'um', 'uh', 'uhm', 'hmm', 'like', 'so', 'and', 'but', 'the', 'a',
-                   'of', 'in', 'to', 'it', 'its', "it's", 'i', 'is', 'that', 'this',
-                   'just', 'well', 'yeah', 'ok', 'okay', 'right'}
+    # Build a set of all content word stems for similarity checking
+    def stem(w):
+        """Poor man's stemmer — first 5 chars of 4+ letter words."""
+        return w[:5] if len(w) >= 4 else w
 
-    # Try phrase lengths 3, then 2 (longer phrases are more reliable matches)
+    # Try phrase lengths 3, then 2 (longer = more reliable)
     for phrase_len in [3, 2]:
         for i in range(len(words) - phrase_len):
             if i in used_ranges:
@@ -545,12 +546,14 @@ def _find_stumbles(words):
             speaker = words[i].get('speaker', '?')
             phrase = tuple(clean(words[i + k]) for k in range(phrase_len))
 
-            # Skip phrases of only very short/common words
-            content_words = [w for w in phrase if len(w) >= 3 and w not in noise_words]
-            if len(content_words) == 0:
+            # Skip phrases of only very short/common function words
+            function_words = {'um', 'uh', 'uhm', 'hmm', 'like', 'so', 'and', 'but', 'the',
+                              'a', 'of', 'in', 'to', 'it', 'i', 'is', 'that', 'this'}
+            content_in_phrase = [w for w in phrase if w not in function_words and len(w) >= 3]
+            if len(content_in_phrase) == 0:
                 continue
 
-            # Look for repetitions within 8s (tight window), same speaker only
+            # Look for repetitions within 10s, same speaker only
             first_start = words[i].get('start', 0)
             occurrences = [i]
 
@@ -559,7 +562,7 @@ def _find_stumbles(words):
                     continue
                 if words[j].get('speaker', '?') != speaker:
                     continue
-                if words[j].get('start', 0) - first_start > 8000:
+                if words[j].get('start', 0) - first_start > 10000:
                     break
                 candidate = tuple(clean(words[j + k]) for k in range(phrase_len))
                 if candidate == phrase:
@@ -571,33 +574,48 @@ def _find_stumbles(words):
             first_idx = occurrences[0]
             last_idx = occurrences[-1]
 
-            # CONTENT CHECK: verify the words between repetitions are just
-            # noise/filler/abandoned fragments, not meaningful new content.
-            # If we find content words that aren't part of the repeated phrase
-            # and aren't noise words, this isn't a stumble — it's real speech.
-            between_words = []
-            has_new_content = False
+            # SPEAKER CHECK: reject if another speaker talks between repetitions
+            has_other_speaker = False
             for k in range(first_idx + phrase_len, last_idx):
                 if words[k].get('speaker', '?') != speaker:
-                    has_new_content = True  # other speaker talking = not a stumble
+                    has_other_speaker = True
                     break
-                w = clean(words[k])
-                between_words.append(w)
-                # Is this word part of the repeated phrase or a noise word?
-                if w not in phrase and w not in noise_words and len(w) >= 3:
-                    # Could be an abandoned fragment — check if it's a partial
-                    # version of a phrase word (e.g. "disruptive" vs "disrupt")
-                    is_fragment = False
-                    for pw in phrase:
-                        if pw.startswith(w[:3]) or w.startswith(pw[:3]):
-                            is_fragment = True
-                            break
-                    if not is_fragment:
-                        has_new_content = True
-                        break
-
-            if has_new_content:
+            if has_other_speaker:
                 continue
+
+            # CONTENT CHECK: the between-words should be related to the repeated
+            # phrase (variations, abandoned attempts, fillers). Build a "topic set"
+            # from the phrase stems and check that between-words are topically related.
+            phrase_stems = set(stem(w) for w in phrase if len(w) >= 3)
+            between_content = []
+            for k in range(first_idx + phrase_len, last_idx):
+                w = clean(words[k])
+                if w in function_words or len(w) < 3:
+                    continue
+                between_content.append(w)
+
+            # Check: are the between-content words related to the phrase?
+            # Allow words that share a stem with phrase words, or are common
+            # speech connectors. Only reject if >50% of between-content words
+            # are completely unrelated (different topic).
+            if between_content:
+                unrelated = 0
+                connectors = {'very', 'really', 'quite', 'certainly', 'definitely',
+                              'actually', 'basically', 'probably', 'maybe', 'terms',
+                              'kind', 'sort', 'thing', 'things', 'way', 'know',
+                              'mean', 'think', 'going', 'saying', 'sure', 'sorry',
+                              'voice', 'lot', 'bit', 'much', 'more', 'also'}
+                for w in between_content:
+                    w_stem = stem(w)
+                    related = (w_stem in phrase_stems or
+                               w in connectors or
+                               any(w_stem.startswith(ps[:3]) or ps.startswith(w_stem[:3])
+                                   for ps in phrase_stems))
+                    if not related:
+                        unrelated += 1
+                # If more than half the between-content is unrelated, skip
+                if unrelated > len(between_content) * 0.5:
+                    continue
 
             # Build stumble data
             stumble_start_ms = words[first_idx].get('start', 0)
@@ -627,6 +645,70 @@ def _find_stumbles(words):
             })
 
     found.sort(key=lambda x: x['stumble_start_ms'])
+    return found
+
+
+def _find_meta_commentary(words):
+    """Detect meta-commentary where speakers reference the recording process
+    or their own performance mid-episode. These should be flagged for removal.
+    E.g. 'my voice is going', 'sorry let me start again', 'I keep stumbling'."""
+    META_PHRASES = [
+        ('my', 'voice', 'is'),
+        ('voice', 'is', 'going'),
+        ('losing', 'my', 'voice'),
+        ('sorry', 'about', 'that'),
+        ('let', 'me', 'start', 'again'),
+        ('let', 'me', 'rephrase'),
+        ('let', 'me', 'try', 'again'),
+        ("i'll", 'start', 'again'),
+        ("i'll", 'try', 'again'),
+        ('sorry', "i'm", 'stumbling'),
+        ('sorry', 'i', 'keep'),
+        ('bear', 'with', 'me'),
+        ('excuse', 'me'),
+        ('pardon', 'me'),
+        ('where', 'was', 'i'),
+        ('lost', 'my', 'train'),
+        ('lost', 'my', 'thought'),
+    ]
+    found = []
+    for i in range(len(words)):
+        for phrase in META_PHRASES:
+            plen = len(phrase)
+            if i + plen > len(words):
+                continue
+            match = True
+            for j in range(plen):
+                tok = words[i + j].get('text', '').lower().strip('.,!?;:\'"')
+                if tok != phrase[j]:
+                    match = False
+                    break
+            if match:
+                # Expand to capture the full meta-comment sentence
+                start_idx = i
+                end_idx = i + plen - 1
+                # Expand forward to end of sentence (punctuation or pause >500ms)
+                for k in range(end_idx + 1, min(len(words), end_idx + 10)):
+                    if words[k].get('speaker', '?') != words[i].get('speaker', '?'):
+                        break
+                    end_idx = k
+                    text = words[k].get('text', '')
+                    if text.rstrip().endswith(('.', '?', '!')):
+                        break
+                    if k + 1 < len(words):
+                        gap = words[k + 1].get('start', 0) - words[k].get('end', 0)
+                        if gap > 500:
+                            break
+
+                removed_text = ' '.join(words[k].get('text', '') for k in range(start_idx, end_idx + 1))
+                found.append({
+                    'start_ms': words[start_idx].get('start', 0),
+                    'end_ms': words[end_idx].get('end', 0),
+                    'speaker': words[i].get('speaker', '?'),
+                    'text': removed_text,
+                    'phrase': ' '.join(phrase),
+                })
+                break
     return found
 
 
@@ -701,7 +783,16 @@ def analyze_transcript_with_claude(transcript_data, preset_cfg, custom_instructi
     ]
     stumble_text = "\n".join(stumble_lines) if stumble_lines else "None detected"
 
-    print(f"Pre-detected {len(fillers)} fillers, {len(pauses)} pauses, {len(stutters)} stutters, {len(hedging_clusters)} hedging clusters, {len(stumbles)} stumbles")
+    meta_comments = _find_meta_commentary(words)
+    meta_lines = [
+        f'{m["start_ms"]}–{m["end_ms"]} Speaker {m["speaker"]}: '
+        f'"{m["text"]}" (meta-commentary, remove)'
+        for m in meta_comments[:20]
+    ]
+    meta_text = "\n".join(meta_lines) if meta_lines else "None detected"
+
+    print(f"Pre-detected {len(fillers)} fillers, {len(pauses)} pauses, {len(stutters)} stutters, "
+          f"{len(hedging_clusters)} hedging clusters, {len(stumbles)} stumbles, {len(meta_comments)} meta-comments")
 
     multitrack_rules = ""
     if is_multitrack:
@@ -736,6 +827,10 @@ PRE-DETECTED HEDGING CLUSTERS (3+ hedging phrases within 15s \u2014 uncertain pa
 PRE-DETECTED STUMBLES (repeated phrases — speaker trying to land on the right wording):
 {stumble_text}
 For each stumble above: use the exact CUT range provided (stumble_start_ms to clean_start_ms). This removes all abandoned attempts and keeps the final clean version. Do NOT adjust these boundaries — they are word-level precise.
+
+PRE-DETECTED META-COMMENTARY (speaker references recording/performance — remove these):
+{meta_text}
+Meta-commentary is where a speaker breaks the fourth wall to comment on the recording itself ("my voice is going", "sorry let me start again", "bear with me"). These must be removed — listeners should not hear them. Use the exact start_ms and end_ms provided.
 
 RECORDING CONTEXT:
 {preset_cfg.get('claude_hint', '')}
@@ -773,6 +868,7 @@ Each pause above is tagged [EMPHATIC] or [UNCERTAIN] based on surrounding contex
 - STUMBLES: For each PRE-DETECTED STUMBLE listed above, verify before applying: (1) read the removed text — is it genuinely abandoned/repeated phrasing? If it contains NEW ideas or meaningful content, SKIP this stumble. (2) Read the resulting sentence with the cut applied — is it grammatical and natural? If not, SKIP. (3) Only if both checks pass, apply the cut using the EXACT start_ms and end_ms provided. These are word-level precise. Do NOT invent your own stumble cuts — use only the pre-detected ones or skip them.
 - FALSE STARTS: Only cut when a speaker clearly abandons a sentence and restarts it. You must be very confident the restart is cleaner. If in doubt, leave both. Always make ONE continuous cut — never split into separate cuts that leave fragments between them.
 - RESTATED THOUGHTS: Only cut when a speaker says something then IMMEDIATELY rephrases the exact same idea. The second version must fully replace the first with zero loss of meaning. Make ONE continuous cut covering all abandoned versions, ending right at the start of the kept version.
+- META-COMMENTARY: Remove ALL pre-detected meta-commentary listed above using the exact timestamps. Also scan the transcript for any meta-commentary the pre-detection missed — moments where a speaker comments on the recording itself, their own performance, or breaks from the conversation topic to address a technical issue. These break the listener's immersion and must be removed.
 - HEDGING CLUSTERS: In regions flagged as hedging clusters above, you may remove 1-2 individual hedging phrases ("you know", "I mean", "kind of") — cut ONLY those exact words, not the sentence around them. Do NOT strip all hedging \u2014 some is natural.
 - REPEATED POINTS: When a speaker makes the exact same point twice in immediate succession, keep the stronger version. This should be rare — only when the repetition is truly redundant.
 - NEVER remove an entire sentence or clause just because it contains filler words like "kind of", "sort of", "you know". Remove the filler words themselves if needed, but KEEP the surrounding sentence — it carries meaning and context. A sentence with a filler removed is always better than a sentence deleted entirely.

@@ -263,30 +263,67 @@ HEDGING_PHRASES = {
 
 
 def _find_fillers(words):
-    """Scan word list for filler words; return list of {text, start_ms, end_ms, speaker}."""
+    """Scan word list for filler words; classify each as 'disruptive' or 'natural'.
+    - disruptive: mid-sentence, mid-clause, clustered with other fillers — remove these
+    - natural: at sentence boundaries, natural pause points, standalone — keep these"""
     found = []
     i = 0
     while i < len(words):
         w = words[i]
         tok = w.get('text', '').lower().strip('.,!?;:')
+        filler_text = None
+        filler_end_idx = i
+
         if i + 1 < len(words):
             two = tok + ' ' + words[i + 1].get('text', '').lower().strip('.,!?;:')
             if two in FILLER_WORDS:
-                found.append({
-                    'text': two,
-                    'start_ms': w.get('start', 0),
-                    'end_ms': words[i + 1].get('end', 0),
-                    'speaker': w.get('speaker', '?'),
-                })
-                i += 2
-                continue
-        if tok in FILLER_WORDS:
+                filler_text = two
+                filler_end_idx = i + 1
+
+        if filler_text is None and tok in FILLER_WORDS:
+            filler_text = tok
+            filler_end_idx = i
+
+        if filler_text:
+            # Classify: is this filler disruptive or natural?
+            context = 'disruptive'
+
+            # Check if at a sentence boundary (word before ends with punctuation)
+            if i > 0:
+                prev_text = words[i - 1].get('text', '').rstrip()
+                if prev_text.endswith(('.', '?', '!', ',')):
+                    context = 'natural'
+
+            # Check if there's a significant pause before this filler (>300ms)
+            if i > 0:
+                gap_before = w.get('start', 0) - words[i - 1].get('end', 0)
+                if gap_before > 300:
+                    context = 'natural'
+
+            # Check if there's a significant pause after this filler (>300ms)
+            if filler_end_idx + 1 < len(words):
+                gap_after = words[filler_end_idx + 1].get('start', 0) - words[filler_end_idx].get('end', 0)
+                if gap_after > 300:
+                    context = 'natural'
+
+            # Clustered fillers (another filler within 3 words) = disruptive
+            for offset in range(max(0, i - 3), min(len(words), filler_end_idx + 4)):
+                if offset == i or offset == filler_end_idx:
+                    continue
+                nearby = words[offset].get('text', '').lower().strip('.,!?;:')
+                if nearby in FILLER_WORDS:
+                    context = 'disruptive'
+                    break
+
             found.append({
-                'text': tok,
+                'text': filler_text,
                 'start_ms': w.get('start', 0),
-                'end_ms': w.get('end', 0),
+                'end_ms': words[filler_end_idx].get('end', 0),
                 'speaker': w.get('speaker', '?'),
+                'context': context,
             })
+            i = filler_end_idx + 1
+            continue
         i += 1
     return found
 
@@ -481,23 +518,26 @@ def _find_pauses(words, min_ms=1000):
 
 def _find_stumbles(words):
     """Detect stumble regions where a speaker repeats a phrase multiple times
-    trying to land on the clean version. Returns regions with exact word-level
-    timestamps for the whole stumble and the start of the clean (final) version.
+    trying to land on the clean version. Conservative: only flags genuine stumbles
+    where the between-words are abandoned/filler, not new content.
 
-    Approach: slide a window of 2-4 words, look for the same phrase repeated
-    within 15 seconds by the same speaker. If found, the region from the first
-    occurrence to the start of the last occurrence is the stumble."""
+    Returns regions with exact word-level timestamps for the stumble start
+    and the start of the final clean version."""
     if len(words) < 6:
         return []
 
     found = []
-    used_ranges = set()  # track word indices already part of a stumble
+    used_ranges = set()
 
-    # Normalize words
     def clean(w):
         return w.get('text', '').lower().strip('.,!?;:\'"')
 
-    # Try phrase lengths 3, then 2
+    # Words that are expected between stumble repetitions (fillers, abandoned fragments)
+    noise_words = {'um', 'uh', 'uhm', 'hmm', 'like', 'so', 'and', 'but', 'the', 'a',
+                   'of', 'in', 'to', 'it', 'its', "it's", 'i', 'is', 'that', 'this',
+                   'just', 'well', 'yeah', 'ok', 'okay', 'right'}
+
+    # Try phrase lengths 3, then 2 (longer phrases are more reliable matches)
     for phrase_len in [3, 2]:
         for i in range(len(words) - phrase_len):
             if i in used_ranges:
@@ -505,11 +545,12 @@ def _find_stumbles(words):
             speaker = words[i].get('speaker', '?')
             phrase = tuple(clean(words[i + k]) for k in range(phrase_len))
 
-            # Skip if phrase contains empty or very short words only
-            if all(len(w) < 2 for w in phrase):
+            # Skip phrases of only very short/common words
+            content_words = [w for w in phrase if len(w) >= 3 and w not in noise_words]
+            if len(content_words) == 0:
                 continue
 
-            # Look for repetitions of this phrase within 15s, same speaker
+            # Look for repetitions within 8s (tight window), same speaker only
             first_start = words[i].get('start', 0)
             occurrences = [i]
 
@@ -518,7 +559,7 @@ def _find_stumbles(words):
                     continue
                 if words[j].get('speaker', '?') != speaker:
                     continue
-                if words[j].get('start', 0) - first_start > 15000:
+                if words[j].get('start', 0) - first_start > 8000:
                     break
                 candidate = tuple(clean(words[j + k]) for k in range(phrase_len))
                 if candidate == phrase:
@@ -527,32 +568,50 @@ def _find_stumbles(words):
             if len(occurrences) < 2:
                 continue
 
-            # Found a repeated phrase — build the stumble region
             first_idx = occurrences[0]
             last_idx = occurrences[-1]
 
-            # The stumble region is from the first occurrence to just before the last
-            # The "clean version" starts at the last occurrence
+            # CONTENT CHECK: verify the words between repetitions are just
+            # noise/filler/abandoned fragments, not meaningful new content.
+            # If we find content words that aren't part of the repeated phrase
+            # and aren't noise words, this isn't a stumble — it's real speech.
+            between_words = []
+            has_new_content = False
+            for k in range(first_idx + phrase_len, last_idx):
+                if words[k].get('speaker', '?') != speaker:
+                    has_new_content = True  # other speaker talking = not a stumble
+                    break
+                w = clean(words[k])
+                between_words.append(w)
+                # Is this word part of the repeated phrase or a noise word?
+                if w not in phrase and w not in noise_words and len(w) >= 3:
+                    # Could be an abandoned fragment — check if it's a partial
+                    # version of a phrase word (e.g. "disruptive" vs "disrupt")
+                    is_fragment = False
+                    for pw in phrase:
+                        if pw.startswith(w[:3]) or w.startswith(pw[:3]):
+                            is_fragment = True
+                            break
+                    if not is_fragment:
+                        has_new_content = True
+                        break
+
+            if has_new_content:
+                continue
+
+            # Build stumble data
             stumble_start_ms = words[first_idx].get('start', 0)
             clean_start_ms = words[last_idx].get('start', 0)
-
-            # Find where the clean version ends (scan forward to end of sentence or pause)
             clean_end_idx = last_idx + phrase_len - 1
             clean_end_ms = words[clean_end_idx].get('end', 0)
 
-            # Build the text of what's being removed
-            removed_words = []
-            for k in range(first_idx, last_idx):
-                removed_words.append(words[k].get('text', ''))
-
-            # Build the text of the clean version
+            removed_words = [words[k].get('text', '') for k in range(first_idx, last_idx)]
             clean_words = []
-            for k in range(last_idx, min(last_idx + phrase_len + 5, len(words))):
+            for k in range(last_idx, min(last_idx + phrase_len + 8, len(words))):
                 if words[k].get('speaker', '?') != speaker:
                     break
                 clean_words.append(words[k].get('text', ''))
 
-            # Mark these indices as used
             for idx in range(first_idx, last_idx + phrase_len):
                 used_ranges.add(idx)
 
@@ -567,7 +626,6 @@ def _find_stumbles(words):
                 'repetitions': len(occurrences),
             })
 
-    # Sort by start time
     found.sort(key=lambda x: x['stumble_start_ms'])
     return found
 
@@ -600,7 +658,7 @@ def analyze_transcript_with_claude(transcript_data, preset_cfg, custom_instructi
     filler_pct = preset_cfg.get('filler_pct', 60)
     fillers = _find_fillers(words) if remove_fillers else []
     filler_lines = [
-        f'{f["start_ms"]} {f["end_ms"]} "{f["text"]}" (Speaker {f["speaker"]})'
+        f'{f["start_ms"]} {f["end_ms"]} "{f["text"]}" (Speaker {f["speaker"]}) [{f.get("context", "disruptive").upper()}]'
         for f in fillers[:200]
     ]
     filler_text = "\n".join(filler_lines) if filler_lines else "None detected"
@@ -693,13 +751,14 @@ EDITING PHILOSOPHY:
 - NEVER make a Content Cut that would break a sentence or remove words that are needed for the sentence to make grammatical sense. If a cut would leave an incomplete or nonsensical sentence, do NOT make it.
 
 FILLER WORD RULES:
-- Remove approximately {filler_pct}% of the filler words listed above \u2014 NOT all of them.
-- "Remove a filler" means cutting ONLY the filler word itself (using its exact start_ms and end_ms from the list above). Do NOT remove surrounding words, phrases, or sentences — only the filler word. NEVER delete content words adjacent to a filler. The words before and after the filler must remain fully intact in the output.
-- Keep fillers that serve as clear natural transitions between distinct thoughts.
-- Remove fillers that cluster together, interrupt flow, or appear mid-sentence.
-- Use the EXACT start_ms and end_ms provided. CRITICAL: Never adjust these timestamps \u2014 they are word-level boundaries from the transcription engine.
-- Preserve ALL acronyms and industry-specific terms exactly as spoken \u2014 they are key terminology, not mistakes.
-- SMOOTHNESS: Filler cuts are micro-faded at boundaries. For best results, only remove fillers where the surrounding audio flows naturally without them — if removing a filler would create an awkward jump or unnatural rhythm, leave it in.
+Each filler above is tagged [DISRUPTIVE] or [NATURAL] based on its position in the speech:
+- [DISRUPTIVE]: mid-sentence, mid-clause, or clustered with other fillers — these interrupt flow. Remove most of these.
+- [NATURAL]: at sentence boundaries, after pauses, standalone thinking sounds — these are part of natural human speech rhythm. KEEP these unless they are excessive.
+- Target: remove approximately {filler_pct}% of [DISRUPTIVE] fillers. Keep most [NATURAL] fillers — a thoughtful "um" at a pause point sounds human and should stay.
+- "Remove a filler" means cutting ONLY the filler word itself (using its exact start_ms and end_ms). Do NOT remove surrounding words. The words before and after must remain fully intact.
+- Use the EXACT start_ms and end_ms provided — never adjust these timestamps.
+- Preserve ALL acronyms and industry-specific terms exactly as spoken.
+- SMOOTHNESS: Only remove fillers where the surrounding audio flows naturally without them. If removing a filler would create an awkward jump or unnatural rhythm, leave it in.
 
 PAUSE RULES:
 Each pause above is tagged [EMPHATIC] or [UNCERTAIN] based on surrounding context. Treat them differently:
@@ -711,7 +770,7 @@ Each pause above is tagged [EMPHATIC] or [UNCERTAIN] based on surrounding contex
 {multitrack_rules}CONTENT RULES:
 - STUTTERS: Remove ALL pre-detected stutters listed above. For each stutter, cut the partial/duplicate word using its start_ms and end_ms. These are the safest type of content cut.
 - STUTTERS (scan independently): Also look through the transcript for stutters the pre-detection missed. These include: exact word duplicates ("so so"), partial-word false starts where a speaker begins a word then restarts it ("comm community", "compu computer", "tic particularly"), and repeated short phrases ("I think I think"). The transcriber may garble the partial word, so look for any short word immediately before a longer word that sounds like a false start of that word. Cut the partial/duplicate.
-- STUMBLES: For each PRE-DETECTED STUMBLE listed above, apply the cut using the EXACT start_ms and end_ms provided. These boundaries are word-level precise — do NOT adjust them. The cut removes all abandoned attempts and keeps the final clean version. Before applying, verify: (1) the removed text is genuinely repeated/abandoned phrasing, not distinct content, (2) the remaining sentence reads grammatically and makes sense in context. If either check fails, skip that stumble. Do NOT invent your own stumble boundaries — use only the pre-detected ones.
+- STUMBLES: For each PRE-DETECTED STUMBLE listed above, verify before applying: (1) read the removed text — is it genuinely abandoned/repeated phrasing? If it contains NEW ideas or meaningful content, SKIP this stumble. (2) Read the resulting sentence with the cut applied — is it grammatical and natural? If not, SKIP. (3) Only if both checks pass, apply the cut using the EXACT start_ms and end_ms provided. These are word-level precise. Do NOT invent your own stumble cuts — use only the pre-detected ones or skip them.
 - FALSE STARTS: Only cut when a speaker clearly abandons a sentence and restarts it. You must be very confident the restart is cleaner. If in doubt, leave both. Always make ONE continuous cut — never split into separate cuts that leave fragments between them.
 - RESTATED THOUGHTS: Only cut when a speaker says something then IMMEDIATELY rephrases the exact same idea. The second version must fully replace the first with zero loss of meaning. Make ONE continuous cut covering all abandoned versions, ending right at the start of the kept version.
 - HEDGING CLUSTERS: In regions flagged as hedging clusters above, you may remove 1-2 individual hedging phrases ("you know", "I mean", "kind of") — cut ONLY those exact words, not the sentence around them. Do NOT strip all hedging \u2014 some is natural.

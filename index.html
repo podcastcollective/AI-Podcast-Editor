@@ -183,11 +183,16 @@
             };
 
             const addTrack = (e) => {
-                const file = e.target.files[0];
-                if (!file || !file.type.includes('audio')) return;
+                const newFiles = Array.from(e.target.files).filter(f => f.type.includes('audio'));
+                if (newFiles.length === 0) return;
                 const defaultLabels = ['Host', 'Guest 1', 'Guest 2', 'Guest 3'];
-                const label = defaultLabels[tracks.length] || `Track ${tracks.length + 1}`;
-                setTracks(prev => [...prev, { file, label }]);
+                setTracks(prev => {
+                    const added = newFiles.map((file, i) => ({
+                        file,
+                        label: defaultLabels[prev.length + i] || `Track ${prev.length + i + 1}`
+                    }));
+                    return [...prev, ...added];
+                });
                 e.target.value = '';
             };
 
@@ -1004,7 +1009,7 @@
                                                 </div>
                                             ))}
                                             <div>
-                                                <input type="file" accept="audio/*" onChange={addTrack} className="hidden" id="add-track" />
+                                                <input type="file" accept="audio/*" multiple onChange={addTrack} className="hidden" id="add-track" />
                                                 <label htmlFor="add-track" className="inline-flex items-center gap-2 cursor-pointer text-sm text-purple-300 hover:text-white bg-white/5 border border-dashed border-white/20 rounded-lg px-4 py-2 hover:bg-white/10 transition-all">
                                                     + Add track
                                                 </label>

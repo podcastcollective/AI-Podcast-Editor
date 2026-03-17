@@ -967,6 +967,32 @@ def apply_audio_edits(audio_path, cuts_ms, words=None):
                     print(f"Pre-chat enforcement: Claude missed pre-chat, creating cut 0ms-{safe_end}ms (opener at {opener_ms}ms)")
                     merged.insert(0, [0, safe_end])
 
+    # Speaker boundary enforcement: for mid-episode content cuts, ensure the cut
+    # doesn't span multiple speakers. If it does, shrink it to start at the first
+    # word of the dominant (most frequent) speaker in the cut region.
+    if words:
+        for cut in merged:
+            s, e = cut
+            if s < 60000 or e > total_ms * 0.85:
+                continue  # skip pre/post-chat cuts
+            # Find all words within this cut
+            words_in_cut = [w for w in words if w.get('start', 0) >= s and w.get('end', 0) <= e]
+            if len(words_in_cut) < 2:
+                continue
+            speakers = set(w.get('speaker', '?') for w in words_in_cut)
+            if len(speakers) > 1:
+                # Multiple speakers — find the dominant speaker (most words)
+                from collections import Counter
+                speaker_counts = Counter(w.get('speaker', '?') for w in words_in_cut)
+                dominant = speaker_counts.most_common(1)[0][0]
+                # Find the first word of the dominant speaker
+                dominant_words = [w for w in words_in_cut if w.get('speaker', '?') == dominant]
+                new_start = dominant_words[0].get('start', s)
+                if new_start > s:
+                    print(f"SPEAKER BOUNDARY: Cut {s}ms-{e}ms spans speakers {speakers}, "
+                          f"shrinking start from {s}ms to {new_start}ms (keeping only Speaker {dominant})")
+                    cut[0] = new_start
+
     # Safety: reject mid-episode content cuts > 8s (keep pre/post-chat cuts)
     # 8s allows false start (4-5s) + adjacent stutter/filler cuts to merge safely
     safe_merged = []

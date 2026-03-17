@@ -1450,22 +1450,14 @@
                                             <Download className="w-5 h-5" />
                                             Download Edited Audio
                                         </button>
-                                        <div className="flex flex-col gap-2">
-                                            <button
-                                                onClick={() => handleTranscriptDownload(batchResults[0]?.transcriptId)}
-                                                className="bg-white/10 border border-white/20 text-white font-semibold py-4 px-8 rounded-xl hover:bg-white/20 transition-all flex items-center justify-center gap-2"
-                                            >
-                                                <FileAudio className="w-5 h-5" />
-                                                Download Transcript
-                                            </button>
-                                            <button
-                                                onClick={() => exportTranscriptToGoogleDocs(batchResults[0]?.transcriptId)}
-                                                disabled={exportingTranscriptDoc}
-                                                className="text-xs text-purple-300 hover:text-white transition-all disabled:opacity-50"
-                                            >
-                                                {exportingTranscriptDoc ? 'Exporting...' : 'Google Docs'}
-                                            </button>
-                                        </div>
+                                        <button
+                                            onClick={() => exportTranscriptToGoogleDocs(batchResults[0]?.transcriptId)}
+                                            disabled={exportingTranscriptDoc}
+                                            className="bg-white/10 border border-white/20 text-white font-semibold py-4 px-8 rounded-xl hover:bg-white/20 transition-all flex items-center justify-center gap-2 disabled:opacity-50"
+                                        >
+                                            <FileAudio className="w-5 h-5" />
+                                            {exportingTranscriptDoc ? 'Exporting...' : 'Download Transcript'}
+                                        </button>
                                         <button
                                             onClick={() => handleGenerateShowNotes(batchResults[0]?.transcriptId)}
                                             disabled={showNotesLoading}

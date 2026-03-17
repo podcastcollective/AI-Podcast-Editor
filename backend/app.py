@@ -772,7 +772,8 @@ def apply_audio_edits(audio_path, cuts_ms, words=None):
         # "thanks/thank you for" — strong signal
         ('thanks', 'for', 'joining'), ('thanks', 'for', 'tuning'),
         ('thank', 'you', 'for'),
-        # "today/this episode" — moderate signal
+        # "today/this is/this episode" — moderate signal
+        ('this', 'is', 'the'), ('this', 'is', 'episode'),
         ('today', 'we'), ("today's", 'episode'), ('today', 'on'),
         ('in', 'this', 'episode'), ('on', 'this', 'episode'),
         ("on", "today's", "episode"),

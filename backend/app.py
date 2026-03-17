@@ -624,7 +624,7 @@ STRUCTURAL RULES:
 - PRE-RECORDING CHAT: Scan the first 90 seconds for pre-recording logistics. These come in two forms:
   (a) EXPLICIT logistics: "okay recording now", "we are now recording", "are we recording?", "let me hit record", mic checks, countdown cues.
   (b) READINESS cues: "are you all set?", "all set", "ready?", "ready to go?", "shall we start?", "okay I'll start with this", "let's get into it", "let's go", "here we go". These are the host confirming they are about to begin — everything before them (and including them) is pre-chat.
-  After these cues, look for the EPISODE OPENER — the first moment the host addresses the audience or guest in an on-air voice. Common patterns:
+  After these cues, the host typically leaves a brief pause before starting. Look for that pause, then the EPISODE OPENER — the first moment the host addresses the audience or guest in an on-air voice. Common patterns:
   - Greeting + guest name: "Hi, John", "Hello, Sarah", "Welcome, David"
   - Audience greeting: "welcome back", "welcome to", "hey everyone", "hello and welcome", "good morning"
   - Topic launch: "so today we're going to", "today I'm joined by", "in this episode"
@@ -881,16 +881,24 @@ def apply_audio_edits(audio_path, cuts_ms, words=None):
                         print(f"Opener detected: '{tok} {next_tok}' at {ms}ms (greeting + name after pre-chat)")
                         return ms
 
-        # Step 4: if pre-chat detected but no opener found, use gap detection
+        # Step 4: if pre-chat detected, look for a pause after the last pre-chat word.
+        # Hosts typically leave a beat (500ms+) before starting the episode — the first
+        # speech after that pause is the opener.
         if has_prechat and prechat_end_ms > 0:
+            # Find the gap right after the pre-chat end
             for i in range(len(tokens) - 1):
                 if tokens[i][1] < prechat_end_ms:
                     continue
                 if i + 1 < len(tokens):
                     gap = tokens[i + 1][1] - tokens[i][1]
-                    if gap > 1500:
-                        print(f"Post-prechat gap of {gap}ms detected, opener likely at {tokens[i+1][1]}ms")
+                    if gap > 500:
+                        print(f"Post-prechat pause of {gap}ms detected, opener likely at {tokens[i+1][1]}ms")
                         return tokens[i + 1][1]
+            # No obvious pause — just use the first word after pre-chat
+            for i in range(len(tokens)):
+                if tokens[i][1] > prechat_end_ms:
+                    print(f"No pause found, using first word after pre-chat at {tokens[i][1]}ms")
+                    return tokens[i][1]
 
         if not has_prechat:
             # No opener phrases and no pre-chat — probably no pre-chat to cut

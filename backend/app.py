@@ -1290,28 +1290,32 @@ def apply_audio_edits(audio_path, cuts_ms, words=None):
     if not keeps:
         keeps = [(0, min(1000, total_ms))]
 
-    # Build ffmpeg filter_complex: trim each keep segment, apply micro-fades, concat
-    FADE_S = 0.010  # 10ms micro-fade at cut boundaries (5ms caused audible clicks)
+    # Build ffmpeg filter_complex: trim each keep segment, crossfade between them
+    # Using acrossfade (20ms, equal-power curve) instead of concat + independent fades
+    # to eliminate pops/glitches at cut boundaries
+    XFADE_S = 0.020  # 20ms crossfade — short enough to be inaudible, long enough to prevent pops
     filter_parts = []
     for i, (start, end) in enumerate(keeps):
         start_s = start / 1000
         end_s = end / 1000
-        duration_s = end_s - start_s
-
-        # atrim extracts segment, asetpts resets timestamps to 0
         chain = [f"atrim={start_s}:{end_s}", "asetpts=N/SR/TB"]
-
-        # Micro-fades at cut boundaries only (not episode start/end)
-        if i > 0 and duration_s > FADE_S:
-            chain.append(f"afade=t=in:d={FADE_S}")
-        if i < len(keeps) - 1 and duration_s > FADE_S:
-            chain.append(f"afade=t=out:st={duration_s - FADE_S}:d={FADE_S}")
-
         filter_parts.append(f"[0:a]{','.join(chain)}[s{i}]")
 
-    concat_inputs = "".join(f"[s{i}]" for i in range(len(keeps)))
-    full_filter = ";".join(filter_parts)
-    full_filter += f";{concat_inputs}concat=n={len(keeps)}:v=0:a=1[out]"
+    if len(keeps) == 1:
+        full_filter = ";".join(filter_parts) + ";[s0]acopy[out]"
+    else:
+        # Chain acrossfade between all segments
+        full_filter = ";".join(filter_parts)
+        # First crossfade: [s0][s1] -> [x0]
+        full_filter += f";[s0][s1]acrossfade=d={XFADE_S}:c1=tri:c2=tri[x0]"
+        for i in range(2, len(keeps)):
+            prev = f"x{i-2}"
+            curr = f"s{i}"
+            out = f"x{i-1}" if i < len(keeps) - 1 else "out"
+            full_filter += f";[{prev}][{curr}]acrossfade=d={XFADE_S}:c1=tri:c2=tri[{out}]"
+        if len(keeps) == 2:
+            # Only one crossfade, rename x0 -> out
+            full_filter = full_filter.replace("[x0]", "[out]")
 
     # Write filter to script file to avoid command-line length limits
     filter_path = audio_path + '_filter.txt'

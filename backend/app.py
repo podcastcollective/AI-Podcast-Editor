@@ -930,9 +930,25 @@ def apply_audio_edits(audio_path, cuts_ms, words=None):
         for cut in merged:
             cut[0] = _safe_cut_start(cut[0])
             cut[1] = _safe_cut_end(cut[1])
-        # Protect first content word from pre-chat cuts (first cut starting near 0)
-        if merged and merged[0][0] < 2000:
-            merged[0][1] = _protect_first_content(merged[0][1], words or [])
+        # Pre-chat cut enforcement: if we detect pre-chat indicators, ensure the
+        # cut extends all the way to the opener (not just where Claude placed it)
+        if words:
+            opener_ms = _find_opener_start(words)
+            if opener_ms is not None:
+                safe_end = max(0, opener_ms - 500)
+                if merged and merged[0][0] < 2000:
+                    # There's already a pre-chat cut — extend it to the opener if needed
+                    if merged[0][1] < safe_end:
+                        print(f"Pre-chat enforcement: extending cut from {merged[0][1]}ms to {safe_end}ms (opener at {opener_ms}ms)")
+                        merged[0][1] = safe_end
+                    elif merged[0][1] > opener_ms - 500:
+                        # Cut overshoots the opener — pull it back
+                        print(f"Pre-chat protection: cut end {merged[0][1]}ms would clip opener at {opener_ms}ms, pulling back to {safe_end}ms")
+                        merged[0][1] = safe_end
+                elif not merged or merged[0][0] >= 2000:
+                    # No pre-chat cut from Claude but we detected pre-chat — create one
+                    print(f"Pre-chat enforcement: Claude missed pre-chat, creating cut 0ms-{safe_end}ms (opener at {opener_ms}ms)")
+                    merged.insert(0, [0, safe_end])
 
     # Safety: reject mid-episode content cuts > 5s (keep pre/post-chat cuts)
     safe_merged = []

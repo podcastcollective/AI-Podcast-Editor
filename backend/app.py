@@ -479,6 +479,99 @@ def _find_pauses(words, min_ms=1000):
     return pauses
 
 
+def _find_stumbles(words):
+    """Detect stumble regions where a speaker repeats a phrase multiple times
+    trying to land on the clean version. Returns regions with exact word-level
+    timestamps for the whole stumble and the start of the clean (final) version.
+
+    Approach: slide a window of 2-4 words, look for the same phrase repeated
+    within 15 seconds by the same speaker. If found, the region from the first
+    occurrence to the start of the last occurrence is the stumble."""
+    if len(words) < 6:
+        return []
+
+    found = []
+    used_ranges = set()  # track word indices already part of a stumble
+
+    # Normalize words
+    def clean(w):
+        return w.get('text', '').lower().strip('.,!?;:\'"')
+
+    # Try phrase lengths 3, then 2
+    for phrase_len in [3, 2]:
+        for i in range(len(words) - phrase_len):
+            if i in used_ranges:
+                continue
+            speaker = words[i].get('speaker', '?')
+            phrase = tuple(clean(words[i + k]) for k in range(phrase_len))
+
+            # Skip if phrase contains empty or very short words only
+            if all(len(w) < 2 for w in phrase):
+                continue
+
+            # Look for repetitions of this phrase within 15s, same speaker
+            first_start = words[i].get('start', 0)
+            occurrences = [i]
+
+            for j in range(i + 1, len(words) - phrase_len + 1):
+                if j in used_ranges:
+                    continue
+                if words[j].get('speaker', '?') != speaker:
+                    continue
+                if words[j].get('start', 0) - first_start > 15000:
+                    break
+                candidate = tuple(clean(words[j + k]) for k in range(phrase_len))
+                if candidate == phrase:
+                    occurrences.append(j)
+
+            if len(occurrences) < 2:
+                continue
+
+            # Found a repeated phrase — build the stumble region
+            first_idx = occurrences[0]
+            last_idx = occurrences[-1]
+
+            # The stumble region is from the first occurrence to just before the last
+            # The "clean version" starts at the last occurrence
+            stumble_start_ms = words[first_idx].get('start', 0)
+            clean_start_ms = words[last_idx].get('start', 0)
+
+            # Find where the clean version ends (scan forward to end of sentence or pause)
+            clean_end_idx = last_idx + phrase_len - 1
+            clean_end_ms = words[clean_end_idx].get('end', 0)
+
+            # Build the text of what's being removed
+            removed_words = []
+            for k in range(first_idx, last_idx):
+                removed_words.append(words[k].get('text', ''))
+
+            # Build the text of the clean version
+            clean_words = []
+            for k in range(last_idx, min(last_idx + phrase_len + 5, len(words))):
+                if words[k].get('speaker', '?') != speaker:
+                    break
+                clean_words.append(words[k].get('text', ''))
+
+            # Mark these indices as used
+            for idx in range(first_idx, last_idx + phrase_len):
+                used_ranges.add(idx)
+
+            found.append({
+                'stumble_start_ms': stumble_start_ms,
+                'clean_start_ms': clean_start_ms,
+                'clean_end_ms': clean_end_ms,
+                'speaker': speaker,
+                'removed_text': ' '.join(removed_words),
+                'clean_text': ' '.join(clean_words),
+                'phrase': ' '.join(phrase),
+                'repetitions': len(occurrences),
+            })
+
+    # Sort by start time
+    found.sort(key=lambda x: x['stumble_start_ms'])
+    return found
+
+
 def format_timestamp(milliseconds):
     seconds = milliseconds / 1000
     hours = int(seconds // 3600)
@@ -539,7 +632,18 @@ def analyze_transcript_with_claude(transcript_data, preset_cfg, custom_instructi
     ]
     hedging_text = "\n".join(hedging_lines) if hedging_lines else "None detected"
 
-    print(f"Pre-detected {len(fillers)} fillers, {len(pauses)} pauses, {len(stutters)} stutters, {len(hedging_clusters)} hedging clusters")
+    stumbles = _find_stumbles(words)
+    stumble_lines = [
+        f'{s["stumble_start_ms"]}–{s["clean_start_ms"]} Speaker {s["speaker"]}: '
+        f'"{s["phrase"]}" repeated {s["repetitions"]}x — '
+        f'CUT {s["stumble_start_ms"]}–{s["clean_start_ms"]} '
+        f'(remove: "{s["removed_text"][:80]}") '
+        f'(keep from {s["clean_start_ms"]}: "{s["clean_text"][:60]}")'
+        for s in stumbles[:20]
+    ]
+    stumble_text = "\n".join(stumble_lines) if stumble_lines else "None detected"
+
+    print(f"Pre-detected {len(fillers)} fillers, {len(pauses)} pauses, {len(stutters)} stutters, {len(hedging_clusters)} hedging clusters, {len(stumbles)} stumbles")
 
     multitrack_rules = ""
     if is_multitrack:
@@ -570,6 +674,10 @@ PRE-DETECTED STUTTERS (format: start_ms end_ms "partial" \u2192 "full" [type] sp
 
 PRE-DETECTED HEDGING CLUSTERS (3+ hedging phrases within 15s \u2014 uncertain passages):
 {hedging_text}
+
+PRE-DETECTED STUMBLES (repeated phrases — speaker trying to land on the right wording):
+{stumble_text}
+For each stumble above: use the exact CUT range provided (stumble_start_ms to clean_start_ms). This removes all abandoned attempts and keeps the final clean version. Do NOT adjust these boundaries — they are word-level precise.
 
 RECORDING CONTEXT:
 {preset_cfg.get('claude_hint', '')}
@@ -603,7 +711,7 @@ Each pause above is tagged [EMPHATIC] or [UNCERTAIN] based on surrounding contex
 {multitrack_rules}CONTENT RULES:
 - STUTTERS: Remove ALL pre-detected stutters listed above. For each stutter, cut the partial/duplicate word using its start_ms and end_ms. These are the safest type of content cut.
 - STUTTERS (scan independently): Also look through the transcript for stutters the pre-detection missed. These include: exact word duplicates ("so so"), partial-word false starts where a speaker begins a word then restarts it ("comm community", "compu computer", "tic particularly"), and repeated short phrases ("I think I think"). The transcriber may garble the partial word, so look for any short word immediately before a longer word that sounds like a false start of that word. Cut the partial/duplicate.
-- STUMBLE RECONSTRUCTION: ONLY use this when a passage is clearly full of stumbles, restarts and repeated attempts at the same phrase — NOT when a speaker is making distinct points that happen to use similar words. When you identify a genuinely stumbled passage: (1) Read the full stumbled region carefully. (2) Work out what the speaker INTENDED to say — the clean sentence must match the meaning and direction of the conversation, using the speaker's actual words. (3) NEVER cut meaningful content, new ideas, or distinct points — only cut abandoned attempts and repeated phrases where the speaker was clearly trying to land on the right wording. (4) Make ONE continuous cut from the end of the last good word before the stumble to the start of where the clean version picks up. Example: speaker says "it's certainly very disruptive in terms of. It's certainly disruptive. It's certainly very disruptive and it'll be interesting..." — the speaker is clearly repeating themselves trying to land the phrase, so cut to produce "it's certainly very disruptive and it'll be interesting..." If you are not confident the passage is a genuine stumble, leave it alone.
+- STUMBLES: For each PRE-DETECTED STUMBLE listed above, apply the cut using the EXACT start_ms and end_ms provided. These boundaries are word-level precise — do NOT adjust them. The cut removes all abandoned attempts and keeps the final clean version. Before applying, verify: (1) the removed text is genuinely repeated/abandoned phrasing, not distinct content, (2) the remaining sentence reads grammatically and makes sense in context. If either check fails, skip that stumble. Do NOT invent your own stumble boundaries — use only the pre-detected ones.
 - FALSE STARTS: Only cut when a speaker clearly abandons a sentence and restarts it. You must be very confident the restart is cleaner. If in doubt, leave both. Always make ONE continuous cut — never split into separate cuts that leave fragments between them.
 - RESTATED THOUGHTS: Only cut when a speaker says something then IMMEDIATELY rephrases the exact same idea. The second version must fully replace the first with zero loss of meaning. Make ONE continuous cut covering all abandoned versions, ending right at the start of the kept version.
 - HEDGING CLUSTERS: In regions flagged as hedging clusters above, you may remove 1-2 individual hedging phrases ("you know", "I mean", "kind of") — cut ONLY those exact words, not the sentence around them. Do NOT strip all hedging \u2014 some is natural.

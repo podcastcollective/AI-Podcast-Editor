@@ -612,7 +612,8 @@ Each pause above is tagged [EMPHATIC] or [UNCERTAIN] based on surrounding contex
 - Do NOT make speculative content cuts. Only cut content you are 90%+ confident should be removed.
 - Do NOT rewrite or paraphrase content. Do NOT change the meaning or tone of the speaker.
 - All content cuts MUST start at the beginning of a word (use the word's start_ms) and end at the end of a word (use the word's end_ms). NEVER cut mid-word.
-- SAFETY CHECK: Before finalizing any Content Cut, mentally read the sentence with the cut applied. If the remaining words do not form a complete, grammatical sentence, do NOT make the cut.
+- SPEAKER BOUNDARY: Content cuts must NEVER cross speaker boundaries. A cut that starts in Speaker A's words must end in Speaker A's words. NEVER remove the end of one speaker's sentence to cut into a stumble by another speaker. Check the speaker labels — if your cut region contains words from more than one speaker, shrink it to only cover the stumbling speaker's words.
+- SAFETY CHECK: Before finalizing any Content Cut, mentally read the sentence with the cut applied. If the remaining words do not form a complete, grammatical sentence, do NOT make the cut. Also verify that no other speaker's words are being removed.
 - SCOPE CHECK: If a Content Cut spans more than 8 seconds, you are almost certainly cutting too much. Re-examine whether you are removing an entire thought that should be kept. For stutters, the cut should be under 2 seconds. For false starts and restated thoughts, the cut can be longer (up to 8 seconds) if the speaker truly repeated themselves multiple times before landing on the clean version — but make it ONE continuous cut, not multiple separate cuts.
 
 PRESERVE RULES (do NOT cut these):

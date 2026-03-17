@@ -931,7 +931,10 @@ def apply_audio_edits(audio_path, cuts_ms, words=None):
 
     merged = []
     for s, e in adjusted:
-        if merged and s <= merged[-1][1]:
+        # Merge overlapping cuts AND cuts within 150ms of each other — adjacent
+        # cuts (e.g. false start + stutter) should merge to avoid leaving tiny
+        # audible fragments between them
+        if merged and s <= merged[-1][1] + 150:
             merged[-1][1] = max(merged[-1][1], e)
         else:
             merged.append([s, e])
@@ -962,13 +965,14 @@ def apply_audio_edits(audio_path, cuts_ms, words=None):
                     print(f"Pre-chat enforcement: Claude missed pre-chat, creating cut 0ms-{safe_end}ms (opener at {opener_ms}ms)")
                     merged.insert(0, [0, safe_end])
 
-    # Safety: reject mid-episode content cuts > 5s (keep pre/post-chat cuts)
+    # Safety: reject mid-episode content cuts > 8s (keep pre/post-chat cuts)
+    # 8s allows false start (4-5s) + adjacent stutter/filler cuts to merge safely
     safe_merged = []
     for s, e in merged:
         duration = e - s
         is_start = s < 60000  # first 60s — could be pre-chat
         is_end = e > total_ms * 0.85  # last 15% — could be post-chat
-        if duration > 5000 and not is_start and not is_end:
+        if duration > 8000 and not is_start and not is_end:
             print(f"SAFETY: Dropping suspicious mid-episode cut {s}ms-{e}ms ({duration/1000:.1f}s) — too long for a stutter/filler edit")
         else:
             safe_merged.append([s, e])

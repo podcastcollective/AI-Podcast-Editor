@@ -847,24 +847,23 @@ def apply_audio_edits(audio_path, cuts_ms, words=None):
         # Step 1: detect pre-chat indicators
         has_prechat, prechat_end_ms = _find_prechat_end(tokens)
 
-        # Step 2: look for strong opener phrases (only AFTER pre-chat if pre-chat exists)
+        # Step 2: look for opener phrases AND greeting+name, pick the earliest one
+        # "Hi, L.J. Welcome to the podcast" — "Hi, L.J." comes first and is the real start
         best_ms = None
-        best_phrase = None
+        best_label = None
+
+        # 2a: check opener phrases (only AFTER pre-chat if pre-chat exists)
         for phrase in OPENER_PHRASES:
             ms = _find_phrase(tokens, phrase)
             if ms is not None:
-                # If pre-chat detected, only accept openers that come after it
                 if has_prechat and ms <= prechat_end_ms:
                     continue
                 if best_ms is None or ms < best_ms:
                     best_ms = ms
-                    best_phrase = ' '.join(phrase)
+                    best_label = f"phrase '{' '.join(phrase)}'"
 
-        if best_ms is not None:
-            print(f"Opener phrase detected: '{best_phrase}' at {best_ms}ms")
-            return best_ms
-
-        # Step 3: if pre-chat detected, look for "hi/hello/welcome + [name]" after it
+        # 2b: check greeting + name (e.g. "Hi, L.J.") — if it comes before any
+        # opener phrase, it's the real start of on-air content
         if has_prechat:
             for i in range(len(tokens) - 1):
                 tok, ms = tokens[i]
@@ -872,14 +871,18 @@ def apply_audio_edits(audio_path, cuts_ms, words=None):
                     continue
                 if tok in GREETING_WORDS:
                     next_tok = tokens[i + 1][0]
-                    # Next word should be a name (capitalized in original, but we're lowercase)
-                    # Accept any word that isn't a common filler/function word
                     skip = {'um', 'uh', 'and', 'the', 'a', 'so', 'but', 'or', 'yeah', 'yes',
                             'no', 'okay', 'ok', 'right', 'well', 'like', 'just', 'i', 'we',
                             'you', 'can', 'do', 'is', 'are', 'how', 'what', 'there', 'it'}
                     if next_tok not in skip:
-                        print(f"Opener detected: '{tok} {next_tok}' at {ms}ms (greeting + name after pre-chat)")
-                        return ms
+                        if best_ms is None or ms < best_ms:
+                            best_ms = ms
+                            best_label = f"greeting '{tok} {next_tok}'"
+                        break
+
+        if best_ms is not None:
+            print(f"Opener detected: {best_label} at {best_ms}ms")
+            return best_ms
 
         # Step 4: if pre-chat detected, look for a pause after the last pre-chat word.
         # Hosts typically leave a beat (500ms+) before starting the episode — the first

@@ -621,7 +621,14 @@ PRESERVE RULES (do NOT cut these):
 - SPEAKER TRANSITIONS where one person hands off to another \u2014 keep the social glue that makes dialogue sound natural.
 
 STRUCTURAL RULES:
-- PRE-RECORDING CHAT: Look for recording logistics in the first 60 seconds — "okay recording now", "we are now recording", "are we recording?", "let me hit record", mic checks, countdown cues, etc. These MUST be removed — listeners should never hear them. CRITICAL STEPS: (1) Scan the transcript and identify the EXACT first word of the episode opener — phrases like "welcome back", "welcome to", "hey everyone", "hello and welcome", "so today". (2) Look up that word's start_ms in the word list. (3) Set your cut end_ms to that word's start_ms MINUS 500ms. This 500ms buffer ensures the opener is never clipped even partially. (4) If there is no pre-recording chat, do NOT make this cut at all. When in doubt, keep more — it is far worse to clip the opener than to leave in pre-chat.
+- PRE-RECORDING CHAT: Scan the first 90 seconds for pre-recording logistics. These come in two forms:
+  (a) EXPLICIT logistics: "okay recording now", "we are now recording", "are we recording?", "let me hit record", mic checks, countdown cues.
+  (b) READINESS cues: "are you all set?", "all set", "ready?", "ready to go?", "shall we start?", "okay I'll start with this", "let's get into it", "let's go", "here we go". These are the host confirming they are about to begin — everything before them (and including them) is pre-chat.
+  After these cues, look for the EPISODE OPENER — the first moment the host addresses the audience or guest in an on-air voice. Common patterns:
+  - Greeting + guest name: "Hi, John", "Hello, Sarah", "Welcome, David"
+  - Audience greeting: "welcome back", "welcome to", "hey everyone", "hello and welcome", "good morning"
+  - Topic launch: "so today we're going to", "today I'm joined by", "in this episode"
+  EVERYTHING before the episode opener is pre-chat and MUST be removed. CRITICAL STEPS: (1) Find the readiness cue or logistics phrase. (2) Find the episode opener AFTER that cue. (3) Set your cut start_ms to 0 and cut end_ms to the opener word's start_ms MINUS 500ms. This 500ms buffer ensures the opener is never clipped. (4) If there is no pre-recording chat or readiness cue, do NOT make this cut. When in doubt, keep more — it is far worse to clip the opener than to leave in pre-chat.
 - LAST WORD PROTECTION: When making any cut near the end of the episode, ensure the final word of real content is fully preserved. Never set a cut's start_ms within the last spoken word — use the word's end_ms as the earliest allowed cut point.
 - END-OF-EPISODE PROTECTION: In the last 25% of the episode, be EXTREMELY conservative with Content Cuts. Speakers often deliver concluding thoughts, summaries, or sign-offs that may sound like restated ideas but are actually the intended wrap-up. Do NOT cut restated thoughts or verbal stumbles in the final quarter — only remove pre-detected fillers, stutters, and clearly abandoned false starts (< 3 seconds). If a speaker repeats an idea near the end, they are likely emphasizing it deliberately.
 - POST-INTERVIEW CHAT: If there is chat after the episode has clearly concluded ("okay I'll stop recording", "that was great", wrap-up logistics), mark it for removal. Do NOT confuse a speaker's concluding remarks or sign-off with post-interview chat — if they are still addressing the audience or making a point, it is content.
@@ -775,14 +782,21 @@ def apply_audio_edits(audio_path, cuts_ms, words=None):
         ('episode', 'number'), ('episode', 'one'), ('episode', 'two'),
     ]
 
-    # Pre-chat indicators — if these appear before an opener, they confirm pre-chat exists
+    # Pre-chat indicators — logistics AND readiness cues that confirm pre-chat exists
     PRECHAT_PHRASES = [
+        # Recording logistics
         ('are', 'we', 'recording'), ('is', 'it', 'recording'),
         ('hit', 'record'), ('start', 'recording'), ('stop', 'recording'),
         ('can', 'you', 'hear'), ('mic', 'check'), ('sound', 'check'),
-        ('ready', 'to', 'go'), ('shall', 'we', 'start'),
         ('okay', 'recording'), ("we're", 'recording'), ('we', 'are', 'recording'),
         ("i'll", 'hit', 'record'), ('let', 'me', 'record'),
+        # Readiness cues — host confirming they're about to begin
+        ('are', 'you', 'all', 'set'), ('all', 'set'),
+        ('ready', 'to', 'go'), ('shall', 'we', 'start'),
+        ("let's", 'get', 'into'), ("let's", 'go'), ('here', 'we', 'go'),
+        ("i'll", 'start', 'with'), ("let's", 'start'),
+        ('are', 'you', 'ready'), ('you', 'ready'),
+        ('up', 'and', 'running'),
     ]
 
     def _get_word_tokens(words_list, max_ms=90000):
@@ -804,43 +818,70 @@ def apply_audio_edits(audio_path, cuts_ms, words=None):
                 return tokens[i][1]
         return None
 
-    def _find_opener_start(words_list):
-        """Find the start_ms of the episode opener using phrase-based detection."""
-        tokens = _get_word_tokens(words_list, max_ms=90000)
-        if not tokens:
-            return None
+    # Greeting words that signal an opener when followed by a name (after pre-chat)
+    GREETING_WORDS = {'hi', 'hello', 'welcome'}
 
-        # First: look for strong opener phrases
-        best_ms = None
-        best_phrase = None
-        for phrase in OPENER_PHRASES:
-            ms = _find_phrase(tokens, phrase)
-            if ms is not None and (best_ms is None or ms < best_ms):
-                best_ms = ms
-                best_phrase = ' '.join(phrase)
-
-        if best_ms is not None:
-            print(f"Opener phrase detected: '{best_phrase}' at {best_ms}ms")
-            return best_ms
-
-        # Fallback: if pre-chat logistics are detected, find the first substantial
-        # speech after them (pause > 1.5s or speaker change) as the likely opener
+    def _find_prechat_end(tokens):
+        """Find the latest pre-chat indicator and return (has_prechat, end_ms)."""
         has_prechat = False
         prechat_end_ms = 0
         for phrase in PRECHAT_PHRASES:
             ms = _find_phrase(tokens, phrase)
             if ms is not None:
                 has_prechat = True
-                # Find end of this phrase
                 plen = len(phrase)
                 for i in range(len(tokens) - plen + 1):
                     if all(tokens[i + j][0] == phrase[j] for j in range(plen)):
                         prechat_end_ms = max(prechat_end_ms, tokens[i + plen - 1][1])
                         break
                 print(f"Pre-chat indicator: '{' '.join(phrase)}' at {ms}ms")
+        return has_prechat, prechat_end_ms
 
+    def _find_opener_start(words_list):
+        """Find the start_ms of the episode opener using phrase-based detection."""
+        tokens = _get_word_tokens(words_list, max_ms=90000)
+        if not tokens:
+            return None
+
+        # Step 1: detect pre-chat indicators
+        has_prechat, prechat_end_ms = _find_prechat_end(tokens)
+
+        # Step 2: look for strong opener phrases (only AFTER pre-chat if pre-chat exists)
+        best_ms = None
+        best_phrase = None
+        for phrase in OPENER_PHRASES:
+            ms = _find_phrase(tokens, phrase)
+            if ms is not None:
+                # If pre-chat detected, only accept openers that come after it
+                if has_prechat and ms <= prechat_end_ms:
+                    continue
+                if best_ms is None or ms < best_ms:
+                    best_ms = ms
+                    best_phrase = ' '.join(phrase)
+
+        if best_ms is not None:
+            print(f"Opener phrase detected: '{best_phrase}' at {best_ms}ms")
+            return best_ms
+
+        # Step 3: if pre-chat detected, look for "hi/hello/welcome + [name]" after it
+        if has_prechat:
+            for i in range(len(tokens) - 1):
+                tok, ms = tokens[i]
+                if ms <= prechat_end_ms:
+                    continue
+                if tok in GREETING_WORDS:
+                    next_tok = tokens[i + 1][0]
+                    # Next word should be a name (capitalized in original, but we're lowercase)
+                    # Accept any word that isn't a common filler/function word
+                    skip = {'um', 'uh', 'and', 'the', 'a', 'so', 'but', 'or', 'yeah', 'yes',
+                            'no', 'okay', 'ok', 'right', 'well', 'like', 'just', 'i', 'we',
+                            'you', 'can', 'do', 'is', 'are', 'how', 'what', 'there', 'it'}
+                    if next_tok not in skip:
+                        print(f"Opener detected: '{tok} {next_tok}' at {ms}ms (greeting + name after pre-chat)")
+                        return ms
+
+        # Step 4: if pre-chat detected but no opener found, use gap detection
         if has_prechat and prechat_end_ms > 0:
-            # Find the next word after a gap > 1500ms following the pre-chat
             for i in range(len(tokens) - 1):
                 if tokens[i][1] < prechat_end_ms:
                     continue
@@ -850,7 +891,11 @@ def apply_audio_edits(audio_path, cuts_ms, words=None):
                         print(f"Post-prechat gap of {gap}ms detected, opener likely at {tokens[i+1][1]}ms")
                         return tokens[i + 1][1]
 
-        print("No opener phrase or pre-chat indicator found")
+        if not has_prechat:
+            # No opener phrases and no pre-chat — probably no pre-chat to cut
+            print("No opener phrase or pre-chat indicator found")
+        else:
+            print("Pre-chat detected but could not identify opener — being conservative")
         return None
 
     def _protect_first_content(cut_end_ms, words_list):

@@ -975,8 +975,124 @@ Example tool input for reference:
         raise Exception("Claude did not return tool call \u2014 unexpected response format")
 
     print(f"Generated {len(edit_decisions)} edit decisions")
+
+    # ---- REVIEW PASS: build post-edit transcript and check for missed issues ----
+    # Collect all cut ranges from the initial decisions
+    initial_cuts = []
+    for d in edit_decisions:
+        s = d.get('start_ms')
+        e = d.get('end_ms')
+        if s is not None and e is not None:
+            initial_cuts.append((int(s), int(e)))
+
+    # Also include injected stumble/meta cuts
+    for stum in _find_stumbles(words):
+        initial_cuts.append((int(stum['stumble_start_ms']), int(stum['clean_start_ms'])))
+    for meta in _find_meta_commentary(words):
+        initial_cuts.append((int(meta['start_ms']), int(meta['end_ms'])))
+
+    # Sort and merge
+    initial_cuts.sort()
+    merged_cuts = []
+    for s, e in initial_cuts:
+        if merged_cuts and s <= merged_cuts[-1][1] + 150:
+            merged_cuts[-1] = (merged_cuts[-1][0], max(merged_cuts[-1][1], e))
+        else:
+            merged_cuts.append((s, e))
+
+    # Build the post-edit word list (words that survive the cuts)
+    surviving_words = []
+    for w in words:
+        ws = w.get('start', 0)
+        we = w.get('end', 0)
+        cut = False
+        for cs, ce in merged_cuts:
+            if ws >= cs and we <= ce:
+                cut = True
+                break
+        if not cut:
+            surviving_words.append(w)
+
+    # Build post-edit transcript with word-level timestamps for the review
+    review_lines = []
+    current_speaker = None
+    current_line = []
+    for w in surviving_words:
+        speaker = w.get('speaker', '?')
+        if speaker != current_speaker:
+            if current_line:
+                review_lines.append(f"Speaker {current_speaker}: {' '.join(current_line)}")
+            current_speaker = speaker
+            current_line = []
+        text = w.get('text', '')
+        ms = w.get('start', 0)
+        current_line.append(f"{text}({ms})")
+    if current_line:
+        review_lines.append(f"Speaker {current_speaker}: {' '.join(current_line)}")
+
+    review_transcript = "\n".join(review_lines)
+
+    print("Running review pass on post-edit transcript...")
+    review_prompt = f"""You are a podcast editor doing a FINAL QUALITY CHECK on an already-edited transcript. The initial edit has removed fillers, stutters, and some stumbles. Your job is to find anything that was MISSED.
+
+Below is the POST-EDIT transcript — this is what the listener will hear. Each word has its original timestamp in milliseconds: word(12345).
+
+{review_transcript}
+
+LOOK FOR THESE ISSUES:
+1. REMAINING STUMBLES: Speaker repeats a phrase or idea multiple times in quick succession. The listener should only hear the clean final version.
+2. REMAINING META-COMMENTARY: Speaker references the recording itself ("my voice is going", "sorry about that", "let me try again", "excuse me", "bear with me").
+3. REMAINING FALSE STARTS: Speaker starts a sentence, abandons it, and restarts. Only the clean version should remain.
+4. AWKWARD TRANSITIONS: Places where a previous cut may have left an unnatural jump — if so, the cut boundaries may need adjusting.
+
+For each issue found, provide a Content Cut using the EXACT word timestamps from the transcript above.
+
+IMPORTANT:
+- Only flag genuine issues — do not over-edit. Natural hesitation and hedging is fine.
+- Each cut must be a SEPARATE decision with its own start_ms and end_ms.
+- Do NOT make cuts longer than 8 seconds.
+- Verify the remaining sentence is grammatical after each cut.
+- If you find no issues, return a single Note saying "Review pass: no additional edits needed."
+
+Call the submit_edit_decisions tool with your decisions."""
+
+    review_message = None
+    for attempt in range(3):
+        try:
+            review_message = client.messages.create(
+                model="claude-sonnet-4-20250514",
+                max_tokens=4096,
+                tools=tools,
+                tool_choice={"type": "tool", "name": "submit_edit_decisions"},
+                messages=[{"role": "user", "content": review_prompt}],
+            )
+            break
+        except Exception as e:
+            if attempt < 2:
+                print(f"Review pass attempt {attempt + 1} failed: {e}")
+            else:
+                print(f"Review pass failed after 3 attempts: {e}")
+
+    review_decisions = []
+    if review_message:
+        for block in review_message.content:
+            if block.type == "tool_use" and block.name == "submit_edit_decisions":
+                review_decisions = block.input.get("decisions", [])
+                break
+
+    # Filter to only actual cuts (not notes)
+    review_cuts = [d for d in review_decisions if d.get('start_ms') is not None and d.get('end_ms') is not None]
+    print(f"Review pass found {len(review_cuts)} additional cuts")
+
+    # Tag review decisions so they're identifiable
+    for d in review_decisions:
+        d['review_pass'] = True
+
+    # Combine initial + review decisions
+    all_decisions = edit_decisions + review_decisions
+
     return {
-        "edit_decisions": edit_decisions,
+        "edit_decisions": all_decisions,
         "analysis_timestamp": datetime.now().isoformat()
     }
 

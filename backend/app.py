@@ -868,7 +868,7 @@ Each pause above is tagged [EMPHATIC] or [UNCERTAIN] based on surrounding contex
 - STUMBLES: For each PRE-DETECTED STUMBLE listed above, verify before applying: (1) read the removed text — is it genuinely abandoned/repeated phrasing? If it contains NEW ideas or meaningful content, SKIP this stumble. (2) Read the resulting sentence with the cut applied — is it grammatical and natural? If not, SKIP. (3) Only if both checks pass, apply the cut using the EXACT start_ms and end_ms provided. These are word-level precise. Do NOT invent your own stumble cuts — use only the pre-detected ones or skip them.
 - FALSE STARTS: Only cut when a speaker clearly abandons a sentence and restarts it. You must be very confident the restart is cleaner. If in doubt, leave both. Always make ONE continuous cut — never split into separate cuts that leave fragments between them.
 - RESTATED THOUGHTS: Only cut when a speaker says something then IMMEDIATELY rephrases the exact same idea. The second version must fully replace the first with zero loss of meaning. Make ONE continuous cut covering all abandoned versions, ending right at the start of the kept version.
-- META-COMMENTARY: Remove ALL pre-detected meta-commentary listed above using the exact timestamps. Also scan the transcript for any meta-commentary the pre-detection missed — moments where a speaker comments on the recording itself, their own performance, or breaks from the conversation topic to address a technical issue. These break the listener's immersion and must be removed.
+- META-COMMENTARY: Remove ALL pre-detected meta-commentary listed above using the exact timestamps. Also scan the transcript for any meta-commentary the pre-detection missed — moments where a speaker comments on the recording itself, their own performance, or breaks from the conversation topic to address a technical issue. These break the listener's immersion and must be removed. IMPORTANT: Each meta-commentary must be its own separate Content Cut with its own start_ms and end_ms. Do NOT merge meta-commentary with nearby stumble cuts into one giant cut — keep them as separate decisions so the system can process them independently.
 - HEDGING CLUSTERS: In regions flagged as hedging clusters above, you may remove 1-2 individual hedging phrases ("you know", "I mean", "kind of") — cut ONLY those exact words, not the sentence around them. Do NOT strip all hedging \u2014 some is natural.
 - REPEATED POINTS: When a speaker makes the exact same point twice in immediate succession, keep the stronger version. This should be rare — only when the repetition is truly redundant.
 - NEVER remove an entire sentence or clause just because it contains filler words like "kind of", "sort of", "you know". Remove the filler words themselves if needed, but KEEP the surrounding sentence — it carries meaning and context. A sentence with a filler removed is always better than a sentence deleted entirely.
@@ -1256,14 +1256,23 @@ def apply_audio_edits(audio_path, cuts_ms, words=None):
                           f"shrinking start from {s}ms to {new_start}ms (keeping only Speaker {dominant})")
                     cut[0] = new_start
 
-    # Safety: reject mid-episode content cuts > 8s (keep pre/post-chat cuts)
-    # 8s allows false start (4-5s) + adjacent stutter/filler cuts to merge safely
+    # Safety: reject mid-episode content cuts > 8s UNLESS they contain pre-detected
+    # meta-commentary or stumbles (which can legitimately be longer)
+    meta_ranges = []
+    if words:
+        for m in _find_meta_commentary(words):
+            meta_ranges.append((m['start_ms'], m['end_ms']))
+        for s in _find_stumbles(words):
+            meta_ranges.append((s['stumble_start_ms'], s['clean_start_ms']))
+
     safe_merged = []
     for s, e in merged:
         duration = e - s
         is_start = s < 60000  # first 60s — could be pre-chat
         is_end = e > total_ms * 0.85  # last 15% — could be post-chat
-        if duration > 8000 and not is_start and not is_end:
+        # Check if this cut overlaps with a known meta-commentary or stumble
+        is_known = any(ms < e and me > s for ms, me in meta_ranges)
+        if duration > 8000 and not is_start and not is_end and not is_known:
             print(f"SAFETY: Dropping suspicious mid-episode cut {s}ms-{e}ms ({duration/1000:.1f}s) — too long for a stutter/filler edit")
         else:
             safe_merged.append([s, e])

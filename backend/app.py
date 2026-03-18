@@ -657,6 +657,7 @@ def _find_meta_commentary(words):
         ('voice', 'is', 'going'),
         ('losing', 'my', 'voice'),
         ('sorry', 'about', 'that'),
+        ('sorry', 'about', 'this'),
         ('let', 'me', 'start', 'again'),
         ('let', 'me', 'rephrase'),
         ('let', 'me', 'try', 'again'),
@@ -670,7 +671,16 @@ def _find_meta_commentary(words):
         ('where', 'was', 'i'),
         ('lost', 'my', 'train'),
         ('lost', 'my', 'thought'),
+        ('apologies', 'for'),
+        ('coming', 'back', 'to'),  # restart after interruption
     ]
+
+    # Single-word apologies that indicate a stumble recovery — "sorry" standalone
+    # (not "sorry, our..." which is part of normal speech)
+    STANDALONE_SORRY = {'sorry', 'apologies'}
+    # Words that follow "sorry" in normal speech (not a stumble apology)
+    SORRY_CONTINUERS = {'about', 'for', 'that', 'this', 'but', 'if', 'to', 'i'}
+
     found = []
     for i in range(len(words)):
         for phrase in META_PHRASES:
@@ -709,6 +719,49 @@ def _find_meta_commentary(words):
                     'phrase': ' '.join(phrase),
                 })
                 break
+
+    # Detect standalone "sorry" / "apologies" that indicate stumble recovery
+    # e.g. "...of our roles in sort sorry, our core back office..."
+    for i in range(len(words)):
+        tok = words[i].get('text', '').lower().strip('.,!?;:\'"')
+        if tok not in STANDALONE_SORRY:
+            continue
+        # Check if next word is a normal continuer (e.g. "sorry about") — if so, skip
+        if i + 1 < len(words):
+            next_tok = words[i + 1].get('text', '').lower().strip('.,!?;:\'"')
+            if next_tok in SORRY_CONTINUERS:
+                continue
+        # Check if already captured by phrase detection above
+        already_found = False
+        for f in found:
+            if f['start_ms'] <= words[i].get('start', 0) <= f['end_ms']:
+                already_found = True
+                break
+        if already_found:
+            continue
+        # This is a standalone sorry — expand backward to capture the stumble before it
+        start_idx = i
+        end_idx = i
+        speaker = words[i].get('speaker', '?')
+        # Look backward for the start of the stumble (up to 3s before "sorry")
+        for k in range(i - 1, max(-1, i - 15), -1):
+            if words[k].get('speaker', '?') != speaker:
+                break
+            gap = words[k + 1].get('start', 0) - words[k].get('end', 0)
+            # If there's a big pause before this word, the stumble starts after it
+            if gap > 800:
+                start_idx = k + 1
+                break
+            start_idx = k
+        removed_text = ' '.join(words[k].get('text', '') for k in range(start_idx, end_idx + 1))
+        found.append({
+            'start_ms': words[start_idx].get('start', 0),
+            'end_ms': words[end_idx].get('end', 0),
+            'speaker': speaker,
+            'text': removed_text,
+            'phrase': 'sorry (standalone)',
+        })
+
     return found
 
 
@@ -1039,19 +1092,30 @@ Below is the POST-EDIT transcript — this is what the listener will hear. Each 
 
 {review_transcript}
 
-LOOK FOR THESE ISSUES:
-1. REMAINING STUMBLES: Speaker repeats a phrase or idea multiple times in quick succession. The listener should only hear the clean final version.
-2. REMAINING META-COMMENTARY: Speaker references the recording itself ("my voice is going", "sorry about that", "let me try again", "excuse me", "bear with me").
-3. REMAINING FALSE STARTS: Speaker starts a sentence, abandons it, and restarts. Only the clean version should remain.
-4. AWKWARD TRANSITIONS: Places where a previous cut may have left an unnatural jump — if so, the cut boundaries may need adjusting.
+READ THE TRANSCRIPT CAREFULLY AND LOOK FOR THESE ISSUES:
 
-For each issue found, provide a Content Cut using the EXACT word timestamps from the transcript above.
+1. STUMBLES & RESTARTS: Speaker garbles a word or phrase, then restarts cleanly. Look for:
+   - Mispronounced words followed by the correct version ("tier leaders... TA leaders")
+   - Abandoned sentence fragments where the speaker starts over
+   - Multiple attempts at the same phrase
+   Cut from the start of the garbled/abandoned part to the start of the clean restart.
+
+2. COUGHS, THROAT CLEARS & RECOVERY: Speaker coughs, clears throat, or has a vocal break mid-sentence, then picks up again (often with "coming back to..." or just restarting the sentence). Cut the cough and any recovery preamble, keeping the clean restart.
+
+3. META-COMMENTARY & APOLOGIES: Speaker says "sorry", "excuse me", "apologies", "my voice is going", "bear with me", "where was I" etc. These break immersion. Cut the apology AND the stumble that caused it. If a speaker says "sorry" followed by a clean restart, cut everything from the stumble through "sorry" up to the clean restart.
+
+4. FALSE STARTS: Speaker starts a sentence, abandons it mid-way, and starts a new sentence. Only the clean version should remain.
+
+5. AWKWARD JOINS: Places where a previous cut may have left words that don't flow naturally together.
+
+For each issue, provide a Content Cut with the EXACT word timestamps from the transcript.
 
 IMPORTANT:
-- Only flag genuine issues — do not over-edit. Natural hesitation and hedging is fine.
+- Focus on sections longer than 1-2 seconds — the initial edit already handles short stutters.
 - Each cut must be a SEPARATE decision with its own start_ms and end_ms.
 - Do NOT make cuts longer than 8 seconds.
 - Verify the remaining sentence is grammatical after each cut.
+- Do NOT cut natural hesitation, hedging, or thinking pauses — only clear disfluencies.
 - If you find no issues, return a single Note saying "Review pass: no additional edits needed."
 
 Call the submit_edit_decisions tool with your decisions."""

@@ -1185,6 +1185,36 @@ def apply_audio_edits(audio_path, cuts_ms, words=None):
             return safe_end
         return cut_end_ms
 
+    # Strip out any Claude cuts > 10s in the mid-episode — these are almost always
+    # incorrectly merged cuts. The precise injected cuts below will handle the
+    # actual removals.
+    cleaned_cuts = []
+    for s, e in cuts_ms:
+        s, e = int(s), int(e)
+        duration = e - s
+        is_start = s < 60000
+        is_end = e > total_ms * 0.85
+        if duration > 10000 and not is_start and not is_end:
+            print(f"Stripping oversized Claude cut {s}ms-{e}ms ({duration/1000:.1f}s) — will use injected precise cuts instead")
+        else:
+            cleaned_cuts.append((s, e))
+    cuts_ms = cleaned_cuts
+
+    # Inject pre-detected stumble and meta-commentary cuts directly — these have
+    # word-level precise boundaries and must always be applied regardless of what
+    # Claude decided. This ensures they're never missed or merged into giant cuts.
+    if words:
+        for stum in _find_stumbles(words):
+            s, e = int(stum['stumble_start_ms']), int(stum['clean_start_ms'])
+            if e > s:
+                print(f"Injecting stumble cut: {s}ms-{e}ms ('{stum['phrase']}' x{stum['repetitions']})")
+                cuts_ms.append((s, e))
+        for meta in _find_meta_commentary(words):
+            s, e = int(meta['start_ms']), int(meta['end_ms'])
+            if e > s:
+                print(f"Injecting meta-commentary cut: {s}ms-{e}ms ('{meta['text'][:50]}')")
+                cuts_ms.append((s, e))
+
     # Clamp, sort, merge overlapping cuts
     adjusted = []
     for s, e in cuts_ms:

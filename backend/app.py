@@ -1066,20 +1066,31 @@ Example tool input for reference:
         if not cut:
             surviving_words.append(w)
 
-    # Build post-edit transcript with word-level timestamps for the review
+    # Build post-edit transcript with word-level timestamps and gap markers
+    # Gap markers show where non-speech sounds (coughs, throat clears) might be hiding
     review_lines = []
     current_speaker = None
     current_line = []
+    prev_end = 0
     for w in surviving_words:
         speaker = w.get('speaker', '?')
+        ws = w.get('start', 0)
+        we = w.get('end', 0)
+        gap = ws - prev_end
+
         if speaker != current_speaker:
             if current_line:
                 review_lines.append(f"Speaker {current_speaker}: {' '.join(current_line)}")
             current_speaker = speaker
             current_line = []
+
+        # Mark significant gaps (>500ms) — could contain coughs or non-speech sounds
+        if gap > 500 and prev_end > 0:
+            current_line.append(f"[GAP {gap}ms]")
+
         text = w.get('text', '')
-        ms = w.get('start', 0)
-        current_line.append(f"{text}({ms})")
+        current_line.append(f"{text}({ws})")
+        prev_end = we
     if current_line:
         review_lines.append(f"Speaker {current_speaker}: {' '.join(current_line)}")
 
@@ -1383,15 +1394,39 @@ def apply_audio_edits(audio_path, cuts_ms, words=None):
     # Inject pre-detected stumble and meta-commentary cuts directly — these have
     # word-level precise boundaries and must always be applied regardless of what
     # Claude decided. This ensures they're never missed or merged into giant cuts.
+    # Also expand cuts backward to include the gap before the first word — this
+    # captures coughs, throat clears, and other non-speech sounds that precede stumbles.
     if words:
+        word_starts = [w.get('start', 0) for w in words]
+        word_ends = [w.get('end', 0) for w in words]
+
+        def _expand_cut_start(start_ms):
+            """Expand cut start backward into the gap before the first word.
+            This captures coughs/throat clears that don't appear in the transcript."""
+            # Find the word that starts at or near start_ms
+            for i, ws in enumerate(word_starts):
+                if abs(ws - start_ms) < 50:
+                    # Found the word — look at the gap before it
+                    if i > 0:
+                        prev_end = word_ends[i - 1]
+                        gap = start_ms - prev_end
+                        # If there's a gap > 200ms before this word, extend into it
+                        # (leave 50ms after the previous word for its natural tail)
+                        if gap > 200:
+                            return prev_end + 50
+                    break
+            return start_ms
+
         for stum in _find_stumbles(words):
             s, e = int(stum['stumble_start_ms']), int(stum['clean_start_ms'])
             if e > s:
+                s = _expand_cut_start(s)
                 print(f"Injecting stumble cut: {s}ms-{e}ms ('{stum['phrase']}' x{stum['repetitions']})")
                 cuts_ms.append((s, e))
         for meta in _find_meta_commentary(words):
             s, e = int(meta['start_ms']), int(meta['end_ms'])
             if e > s:
+                s = _expand_cut_start(s)
                 print(f"Injecting meta-commentary cut: {s}ms-{e}ms ('{meta['text'][:50]}')")
                 cuts_ms.append((s, e))
 

@@ -539,9 +539,9 @@ def _find_stumbles(words):
         return w[:5] if len(w) >= 4 else w
 
     def _fuzzy_phrase_match(phrase_a, phrase_b):
-        """Check if two phrases match, allowing one word to be a mispronunciation.
+        """Check if two 3-word phrases match, allowing one word to be a mispronunciation.
         Returns True for exact matches or matches where all but one word are identical
-        and the differing word shares a common prefix (>= 2 chars) or is very short."""
+        and the differing word shares a common prefix (>= 2 chars)."""
         if phrase_a == phrase_b:
             return True
         if len(phrase_a) != len(phrase_b):
@@ -553,7 +553,7 @@ def _find_stumbles(words):
         # Allow exactly one mismatch if the words are similar
         if len(mismatches) == 1:
             _, a, b = mismatches[0]
-            # Share a common prefix of 2+ chars (e.g. "recru"/"recruit")
+            # Share a common prefix of 2+ chars (e.g. "tier"/"ta", "recru"/"recruit")
             common = 0
             for ca, cb in zip(a, b):
                 if ca == cb:
@@ -562,64 +562,48 @@ def _find_stumbles(words):
                     break
             if common >= 2:
                 return True
-            # One of the words is very short (1-2 chars) — likely a fragment
-            if len(a) <= 2 or len(b) <= 2:
-                return True
-            # First letter matches and the other 2+ words in the phrase matched —
-            # likely a mispronunciation (e.g. "tier"/"ta" both start with "t")
-            if common >= 1 and len(phrase_a) >= 2:
+            # One word is very short (1-2 chars) AND the other matching words
+            # in the phrase are content words — likely a fragment/mispronunciation
+            if (len(a) <= 2 or len(b) <= 2) and len(phrase_a) >= 3:
                 return True
         return False
 
-    # Try phrase lengths 3, then 2 (longer = more reliable)
-    for phrase_len in [3, 2]:
-        for i in range(len(words) - phrase_len):
-            if i in used_ranges:
+    # Only detect 3-word phrase repetitions. 2-word phrases are too common in
+    # natural speech and produce too many false positives. Single-word duplicates
+    # are already handled by _find_stutters().
+    phrase_len = 3
+    for i in range(len(words) - phrase_len):
+        if i in used_ranges:
+            continue
+        speaker = words[i].get('speaker', '?')
+        phrase = tuple(clean(words[i + k]) for k in range(phrase_len))
+
+        # Skip phrases of only very short/common function words
+        function_words = {'um', 'uh', 'uhm', 'hmm', 'like', 'so', 'and', 'but', 'the',
+                          'a', 'of', 'in', 'to', 'it', 'i', 'is', 'that', 'this',
+                          'on', 'as', 'at', 'by', 'or', 'do', 'we', 'be', 'if',
+                          'an', 'are', 'was', 'for', 'not', 'with', 'how', 'what',
+                          'can', 'has', 'had', 'have', 'then', 'than', 'see', 'sort'}
+        content_in_phrase = [w for w in phrase if w not in function_words and len(w) >= 3]
+        if len(content_in_phrase) == 0:
+            continue
+
+        # Look for repetitions within 10s and 10 words, same speaker only.
+        first_start = words[i].get('start', 0)
+        occurrences = [i]
+
+        for j in range(i + 1, len(words) - phrase_len + 1):
+            if j in used_ranges:
                 continue
-            speaker = words[i].get('speaker', '?')
-            phrase = tuple(clean(words[i + k]) for k in range(phrase_len))
-
-            # Skip phrases containing common function words that naturally repeat
-            function_words = {'um', 'uh', 'uhm', 'hmm', 'like', 'so', 'and', 'but', 'the',
-                              'a', 'of', 'in', 'to', 'it', 'i', 'is', 'that', 'this',
-                              'on', 'as', 'at', 'by', 'or', 'do', 'we', 'be', 'if',
-                              'an', 'are', 'was', 'for', 'not', 'with', 'how', 'what',
-                              'can', 'has', 'had', 'have', 'then', 'than', 'see', 'sort'}
-            content_in_phrase = [w for w in phrase if w not in function_words and len(w) >= 3]
-            # 2-word phrases need BOTH words to be content words to avoid
-            # false positives like "of hiring", "of mind", "in performance"
-            min_content = 2 if phrase_len == 2 else 1
-            if len(content_in_phrase) < min_content:
+            if words[j].get('speaker', '?') != speaker:
                 continue
-
-            # Look for repetitions within 10s, same speaker only.
-            # Real stumbles repeat almost immediately. 2-word phrases are common
-            # in normal speech so require very close proximity (3 words max).
-            # 3-word phrases are more distinctive so allow a bit more distance (8 words).
-            max_word_gap = 3 if phrase_len == 2 else 8
-            first_start = words[i].get('start', 0)
-            occurrences = [i]
-
-            for j in range(i + 1, len(words) - phrase_len + 1):
-                if j in used_ranges:
-                    continue
-                if words[j].get('speaker', '?') != speaker:
-                    continue
-                if words[j].get('start', 0) - first_start > 10000:
-                    break
-                if j - i > max_word_gap:
-                    # Even past the gap limit, check for fuzzy (mispronunciation)
-                    # matches with a wider window — these are strong signals
-                    if j - i > max_word_gap + 4:
-                        break
-                    candidate = tuple(clean(words[j + k]) for k in range(phrase_len))
-                    if candidate != phrase and _fuzzy_phrase_match(candidate, phrase):
-                        # Fuzzy match beyond normal gap — only accept mispronunciations
-                        occurrences.append(j)
-                    continue
-                candidate = tuple(clean(words[j + k]) for k in range(phrase_len))
-                if _fuzzy_phrase_match(candidate, phrase):
-                    occurrences.append(j)
+            if words[j].get('start', 0) - first_start > 10000:
+                break
+            if j - i > 10:
+                break
+            candidate = tuple(clean(words[j + k]) for k in range(phrase_len))
+            if _fuzzy_phrase_match(candidate, phrase):
+                occurrences.append(j)
 
             if len(occurrences) < 2:
                 continue
@@ -835,9 +819,10 @@ def _find_nonverbal_gaps(words):
         prev_end = prev.get('end', 0)
         curr_start = curr.get('start', 0)
         gap = curr_start - prev_end
-        # Gap must be significant (>600ms) but not so long it's a natural pause
-        # between topics (>4000ms). Natural speech gaps are <400ms.
-        if gap < 600 or gap > 4000:
+        # Gap must be significant (>1200ms) but not so long it's a natural pause
+        # between topics (>4000ms). Natural thinking pauses are 400-1000ms,
+        # so only flag gaps well beyond that — these likely contain coughs.
+        if gap < 1200 or gap > 4000:
             continue
         # Don't trim gaps at sentence boundaries (period/question mark before gap)
         prev_text = prev.get('text', '').rstrip()
@@ -1241,22 +1226,26 @@ Call the submit_edit_decisions tool with your decisions."""
                 review_decisions = block.input.get("decisions", [])
                 break
 
-    # Filter to only actual cuts (not notes), and enforce 5s max for review cuts
-    review_cuts = []
-    for d in review_decisions:
-        s, e = d.get('start_ms'), d.get('end_ms')
-        if s is not None and e is not None:
-            duration = e - s
-            if duration > 5000:
-                print(f"REVIEW SAFETY: Dropping review cut {s}ms-{e}ms ({duration/1000:.1f}s) — too long, likely content")
-                review_decisions.remove(d)
-            else:
-                review_cuts.append(d)
-    print(f"Review pass found {len(review_cuts)} additional cuts")
-
-    # Tag review decisions so they're identifiable
+    # Review pass is ADVISORY ONLY — it finds potential issues but does NOT
+    # auto-cut. Convert all review cuts to Notes so they appear in the edit
+    # summary but don't affect the audio. This prevents the review pass from
+    # accidentally removing content.
     for d in review_decisions:
         d['review_pass'] = True
+        s, e = d.get('start_ms'), d.get('end_ms')
+        if s is not None and e is not None:
+            desc = d.get('description', d.get('reason', 'Review pass suggestion'))
+            print(f"Review pass advisory: {s}ms-{e}ms — {desc[:80]}")
+            # Convert to a Note — remove the timestamps so it won't be applied as a cut
+            d['original_start_ms'] = s
+            d['original_end_ms'] = e
+            del d['start_ms']
+            del d['end_ms']
+            d['type'] = 'Note'
+            d['description'] = f"[REVIEW] {desc}"
+
+    review_notes = [d for d in review_decisions if d.get('original_start_ms') is not None]
+    print(f"Review pass found {len(review_notes)} advisory notes (no auto-cuts)")
 
     # Combine initial + review decisions
     all_decisions = edit_decisions + review_decisions

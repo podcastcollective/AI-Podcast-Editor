@@ -20,22 +20,28 @@ chrome.alarms.create('checkTokenStatus', { periodInMinutes: 1 });
 
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name !== 'checkTokenStatus') return;
-  fetch(`${BACKEND_URL}/api/token-status`)
-    .then((r) => r.json())
-    .then((data) => {
-      if (!data.refresh_needed) return;
-      chrome.tabs.query({ url: 'https://podcast.adobe.com/*' }, (tabs) => {
-        if (tabs.length === 0) {
-          console.log('[AdobeTokenSync] No Adobe tab open — cannot refresh token');
-          return;
-        }
-        for (const tab of tabs) {
-          chrome.tabs.reload(tab.id);
-          console.log('[AdobeTokenSync] Refreshed Adobe tab', tab.id, '(token was used)');
-        }
-      });
-    })
-    .catch(() => {}); // backend unreachable — ignore silently
+  // Check both token-status and /api/status to detect missing tokens (e.g. after redeploy)
+  Promise.all([
+    fetch(`${BACKEND_URL}/api/token-status`).then(r => r.json()).catch(() => null),
+    fetch(`${BACKEND_URL}/api/status`).then(r => r.json()).catch(() => null),
+  ]).then(([tokenData, statusData]) => {
+    const needsRefresh = tokenData?.refresh_needed;
+    const tokenMissing = statusData && !statusData.adobe_enhance_configured;
+
+    if (!needsRefresh && !tokenMissing) return;
+
+    const reason = tokenMissing ? 'token missing (redeploy?)' : 'token was used';
+    chrome.tabs.query({ url: 'https://podcast.adobe.com/*' }, (tabs) => {
+      if (tabs.length === 0) {
+        console.log('[AdobeTokenSync] No Adobe tab open — cannot refresh token');
+        return;
+      }
+      for (const tab of tabs) {
+        chrome.tabs.reload(tab.id);
+        console.log(`[AdobeTokenSync] Refreshed Adobe tab ${tab.id} (${reason})`);
+      }
+    });
+  });
 });
 
 function injectTokenInterceptor() {

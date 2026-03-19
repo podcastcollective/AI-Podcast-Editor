@@ -608,7 +608,15 @@ def _find_stumbles(words):
                 if words[j].get('start', 0) - first_start > 10000:
                     break
                 if j - i > max_word_gap:
-                    break
+                    # Even past the gap limit, check for fuzzy (mispronunciation)
+                    # matches with a wider window — these are strong signals
+                    if j - i > max_word_gap + 4:
+                        break
+                    candidate = tuple(clean(words[j + k]) for k in range(phrase_len))
+                    if candidate != phrase and _fuzzy_phrase_match(candidate, phrase):
+                        # Fuzzy match beyond normal gap — only accept mispronunciations
+                        occurrences.append(j)
+                    continue
                 candidate = tuple(clean(words[j + k]) for k in range(phrase_len))
                 if _fuzzy_phrase_match(candidate, phrase):
                     occurrences.append(j)

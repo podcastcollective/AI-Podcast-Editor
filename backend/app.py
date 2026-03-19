@@ -709,7 +709,6 @@ def _find_meta_commentary(words):
         ('lost', 'my', 'train'),
         ('lost', 'my', 'thought'),
         ('apologies', 'for'),
-        ('coming', 'back', 'to'),  # restart after interruption
     ]
 
     # Single-word apologies that indicate a stumble recovery — "sorry" standalone

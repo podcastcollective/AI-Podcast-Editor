@@ -553,7 +553,7 @@ def _find_stumbles(words):
         # Allow exactly one mismatch if the words are similar
         if len(mismatches) == 1:
             _, a, b = mismatches[0]
-            # Share a common prefix of 2+ chars (e.g. "tier"/"ta", "recru"/"recruit")
+            # Share a common prefix of 2+ chars (e.g. "recru"/"recruit")
             common = 0
             for ca, cb in zip(a, b):
                 if ca == cb:
@@ -564,6 +564,10 @@ def _find_stumbles(words):
                 return True
             # One of the words is very short (1-2 chars) — likely a fragment
             if len(a) <= 2 or len(b) <= 2:
+                return True
+            # First letter matches and the other 2+ words in the phrase matched —
+            # likely a mispronunciation (e.g. "tier"/"ta" both start with "t")
+            if common >= 1 and len(phrase_a) >= 2:
                 return True
         return False
 

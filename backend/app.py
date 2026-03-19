@@ -765,6 +765,46 @@ def _find_meta_commentary(words):
     return found
 
 
+def _find_nonverbal_gaps(words):
+    """Detect gaps between words where non-speech sounds (coughs, throat clears,
+    lip smacks) are likely hiding. These gaps are too long for natural pauses
+    between words but aren't speaker changes.
+
+    A gap of 500-3000ms between two words by the same speaker mid-sentence
+    very likely contains audible non-verbal sounds that should be trimmed."""
+    found = []
+    for i in range(1, len(words)):
+        prev = words[i - 1]
+        curr = words[i]
+        # Same speaker only
+        if prev.get('speaker', '?') != curr.get('speaker', '?'):
+            continue
+        prev_end = prev.get('end', 0)
+        curr_start = curr.get('start', 0)
+        gap = curr_start - prev_end
+        # Gap must be significant (>600ms) but not so long it's a natural pause
+        # between topics (>4000ms). Natural speech gaps are <400ms.
+        if gap < 600 or gap > 4000:
+            continue
+        # Don't trim gaps at sentence boundaries (period/question mark before gap)
+        prev_text = prev.get('text', '').rstrip()
+        if prev_text.endswith(('.', '?', '!')):
+            continue
+        # Trim the gap: leave 100ms after previous word and 100ms before next word
+        trim_start = prev_end + 100
+        trim_end = curr_start - 100
+        if trim_end > trim_start:
+            found.append({
+                'start_ms': trim_start,
+                'end_ms': trim_end,
+                'gap_ms': gap,
+                'before_word': prev.get('text', ''),
+                'after_word': curr.get('text', ''),
+                'speaker': prev.get('speaker', '?'),
+            })
+    return found
+
+
 def format_timestamp(milliseconds):
     seconds = milliseconds / 1000
     hours = int(seconds // 3600)
@@ -1428,6 +1468,12 @@ def apply_audio_edits(audio_path, cuts_ms, words=None):
             if e > s:
                 s = _expand_cut_start(s)
                 print(f"Injecting meta-commentary cut: {s}ms-{e}ms ('{meta['text'][:50]}')")
+                cuts_ms.append((s, e))
+        # Inject non-verbal gap trims — coughs, throat clears between words
+        for gap_info in _find_nonverbal_gaps(words):
+            s, e = int(gap_info['start_ms']), int(gap_info['end_ms'])
+            if e > s:
+                print(f"Injecting gap trim: {s}ms-{e}ms ({gap_info['gap_ms']}ms gap between '{gap_info['before_word']}' and '{gap_info['after_word']}')")
                 cuts_ms.append((s, e))
 
     # Clamp, sort, merge overlapping cuts

@@ -579,18 +579,24 @@ def _find_stumbles(words):
             speaker = words[i].get('speaker', '?')
             phrase = tuple(clean(words[i + k]) for k in range(phrase_len))
 
-            # Skip phrases of only very short/common function words
+            # Skip phrases containing common function words that naturally repeat
             function_words = {'um', 'uh', 'uhm', 'hmm', 'like', 'so', 'and', 'but', 'the',
-                              'a', 'of', 'in', 'to', 'it', 'i', 'is', 'that', 'this'}
+                              'a', 'of', 'in', 'to', 'it', 'i', 'is', 'that', 'this',
+                              'on', 'as', 'at', 'by', 'or', 'do', 'we', 'be', 'if',
+                              'an', 'are', 'was', 'for', 'not', 'with', 'how', 'what',
+                              'can', 'has', 'had', 'have', 'then', 'than', 'see', 'sort'}
             content_in_phrase = [w for w in phrase if w not in function_words and len(w) >= 3]
-            if len(content_in_phrase) == 0:
+            # 2-word phrases need BOTH words to be content words to avoid
+            # false positives like "of hiring", "of mind", "in performance"
+            min_content = 2 if phrase_len == 2 else 1
+            if len(content_in_phrase) < min_content:
                 continue
 
             # Look for repetitions within 10s, same speaker only.
             # Real stumbles repeat almost immediately. 2-word phrases are common
-            # in normal speech so require very close proximity (5 words max).
-            # 3-word phrases are more distinctive so allow a bit more distance (10 words).
-            max_word_gap = 5 if phrase_len == 2 else 10
+            # in normal speech so require very close proximity (3 words max).
+            # 3-word phrases are more distinctive so allow a bit more distance (8 words).
+            max_word_gap = 3 if phrase_len == 2 else 8
             first_start = words[i].get('start', 0)
             occurrences = [i]
 
@@ -1176,36 +1182,29 @@ Example tool input for reference:
     review_transcript = "\n".join(review_lines)
 
     print("Running review pass on post-edit transcript...")
-    review_prompt = f"""You are a podcast editor doing a FINAL QUALITY CHECK on an already-edited transcript. The initial edit has removed fillers, stutters, and some stumbles. Your job is to find anything that was MISSED.
+    review_prompt = f"""You are a podcast editor doing a FINAL QUALITY CHECK on an already-edited transcript. The initial edit has already removed fillers, stutters, and most stumbles. Your job is to find ONLY clear, obvious disfluencies that were missed.
 
-Below is the POST-EDIT transcript — this is what the listener will hear. Each word has its original timestamp in milliseconds: word(12345).
+Below is the POST-EDIT transcript — this is what the listener will hear. Each word has its original timestamp in milliseconds: word(12345). [GAP Xms] markers show gaps between words where non-speech sounds may be.
 
 {review_transcript}
 
-READ THE TRANSCRIPT CAREFULLY AND LOOK FOR THESE ISSUES:
+LOOK FOR ONLY THESE SPECIFIC ISSUES:
 
-1. STUMBLES & RESTARTS: Speaker garbles a word or phrase, then restarts cleanly. Look for:
-   - Mispronounced words followed by the correct version ("tier leaders... TA leaders")
-   - Abandoned sentence fragments where the speaker starts over
-   - Multiple attempts at the same phrase
-   Cut from the start of the garbled/abandoned part to the start of the clean restart.
+1. MISPRONOUNCED WORDS: Speaker says a word wrong then immediately corrects it ("tier leaders... TA leaders"). Cut ONLY the mispronounced word(s), keep the correction.
 
-2. COUGHS, THROAT CLEARS & RECOVERY: Speaker coughs, clears throat, or has a vocal break mid-sentence, then picks up again (often with "coming back to..." or just restarting the sentence). Cut the cough and any recovery preamble, keeping the clean restart.
+2. META-COMMENTARY: Speaker says "sorry", "excuse me", "my voice is going" etc. Cut the meta-commentary only.
 
-3. META-COMMENTARY & APOLOGIES: Speaker says "sorry", "excuse me", "apologies", "my voice is going", "bear with me", "where was I" etc. These break immersion. Cut the apology AND the stumble that caused it. If a speaker says "sorry" followed by a clean restart, cut everything from the stumble through "sorry" up to the clean restart.
+3. COUGHS/THROAT CLEARS: Look for [GAP] markers that might contain audible non-speech sounds between words. If a gap is followed by a restart of the same phrase, cut the gap region.
 
-4. FALSE STARTS: Speaker starts a sentence, abandons it mid-way, and starts a new sentence. Only the clean version should remain.
-
-5. AWKWARD JOINS: Places where a previous cut may have left words that don't flow naturally together.
-
-For each issue, provide a Content Cut with the EXACT word timestamps from the transcript.
-
-IMPORTANT:
-- Focus on sections longer than 1-2 seconds — the initial edit already handles short stutters.
-- Each cut must be a SEPARATE decision with its own start_ms and end_ms.
-- Do NOT make cuts longer than 8 seconds.
-- Verify the remaining sentence is grammatical after each cut.
-- Do NOT cut natural hesitation, hedging, or thinking pauses — only clear disfluencies.
+CRITICAL RULES — DO NOT VIOLATE:
+- Do NOT cut content. If a speaker is elaborating, explaining, or developing a thought, that is NOT a stumble.
+- Do NOT cut phrases just because they appear twice — repetition is natural in speech ("focus on quality and value and how you really find...").
+- Do NOT cut abandoned thoughts that contain meaningful content. A speaker pausing and changing direction is normal.
+- Do NOT cut sentences with a long pause in them — pauses are natural.
+- Maximum cut length: 5 seconds. If you think something longer needs cutting, you're probably cutting content.
+- Only make cuts where you are VERY confident (>90%) the result sounds better.
+- When in doubt, DO NOT CUT. It is better to leave a minor disfluency than to remove meaningful content.
+- If you find no clear issues, return a single Note saying "Review pass: no additional edits needed."
 - If you find no issues, return a single Note saying "Review pass: no additional edits needed."
 
 Call the submit_edit_decisions tool with your decisions."""
@@ -1234,8 +1233,17 @@ Call the submit_edit_decisions tool with your decisions."""
                 review_decisions = block.input.get("decisions", [])
                 break
 
-    # Filter to only actual cuts (not notes)
-    review_cuts = [d for d in review_decisions if d.get('start_ms') is not None and d.get('end_ms') is not None]
+    # Filter to only actual cuts (not notes), and enforce 5s max for review cuts
+    review_cuts = []
+    for d in review_decisions:
+        s, e = d.get('start_ms'), d.get('end_ms')
+        if s is not None and e is not None:
+            duration = e - s
+            if duration > 5000:
+                print(f"REVIEW SAFETY: Dropping review cut {s}ms-{e}ms ({duration/1000:.1f}s) — too long, likely content")
+                review_decisions.remove(d)
+            else:
+                review_cuts.append(d)
     print(f"Review pass found {len(review_cuts)} additional cuts")
 
     # Tag review decisions so they're identifiable

@@ -586,7 +586,9 @@ def _find_stumbles(words):
             if len(content_in_phrase) == 0:
                 continue
 
-            # Look for repetitions within 10s, same speaker only
+            # Look for repetitions within 10s and 20 words, same speaker only.
+            # The word distance limit prevents matching phrases reused naturally
+            # in different parts of the same sentence (not actual stumbles).
             first_start = words[i].get('start', 0)
             occurrences = [i]
 
@@ -596,6 +598,9 @@ def _find_stumbles(words):
                 if words[j].get('speaker', '?') != speaker:
                     continue
                 if words[j].get('start', 0) - first_start > 10000:
+                    break
+                # Max 20 words between repetitions — beyond that it's natural reuse
+                if j - i > 20:
                     break
                 candidate = tuple(clean(words[j + k]) for k in range(phrase_len))
                 if _fuzzy_phrase_match(candidate, phrase):
@@ -1594,10 +1599,19 @@ def apply_audio_edits(audio_path, cuts_ms, words=None):
         duration = e - s
         is_start = s < 60000  # first 60s — could be pre-chat
         is_end = e > total_ms * 0.85  # last 15% — could be post-chat
-        # Check if this cut overlaps with a known meta-commentary or stumble
-        is_known = any(ms < e and me > s for ms, me in meta_ranges)
+        # Check if pre-detected ranges cover a substantial portion of this cut
+        # (not just a tiny overlap). Sum the overlap of all known ranges.
+        known_coverage = 0
+        for ms, me in meta_ranges:
+            overlap_start = max(s, ms)
+            overlap_end = min(e, me)
+            if overlap_end > overlap_start:
+                known_coverage += overlap_end - overlap_start
+        # Known ranges must cover at least 50% of the cut to exempt it from safety
+        is_known = duration > 0 and known_coverage >= duration * 0.5
         if duration > 8000 and not is_start and not is_end and not is_known:
-            print(f"SAFETY: Dropping suspicious mid-episode cut {s}ms-{e}ms ({duration/1000:.1f}s) — too long for a stutter/filler edit")
+            print(f"SAFETY: Dropping suspicious mid-episode cut {s}ms-{e}ms ({duration/1000:.1f}s) — "
+                  f"known coverage only {known_coverage}ms/{duration}ms")
         else:
             safe_merged.append([s, e])
     merged = safe_merged

@@ -586,9 +586,11 @@ def _find_stumbles(words):
             if len(content_in_phrase) == 0:
                 continue
 
-            # Look for repetitions within 10s and 20 words, same speaker only.
-            # The word distance limit prevents matching phrases reused naturally
-            # in different parts of the same sentence (not actual stumbles).
+            # Look for repetitions within 10s, same speaker only.
+            # Real stumbles repeat almost immediately. 2-word phrases are common
+            # in normal speech so require very close proximity (5 words max).
+            # 3-word phrases are more distinctive so allow a bit more distance (10 words).
+            max_word_gap = 5 if phrase_len == 2 else 10
             first_start = words[i].get('start', 0)
             occurrences = [i]
 
@@ -599,8 +601,7 @@ def _find_stumbles(words):
                     continue
                 if words[j].get('start', 0) - first_start > 10000:
                     break
-                # Max 20 words between repetitions — beyond that it's natural reuse
-                if j - i > 20:
+                if j - i > max_word_gap:
                     break
                 candidate = tuple(clean(words[j + k]) for k in range(phrase_len))
                 if _fuzzy_phrase_match(candidate, phrase):

@@ -538,6 +538,35 @@ def _find_stumbles(words):
         """Poor man's stemmer — first 5 chars of 4+ letter words."""
         return w[:5] if len(w) >= 4 else w
 
+    def _fuzzy_phrase_match(phrase_a, phrase_b):
+        """Check if two phrases match, allowing one word to be a mispronunciation.
+        Returns True for exact matches or matches where all but one word are identical
+        and the differing word shares a common prefix (>= 2 chars) or is very short."""
+        if phrase_a == phrase_b:
+            return True
+        if len(phrase_a) != len(phrase_b):
+            return False
+        mismatches = []
+        for k, (a, b) in enumerate(zip(phrase_a, phrase_b)):
+            if a != b:
+                mismatches.append((k, a, b))
+        # Allow exactly one mismatch if the words are similar
+        if len(mismatches) == 1:
+            _, a, b = mismatches[0]
+            # Share a common prefix of 2+ chars (e.g. "tier"/"ta", "recru"/"recruit")
+            common = 0
+            for ca, cb in zip(a, b):
+                if ca == cb:
+                    common += 1
+                else:
+                    break
+            if common >= 2:
+                return True
+            # One of the words is very short (1-2 chars) — likely a fragment
+            if len(a) <= 2 or len(b) <= 2:
+                return True
+        return False
+
     # Try phrase lengths 3, then 2 (longer = more reliable)
     for phrase_len in [3, 2]:
         for i in range(len(words) - phrase_len):
@@ -565,7 +594,7 @@ def _find_stumbles(words):
                 if words[j].get('start', 0) - first_start > 10000:
                     break
                 candidate = tuple(clean(words[j + k]) for k in range(phrase_len))
-                if candidate == phrase:
+                if _fuzzy_phrase_match(candidate, phrase):
                     occurrences.append(j)
 
             if len(occurrences) < 2:

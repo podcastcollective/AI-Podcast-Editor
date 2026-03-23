@@ -255,6 +255,7 @@ def _analyze_audio(audio_path, transcript_data):
 
 FILLER_WORDS = {
     'um', 'uh', 'uhm', 'hmm', 'mhm', 'hm', 'mm', 'ah', 'eh',
+    'umm', 'uhh', 'erm', 'er', 'mmm', 'ahh', 'ehh',
 }
 
 HEDGING_PHRASES = {

@@ -105,6 +105,7 @@ def start_transcription(audio_url):
             "speaker_labels": True,
             "punctuate": True,
             "format_text": True,
+            "disfluencies": True,  # Keep filler words (um, uh, etc.) in transcript
         },
         headers={
             "authorization": ASSEMBLYAI_API_KEY,

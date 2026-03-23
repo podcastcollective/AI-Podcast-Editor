@@ -1671,6 +1671,22 @@ def apply_audio_edits(audio_path, cuts_ms, words=None):
                 print(f"Injecting gap trim: {s}ms-{e}ms ({gap_info['gap_ms']}ms gap between '{gap_info['before_word']}' and '{gap_info['after_word']}')")
                 cuts_ms.append((s, e))
 
+    # Soften short filler/stutter cuts: shrink by 30ms on each side so a tiny
+    # natural breath/gap remains. Without this the crossfade butts two words
+    # right against each other and the listener hears an audible "jump cut".
+    # Only applies to short cuts (< 500ms) — longer cuts (stumbles, meta) don't
+    # need it because they already span multiple words with natural gaps.
+    FILLER_PAD_MS = 30
+    softened = []
+    for s, e in cuts_ms:
+        s, e = int(s), int(e)
+        duration = e - s
+        if duration < 500 and duration > FILLER_PAD_MS * 2 + 20:
+            s += FILLER_PAD_MS
+            e -= FILLER_PAD_MS
+        softened.append((s, e))
+    cuts_ms = softened
+
     # Clamp, sort, merge overlapping cuts
     adjusted = []
     for s, e in cuts_ms:
@@ -1804,7 +1820,7 @@ def apply_audio_edits(audio_path, cuts_ms, words=None):
     # Build ffmpeg filter_complex: trim each keep segment, crossfade between them
     # Using acrossfade (20ms, equal-power curve) instead of concat + independent fades
     # to eliminate pops/glitches at cut boundaries
-    XFADE_S = 0.020  # 20ms crossfade — short enough to be inaudible, long enough to prevent pops
+    XFADE_S = 0.040  # 40ms crossfade — smooths filler removals without being audible
     filter_parts = []
     for i, (start, end) in enumerate(keeps):
         start_s = start / 1000

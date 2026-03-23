@@ -587,9 +587,100 @@ def _find_stumbles(words):
                 return True
         return False
 
-    # Only detect 3-word phrase repetitions. 2-word phrases are too common in
-    # natural speech and produce too many false positives. Single-word duplicates
-    # are already handled by _find_stutters().
+    function_words = {'um', 'uh', 'uhm', 'hmm', 'like', 'so', 'and', 'but', 'the',
+                      'a', 'of', 'in', 'to', 'it', 'i', 'is', 'that', 'this',
+                      'on', 'as', 'at', 'by', 'or', 'do', 'we', 'be', 'if',
+                      'an', 'are', 'was', 'for', 'not', 'with', 'how', 'what',
+                      'can', 'has', 'had', 'have', 'then', 'than', 'see', 'sort'}
+    connectors = {'very', 'really', 'quite', 'certainly', 'definitely',
+                  'actually', 'basically', 'probably', 'maybe', 'terms',
+                  'kind', 'sort', 'thing', 'things', 'way', 'know',
+                  'mean', 'think', 'going', 'saying', 'sure', 'sorry',
+                  'voice', 'lot', 'bit', 'much', 'more', 'also',
+                  'interesting', 'disruptive'}
+
+    def _check_between_content(first_idx, last_idx, phrase, phrase_len):
+        """Check that words between two phrase occurrences are topically related."""
+        phrase_stems = set(stem(w) for w in phrase if len(w) >= 3)
+        between_content = []
+        for k in range(first_idx + phrase_len, last_idx):
+            w = clean(words[k])
+            if w in function_words or len(w) < 3:
+                continue
+            between_content.append(w)
+        if not between_content:
+            return True
+        unrelated = 0
+        for w in between_content:
+            w_stem = stem(w)
+            related = (w_stem in phrase_stems or
+                       w in connectors or
+                       any(w_stem.startswith(ps[:3]) or ps.startswith(w_stem[:3])
+                           for ps in phrase_stems))
+            if not related:
+                unrelated += 1
+        return unrelated <= len(between_content) * 0.5
+
+    def _has_other_speaker(first_idx, last_idx, speaker, phrase_len):
+        """Check if another speaker talks between the phrase occurrences."""
+        for k in range(first_idx + phrase_len, last_idx):
+            if words[k].get('speaker', '?') != speaker:
+                return True
+        return False
+
+    def _build_stumble(first_idx, last_idx, phrase, speaker, phrase_len, occurrences):
+        """Build a stumble dict and mark indices as used."""
+        stumble_start_ms = words[first_idx].get('start', 0)
+        clean_start_ms = words[last_idx].get('start', 0)
+        clean_end_idx = last_idx + phrase_len - 1
+        clean_end_ms = words[clean_end_idx].get('end', 0)
+
+        removed_words = [words[k].get('text', '') for k in range(first_idx, last_idx)]
+        clean_words = []
+        for k in range(last_idx, min(last_idx + phrase_len + 8, len(words))):
+            if words[k].get('speaker', '?') != speaker:
+                break
+            clean_words.append(words[k].get('text', ''))
+
+        for idx in range(first_idx, last_idx + phrase_len):
+            used_ranges.add(idx)
+
+        return {
+            'stumble_start_ms': stumble_start_ms,
+            'clean_start_ms': clean_start_ms,
+            'clean_end_ms': clean_end_ms,
+            'speaker': speaker,
+            'removed_text': ' '.join(removed_words),
+            'clean_text': ' '.join(clean_words),
+            'phrase': ' '.join(phrase),
+            'repetitions': len(occurrences),
+        }
+
+    # ── PASS 1: Consecutive 2-word exact duplicates ──
+    # Catches "how it, how it", "Very cool. Very cool." — must be immediately
+    # consecutive (no words between) and same speaker. This is narrow enough
+    # to avoid false positives from natural 2-word reuse across a paragraph.
+    for i in range(len(words) - 3):
+        if i in used_ranges:
+            continue
+        speaker = words[i].get('speaker', '?')
+        if words[i + 2].get('speaker', '?') != speaker:
+            continue
+        pair_a = (clean(words[i]), clean(words[i + 1]))
+        pair_b = (clean(words[i + 2]), clean(words[i + 3]) if i + 3 < len(words) else '')
+        # Need at least one content word
+        if all(w in function_words or len(w) < 2 for w in pair_a):
+            continue
+        if pair_a == pair_b and pair_a[0] and pair_a[1]:
+            # Check time proximity (within 3s)
+            t_start = words[i].get('start', 0)
+            t_end = words[i + 3].get('end', 0) if i + 3 < len(words) else words[i + 2].get('end', 0)
+            if t_end - t_start > 3000:
+                continue
+            found.append(_build_stumble(i, i + 2, pair_a, speaker, 2, [i, i + 2]))
+
+    # ── PASS 2: 3-word phrase repetitions (original detection) ──
+    # Widened to 20-word gap to catch multi-attempt restarts.
     phrase_len = 3
     for i in range(len(words) - phrase_len):
         if i in used_ranges:
@@ -597,17 +688,11 @@ def _find_stumbles(words):
         speaker = words[i].get('speaker', '?')
         phrase = tuple(clean(words[i + k]) for k in range(phrase_len))
 
-        # Skip phrases of only very short/common function words
-        function_words = {'um', 'uh', 'uhm', 'hmm', 'like', 'so', 'and', 'but', 'the',
-                          'a', 'of', 'in', 'to', 'it', 'i', 'is', 'that', 'this',
-                          'on', 'as', 'at', 'by', 'or', 'do', 'we', 'be', 'if',
-                          'an', 'are', 'was', 'for', 'not', 'with', 'how', 'what',
-                          'can', 'has', 'had', 'have', 'then', 'than', 'see', 'sort'}
         content_in_phrase = [w for w in phrase if w not in function_words and len(w) >= 3]
         if len(content_in_phrase) == 0:
             continue
 
-        # Look for repetitions within 10s and 10 words, same speaker only.
+        # Look for repetitions within 15s and 20 words, same speaker only.
         first_start = words[i].get('start', 0)
         occurrences = [i]
 
@@ -616,9 +701,9 @@ def _find_stumbles(words):
                 continue
             if words[j].get('speaker', '?') != speaker:
                 continue
-            if words[j].get('start', 0) - first_start > 10000:
+            if words[j].get('start', 0) - first_start > 15000:
                 break
-            if j - i > 10:
+            if j - i > 20:
                 break
             candidate = tuple(clean(words[j + k]) for k in range(phrase_len))
             if _fuzzy_phrase_match(candidate, phrase):
@@ -630,75 +715,69 @@ def _find_stumbles(words):
             first_idx = occurrences[0]
             last_idx = occurrences[-1]
 
-            # SPEAKER CHECK: reject if another speaker talks between repetitions
-            has_other_speaker = False
-            for k in range(first_idx + phrase_len, last_idx):
-                if words[k].get('speaker', '?') != speaker:
-                    has_other_speaker = True
-                    break
-            if has_other_speaker:
+            if _has_other_speaker(first_idx, last_idx, speaker, phrase_len):
                 continue
 
-            # CONTENT CHECK: the between-words should be related to the repeated
-            # phrase (variations, abandoned attempts, fillers). Build a "topic set"
-            # from the phrase stems and check that between-words are topically related.
-            phrase_stems = set(stem(w) for w in phrase if len(w) >= 3)
-            between_content = []
-            for k in range(first_idx + phrase_len, last_idx):
-                w = clean(words[k])
-                if w in function_words or len(w) < 3:
-                    continue
-                between_content.append(w)
+            if not _check_between_content(first_idx, last_idx, phrase, phrase_len):
+                continue
 
-            # Check: are the between-content words related to the phrase?
-            # Allow words that share a stem with phrase words, or are common
-            # speech connectors. Only reject if >50% of between-content words
-            # are completely unrelated (different topic).
-            if between_content:
-                unrelated = 0
-                connectors = {'very', 'really', 'quite', 'certainly', 'definitely',
-                              'actually', 'basically', 'probably', 'maybe', 'terms',
-                              'kind', 'sort', 'thing', 'things', 'way', 'know',
-                              'mean', 'think', 'going', 'saying', 'sure', 'sorry',
-                              'voice', 'lot', 'bit', 'much', 'more', 'also'}
-                for w in between_content:
-                    w_stem = stem(w)
-                    related = (w_stem in phrase_stems or
-                               w in connectors or
-                               any(w_stem.startswith(ps[:3]) or ps.startswith(w_stem[:3])
-                                   for ps in phrase_stems))
-                    if not related:
-                        unrelated += 1
-                # If more than half the between-content is unrelated, skip
-                if unrelated > len(between_content) * 0.5:
-                    continue
+            found.append(_build_stumble(first_idx, last_idx, phrase, speaker, phrase_len, occurrences))
 
-            # Build stumble data
-            stumble_start_ms = words[first_idx].get('start', 0)
-            clean_start_ms = words[last_idx].get('start', 0)
-            clean_end_idx = last_idx + phrase_len - 1
-            clean_end_ms = words[clean_end_idx].get('end', 0)
+    # ── PASS 3: Multi-attempt restart detection ──
+    # Catches patterns like: "it's certainly very disruptive in terms of, uh,
+    # it's certainly disruptive. It's certainly very disruptive and..."
+    # where a speaker makes 3+ attempts starting with the same 2 content words
+    # but varying the rest. The 3-word pass may miss these because the full
+    # 3-word phrase differs between attempts.
+    #
+    # Strategy: find 2-word content anchors repeated 2+ times by same speaker
+    # within 15s. Then pick the last occurrence as the clean version.
+    for i in range(len(words) - 2):
+        if i in used_ranges:
+            continue
+        speaker = words[i].get('speaker', '?')
+        anchor = (clean(words[i]), clean(words[i + 1]))
 
-            removed_words = [words[k].get('text', '') for k in range(first_idx, last_idx)]
-            clean_words = []
-            for k in range(last_idx, min(last_idx + phrase_len + 8, len(words))):
-                if words[k].get('speaker', '?') != speaker:
-                    break
-                clean_words.append(words[k].get('text', ''))
+        # Need at least one content word in the anchor
+        if all(w in function_words for w in anchor):
+            continue
+        # Need at least one word >= 4 chars to avoid ultra-common pairs
+        if all(len(w) < 4 for w in anchor):
+            continue
+        # Skip if either word is a filler
+        if anchor[0] in FILLER_WORDS or anchor[1] in FILLER_WORDS:
+            continue
 
-            for idx in range(first_idx, last_idx + phrase_len):
-                used_ranges.add(idx)
+        first_start = words[i].get('start', 0)
+        occurrences = [i]
 
-            found.append({
-                'stumble_start_ms': stumble_start_ms,
-                'clean_start_ms': clean_start_ms,
-                'clean_end_ms': clean_end_ms,
-                'speaker': speaker,
-                'removed_text': ' '.join(removed_words),
-                'clean_text': ' '.join(clean_words),
-                'phrase': ' '.join(phrase),
-                'repetitions': len(occurrences),
-            })
+        for j in range(i + 1, min(len(words) - 1, i + 25)):
+            if j in used_ranges:
+                continue
+            if words[j].get('speaker', '?') != speaker:
+                continue
+            if words[j].get('start', 0) - first_start > 15000:
+                break
+            cand = (clean(words[j]), clean(words[j + 1]) if j + 1 < len(words) else '')
+            if cand == anchor:
+                occurrences.append(j)
+
+        # Need 3+ attempts for 2-word anchors (stricter than 3-word which needs 2)
+        if len(occurrences) < 3:
+            continue
+
+        first_idx = occurrences[0]
+        last_idx = occurrences[-1]
+
+        if _has_other_speaker(first_idx, last_idx, speaker, 2):
+            continue
+
+        # For multi-attempt restarts, the between-content is expected to be
+        # variations of the same idea — check it's topically related
+        if not _check_between_content(first_idx, last_idx, anchor, 2):
+            continue
+
+        found.append(_build_stumble(first_idx, last_idx, anchor, speaker, 2, occurrences))
 
     found.sort(key=lambda x: x['stumble_start_ms'])
     return found

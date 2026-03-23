@@ -89,7 +89,10 @@ def stream_bytes_to_assemblyai(data):
     )
     if resp.status_code != 200:
         raise Exception(f"AssemblyAI upload failed: {resp.status_code} - {resp.text}")
-    upload_url = resp.json()["upload_url"]
+    resp_data = resp.json()
+    upload_url = resp_data.get("upload_url")
+    if not upload_url:
+        raise Exception(f"AssemblyAI upload response missing 'upload_url': {str(resp_data)[:200]}")
     print(f"AssemblyAI upload URL: {upload_url}")
     return upload_url
 
@@ -1644,6 +1647,13 @@ def apply_audio_edits(audio_path, cuts_ms, words=None):
     if not keeps:
         keeps = [(0, min(1000, total_ms))]
 
+    # Filter out segments shorter than 50ms — too short for crossfade and inaudible anyway.
+    # These can appear when two cuts are very close but don't quite merge.
+    MIN_SEGMENT_MS = 50
+    keeps = [(s, e) for s, e in keeps if e - s >= MIN_SEGMENT_MS]
+    if not keeps:
+        keeps = [(0, min(1000, total_ms))]
+
     # Build ffmpeg filter_complex: trim each keep segment, crossfade between them
     # Using acrossfade (20ms, equal-power curve) instead of concat + independent fades
     # to eliminate pops/glitches at cut boundaries
@@ -2066,8 +2076,11 @@ def process_with_adobe_enhance(audio_path, enhance_mix=None):
     if resp.status_code != 200:
         raise Exception(f'Adobe upload URL request failed: {resp.status_code} - {resp.text[:200]}')
     upload_data = resp.json()
-    signed_id = upload_data['signed_id']
-    signed_url = upload_data['direct_upload']['url']
+    try:
+        signed_id = upload_data['signed_id']
+        signed_url = upload_data['direct_upload']['url']
+    except (KeyError, TypeError) as e:
+        raise Exception(f'Adobe upload response missing expected fields: {e} — got: {str(upload_data)[:200]}')
     print(f"Adobe Enhance: got signed upload URL, signed_id={signed_id[:20]}...")
 
     # Step 2: Upload file to signed URL (no auth needed — pre-signed)

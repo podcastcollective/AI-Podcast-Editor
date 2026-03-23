@@ -657,27 +657,35 @@ def _find_stumbles(words):
         }
 
     # ── PASS 1: Consecutive 2-word exact duplicates ──
-    # Catches "how it, how it", "Very cool. Very cool." — must be immediately
-    # consecutive (no words between) and same speaker. This is narrow enough
-    # to avoid false positives from natural 2-word reuse across a paragraph.
+    # Catches "how it, how it", "Very cool. Very cool.", "how does that, how does that"
+    # Allows up to 1-word gap between pairs (punctuation attaches to words in ASR,
+    # so "how it," is one token — the next "how" starts the duplicate).
     for i in range(len(words) - 3):
         if i in used_ranges:
             continue
         speaker = words[i].get('speaker', '?')
-        if words[i + 2].get('speaker', '?') != speaker:
-            continue
         pair_a = (clean(words[i]), clean(words[i + 1]))
-        pair_b = (clean(words[i + 2]), clean(words[i + 3]) if i + 3 < len(words) else '')
         # Need at least one content word
         if all(w in function_words or len(w) < 2 for w in pair_a):
             continue
-        if pair_a == pair_b and pair_a[0] and pair_a[1]:
-            # Check time proximity (within 3s)
-            t_start = words[i].get('start', 0)
-            t_end = words[i + 3].get('end', 0) if i + 3 < len(words) else words[i + 2].get('end', 0)
-            if t_end - t_start > 3000:
+        if not pair_a[0] or not pair_a[1]:
+            continue
+        # Look for the duplicate starting at i+2 or i+3 (allowing 1-word gap)
+        for gap in range(0, 2):
+            j = i + 2 + gap
+            if j + 1 >= len(words):
                 continue
-            found.append(_build_stumble(i, i + 2, pair_a, speaker, 2, [i, i + 2]))
+            if words[j].get('speaker', '?') != speaker:
+                continue
+            pair_b = (clean(words[j]), clean(words[j + 1]))
+            if pair_a == pair_b:
+                # Check time proximity (within 4s)
+                t_start = words[i].get('start', 0)
+                t_end = words[j + 1].get('end', 0)
+                if t_end - t_start > 4000:
+                    continue
+                found.append(_build_stumble(i, j, pair_a, speaker, 2, [i, j]))
+                break
 
     # ── PASS 2: 3-word phrase repetitions (original detection) ──
     # Widened to 20-word gap to catch multi-attempt restarts.
@@ -762,8 +770,12 @@ def _find_stumbles(words):
             if cand == anchor:
                 occurrences.append(j)
 
-        # Need 3+ attempts for 2-word anchors (stricter than 3-word which needs 2)
-        if len(occurrences) < 3:
+        # Need 3+ attempts for short anchors, but 2 is enough if:
+        # - anchor has a strong content word (>= 5 chars), AND
+        # - the gap between occurrences is small (< 15 words)
+        has_strong_word = any(len(w) >= 5 for w in anchor)
+        min_occurrences = 2 if has_strong_word and (occurrences[-1] - occurrences[0] < 15) else 3
+        if len(occurrences) < min_occurrences:
             continue
 
         first_idx = occurrences[0]
@@ -777,7 +789,63 @@ def _find_stumbles(words):
         if not _check_between_content(first_idx, last_idx, anchor, 2):
             continue
 
-        found.append(_build_stumble(first_idx, last_idx, anchor, speaker, 2, occurrences))
+        # Expand cut start backward: if the word(s) before the first occurrence
+        # are a false start of the same phrase (e.g. "it's um, it's certainly" —
+        # the leading "it's" before "um" should also be cut). Look back up to
+        # 3 words for matching start word + filler/pause.
+        expanded_first = first_idx
+        if first_idx >= 2:
+            for lookback in range(2, min(5, first_idx + 1)):
+                prev_idx = first_idx - lookback
+                if words[prev_idx].get('speaker', '?') != speaker:
+                    break
+                if clean(words[prev_idx]) == anchor[0]:
+                    # Check that words between are fillers/function words
+                    all_filler = True
+                    for k in range(prev_idx + 1, first_idx):
+                        wk = clean(words[k])
+                        if wk not in FILLER_WORDS and wk not in function_words and len(wk) >= 3:
+                            all_filler = False
+                            break
+                    if all_filler:
+                        expanded_first = prev_idx
+                    break
+
+        found.append(_build_stumble(expanded_first, last_idx, anchor, speaker, 2, occurrences))
+
+    # ── PASS 4: Sentence-level repetition detection ──
+    # Catches full repeated phrases/sentences like:
+    # "coming back to talk coming back to talk about AI"
+    # "recruiters are going to become even more valuable, I think
+    #  recruiters are going to become even more valuable"
+    # Strategy: look for 4+ word sequences repeated by same speaker within 30 words.
+    for phrase_len in [5, 4]:
+        for i in range(len(words) - phrase_len):
+            if i in used_ranges:
+                continue
+            speaker = words[i].get('speaker', '?')
+            phrase = tuple(clean(words[i + k]) for k in range(phrase_len))
+
+            # Need at least 2 content words
+            content_count = sum(1 for w in phrase if w not in function_words and len(w) >= 3)
+            if content_count < 2:
+                continue
+
+            first_start = words[i].get('start', 0)
+
+            for j in range(i + phrase_len, min(len(words) - phrase_len + 1, i + 35)):
+                if j in used_ranges:
+                    continue
+                if words[j].get('speaker', '?') != speaker:
+                    continue
+                if words[j].get('start', 0) - first_start > 20000:
+                    break
+                candidate = tuple(clean(words[j + k]) for k in range(phrase_len))
+                if candidate == phrase:
+                    if _has_other_speaker(i, j, speaker, phrase_len):
+                        continue
+                    found.append(_build_stumble(i, j, phrase, speaker, phrase_len, [i, j]))
+                    break
 
     found.sort(key=lambda x: x['stumble_start_ms'])
     return found
@@ -1121,7 +1189,7 @@ Each pause above is tagged [EMPHATIC] or [UNCERTAIN] based on surrounding contex
 - STUTTERS (scan independently): Also look through the transcript for stutters the pre-detection missed. These include: exact word duplicates ("so so"), partial-word false starts where a speaker begins a word then restarts it ("comm community", "compu computer", "tic particularly"), and repeated short phrases ("I think I think"). The transcriber may garble the partial word, so look for any short word immediately before a longer word that sounds like a false start of that word. Cut the partial/duplicate.
 - STUMBLES: For each PRE-DETECTED STUMBLE listed above, verify before applying: (1) read the removed text — is it genuinely abandoned/repeated phrasing? If it contains NEW ideas or meaningful content, SKIP this stumble. (2) Read the resulting sentence with the cut applied — is it grammatical and natural? If not, SKIP. (3) Only if both checks pass, apply the cut using the EXACT start_ms and end_ms provided. These are word-level precise. Do NOT invent your own stumble cuts — use only the pre-detected ones or skip them.
 - FALSE STARTS: Only cut when a speaker clearly abandons a sentence and restarts it. You must be very confident the restart is cleaner. If in doubt, leave both. Always make ONE continuous cut — never split into separate cuts that leave fragments between them.
-- RESTATED THOUGHTS: Only cut when a speaker says something then IMMEDIATELY rephrases the exact same idea. The second version must fully replace the first with zero loss of meaning. Make ONE continuous cut covering all abandoned versions, ending right at the start of the kept version.
+- RESTATED THOUGHTS / IMMEDIATE REPETITIONS: Cut when a speaker says 3+ words then IMMEDIATELY repeats the same words ("coming back to talk coming back to talk", "recruiters are going to become even more valuable, I think recruiters are going to become even more valuable"). Keep the second (cleaner) version. Also cut when a speaker rephrases the exact same idea immediately — the second version must fully replace the first with zero loss of meaning. Make ONE continuous cut covering all abandoned versions, ending right at the start of the kept version.
 - META-COMMENTARY: Remove ALL pre-detected meta-commentary listed above using the exact timestamps. Also scan the transcript for any meta-commentary the pre-detection missed — moments where a speaker comments on the recording itself, their own performance, or breaks from the conversation topic to address a technical issue. These break the listener's immersion and must be removed. IMPORTANT: Each meta-commentary must be its own separate Content Cut with its own start_ms and end_ms. Do NOT merge meta-commentary with nearby stumble cuts into one giant cut — keep them as separate decisions so the system can process them independently.
 - HEDGING CLUSTERS: In regions flagged as hedging clusters above, you may remove 1-2 individual hedging phrases ("you know", "I mean", "kind of") — cut ONLY those exact words, not the sentence around them. Do NOT strip all hedging \u2014 some is natural.
 - REPEATED POINTS: When a speaker makes the exact same point twice in immediate succession, keep the stronger version. This should be rare — only when the repetition is truly redundant.
@@ -1329,16 +1397,19 @@ LOOK FOR ONLY THESE SPECIFIC ISSUES:
 
 3. COUGHS/THROAT CLEARS: Look for [GAP] markers that might contain audible non-speech sounds between words. If a gap is followed by a restart of the same phrase, cut the gap region.
 
+4. IMMEDIATE RESTARTS: Speaker says 3+ words then immediately restarts with the SAME words ("coming back to talk coming back to talk about AI", "the TA leaders are listening to the TA leaders who are listening"). Cut the first attempt, keep the second (cleaner) version.
+
+5. SENTENCE REPETITION: Speaker says a full clause/sentence, then repeats essentially the same sentence immediately ("recruiters are going to become even more valuable, I think recruiters are going to become even more valuable"). Cut the first version, keep the second.
+
 CRITICAL RULES — DO NOT VIOLATE:
-- Do NOT cut content. If a speaker is elaborating, explaining, or developing a thought, that is NOT a stumble.
-- Do NOT cut phrases just because they appear twice — repetition is natural in speech ("focus on quality and value and how you really find...").
-- Do NOT cut abandoned thoughts that contain meaningful content. A speaker pausing and changing direction is normal.
+- Do NOT cut content where a speaker is elaborating or developing a NEW thought.
+- Natural thematic repetition across paragraphs is fine — only cut IMMEDIATE back-to-back repetition of the same words.
+- Do NOT cut abandoned thoughts that contain meaningful NEW content.
 - Do NOT cut sentences with a long pause in them — pauses are natural.
-- Maximum cut length: 5 seconds. If you think something longer needs cutting, you're probably cutting content.
+- Maximum cut length: 8 seconds. If you think something longer needs cutting, you're probably cutting content.
 - Only make cuts where you are VERY confident (>90%) the result sounds better.
 - When in doubt, DO NOT CUT. It is better to leave a minor disfluency than to remove meaningful content.
 - If you find no clear issues, return a single Note saying "Review pass: no additional edits needed."
-- If you find no issues, return a single Note saying "Review pass: no additional edits needed."
 
 Call the submit_edit_decisions tool with your decisions."""
 

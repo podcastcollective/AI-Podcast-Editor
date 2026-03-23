@@ -203,9 +203,9 @@ def _analyze_audio(audio_path, transcript_data):
         if os.path.exists(sample_path):
             os.remove(sample_path)
 
-    # Speaker count from utterances
+    # Speaker count from utterances — normalize labels to strings
     utterances = transcript_data.get('utterances', [])
-    speakers = set(u.get('speaker') for u in utterances if u.get('speaker'))
+    speakers = set(str(u.get('speaker')) for u in utterances if u.get('speaker') is not None)
     speaker_count = len(speakers)
 
     # Noise floor: measure RMS of gaps between words (silence segments)
@@ -224,8 +224,10 @@ def _analyze_audio(audio_path, transcript_data):
                 break
     noise_floor = sum(gap_dbfs_values) / len(gap_dbfs_values) if gap_dbfs_values else -35.0
 
-    # Transcription confidence
+    # Transcription confidence — AssemblyAI returns 0.0-1.0 scale
     confidence = transcript_data.get('confidence', 0) or 0
+    if isinstance(confidence, (int, float)) and confidence > 1:
+        confidence = confidence / 100.0  # normalize if 0-100 scale
 
     # Dynamic range
     dynamic_range = audio.max_dBFS - audio.dBFS if audio.dBFS != float('-inf') else 0
@@ -393,7 +395,9 @@ def _find_stutters(words):
                 continue
         # Low-confidence short word before a longer word starting similarly
         # (ASR often outputs garbage for truncated syllables)
-        c1 = w1.get('confidence', 1.0)
+        c1 = w1.get('confidence', 1.0) or 1.0
+        if isinstance(c1, (int, float)) and c1 > 1:
+            c1 = c1 / 100.0  # normalize if 0-100 scale
         if c1 < 0.5 and len(t1) >= 2 and len(t1) < len(t2) and len(t2) >= 4:
             if t2[:2] == t1[:2]:
                 found.append({
@@ -855,12 +859,38 @@ def format_timestamp(milliseconds):
     return f"{hours:02d}:{minutes:02d}:{secs:02d}"
 
 
+def _normalize_words(words):
+    """Normalize word objects for consistent processing:
+    - Ensure start/end are ints (milliseconds)
+    - Ensure speaker is a string
+    - Filter out words with invalid timestamps"""
+    normalized = []
+    for w in words:
+        start = w.get('start', 0)
+        end = w.get('end', 0)
+        # Coerce to int, handle None
+        try:
+            start = int(start) if start is not None else 0
+            end = int(end) if end is not None else 0
+        except (ValueError, TypeError):
+            continue  # skip words with unparseable timestamps
+        if end < start or start < 0:
+            continue  # skip invalid ranges
+        speaker = w.get('speaker')
+        w_copy = dict(w)
+        w_copy['start'] = start
+        w_copy['end'] = end
+        w_copy['speaker'] = str(speaker) if speaker is not None else '?'
+        normalized.append(w_copy)
+    return normalized
+
+
 def analyze_transcript_with_claude(transcript_data, preset_cfg, custom_instructions="", is_multitrack=False):
     """Pre-detect fillers/pauses, then ask Claude for editorial decisions."""
     print("Analyzing transcript with Claude...")
     client = anthropic.Anthropic(api_key=CLAUDE_API_KEY)
 
-    words = transcript_data.get("words", [])
+    words = _normalize_words(transcript_data.get("words", []))
     utterances = transcript_data.get("utterances", [])
 
     utt_lines = []
@@ -1103,7 +1133,24 @@ Example tool input for reference:
     edit_decisions = None
     for block in message.content:
         if block.type == "tool_use" and block.name == "submit_edit_decisions":
-            edit_decisions = block.input.get("decisions", [])
+            raw_decisions = block.input.get("decisions", [])
+            if not isinstance(raw_decisions, list):
+                raw_decisions = []
+            # Validate and coerce each decision's timestamps
+            edit_decisions = []
+            for d in raw_decisions:
+                if not isinstance(d, dict):
+                    continue
+                s, e = d.get('start_ms'), d.get('end_ms')
+                if s is not None and e is not None:
+                    try:
+                        d['start_ms'] = int(s)
+                        d['end_ms'] = int(e)
+                        if d['end_ms'] <= d['start_ms']:
+                            continue  # skip invalid ranges
+                    except (ValueError, TypeError):
+                        continue  # skip unparseable timestamps
+                edit_decisions.append(d)
             break
 
     if edit_decisions is None:
@@ -1271,6 +1318,10 @@ def apply_audio_edits(audio_path, cuts_ms, words=None):
     cuts_ms: list of (start_ms, end_ms) tuples to remove.
     words: optional word dicts for snapping cuts to word boundaries.
     """
+    # Normalize words for consistent timestamps and speaker labels
+    if words:
+        words = _normalize_words(words)
+
     # Get audio duration with ffprobe
     probe = subprocess.run(
         ['ffprobe', '-v', 'error', '-show_entries', 'format=duration',
@@ -2146,9 +2197,9 @@ def process_with_adobe_enhance(audio_path, enhance_mix=None):
     # enhanced_speech + isolated_speech = 1.0 (enhanced vs original speech balance)
     # background and music are gain multipliers (0.0 - 1.0)
     mix = enhance_mix or {}
-    speech_pct = mix.get('speech', 90)
-    bg_pct = mix.get('background', 10)
-    music_pct = mix.get('music', 10)
+    speech_pct = max(0, min(100, int(mix.get('speech', 90))))
+    bg_pct = max(0, min(100, int(mix.get('background', 10))))
+    music_pct = max(0, min(100, int(mix.get('music', 10))))
     enhanced_speech_gain = speech_pct / 100.0
     isolated_speech_gain = 1.0 - enhanced_speech_gain
     background_gain = bg_pct / 100.0

@@ -770,12 +770,11 @@ def _find_stumbles(words):
             if cand == anchor:
                 occurrences.append(j)
 
-        # Need 3+ attempts for short anchors, but 2 is enough if:
-        # - anchor has a strong content word (>= 5 chars), AND
-        # - the gap between occurrences is small (< 15 words)
-        has_strong_word = any(len(w) >= 5 for w in anchor)
-        min_occurrences = 2 if has_strong_word and (occurrences[-1] - occurrences[0] < 15) else 3
-        if len(occurrences) < min_occurrences:
+        # Need 3+ attempts for 2-word anchors. (Previously allowed 2 occurrences
+        # for strong words but this causes false positives on deliberate reuse like
+        # "focus on volume... focus on quality" or "before that I spent 3 years...
+        # before that I spent 8 years". Require 3 to be safe.)
+        if len(occurrences) < 3:
             continue
 
         first_idx = occurrences[0]
@@ -819,6 +818,9 @@ def _find_stumbles(words):
     # "recruiters are going to become even more valuable, I think
     #  recruiters are going to become even more valuable"
     # Strategy: look for 4+ word sequences repeated by same speaker within 30 words.
+    # IMPORTANT: Must NOT catch deliberate parallel structure like "before that I
+    # spent 3 years at Citadel... before that I spent 8 years at Red Hat" — these
+    # reuse the same opening but introduce different content after.
     for phrase_len in [5, 4]:
         for i in range(len(words) - phrase_len):
             if i in used_ranges:
@@ -843,6 +845,24 @@ def _find_stumbles(words):
                 candidate = tuple(clean(words[j + k]) for k in range(phrase_len))
                 if candidate == phrase:
                     if _has_other_speaker(i, j, speaker, phrase_len):
+                        continue
+                    # Check that this is a TRUE restart, not parallel structure.
+                    # Compare the words AFTER each occurrence — if they diverge
+                    # immediately into different content, this is deliberate reuse
+                    # (e.g. "before that I spent 3 years at Citadel... before that
+                    # I spent 8 years at Red Hat"). If they continue similarly or
+                    # the first attempt is abandoned (ends in filler/pause), it's a restart.
+                    after_first = clean(words[i + phrase_len]) if i + phrase_len < len(words) else ''
+                    after_second = clean(words[j + phrase_len]) if j + phrase_len < len(words) else ''
+                    # If the words after both occurrences are different content words,
+                    # this is parallel structure, not a restart
+                    if (after_first and after_second and
+                            after_first != after_second and
+                            after_first not in function_words and
+                            after_first not in FILLER_WORDS and
+                            after_second not in function_words and
+                            after_second not in FILLER_WORDS and
+                            len(after_first) >= 3 and len(after_second) >= 3):
                         continue
                     found.append(_build_stumble(i, j, phrase, speaker, phrase_len, [i, j]))
                     break
@@ -1187,7 +1207,7 @@ Each pause above is tagged [EMPHATIC] or [UNCERTAIN] based on surrounding contex
 {multitrack_rules}CONTENT RULES:
 - STUTTERS: Remove ALL pre-detected stutters listed above. For each stutter, cut the partial/duplicate word using its start_ms and end_ms. These are the safest type of content cut.
 - STUTTERS (scan independently): Also look through the transcript for stutters the pre-detection missed. These include: exact word duplicates ("so so"), partial-word false starts where a speaker begins a word then restarts it ("comm community", "compu computer", "tic particularly"), and repeated short phrases ("I think I think"). The transcriber may garble the partial word, so look for any short word immediately before a longer word that sounds like a false start of that word. Cut the partial/duplicate.
-- STUMBLES: For each PRE-DETECTED STUMBLE listed above, verify before applying: (1) read the removed text — is it genuinely abandoned/repeated phrasing? If it contains NEW ideas or meaningful content, SKIP this stumble. (2) Read the resulting sentence with the cut applied — is it grammatical and natural? If not, SKIP. (3) Only if both checks pass, apply the cut using the EXACT start_ms and end_ms provided. These are word-level precise. Do NOT invent your own stumble cuts — use only the pre-detected ones or skip them.
+- STUMBLES: For each PRE-DETECTED STUMBLE listed above, verify before applying: (1) read the removed text — is it genuinely abandoned/repeated phrasing? If it contains NEW ideas, names, facts, or meaningful content NOT present elsewhere, SKIP this stumble. (2) Read the resulting sentence with the cut applied — is it grammatical and natural? If not, SKIP. (3) Only if both checks pass, apply the cut using the EXACT start_ms and end_ms provided. CRITICAL FALSE POSITIVE CHECK: Parallel structures like "before that I spent 3 years at X... before that I spent 8 years at Y" or "focus on volume... focus on quality" reuse the same opening but introduce DIFFERENT content. These are NOT stumbles — they are deliberate rhetorical structure. If the content AFTER the repeated phrase is different, SKIP.
 - FALSE STARTS: Only cut when a speaker clearly abandons a sentence and restarts it. You must be very confident the restart is cleaner. If in doubt, leave both. Always make ONE continuous cut — never split into separate cuts that leave fragments between them.
 - RESTATED THOUGHTS / IMMEDIATE REPETITIONS: Cut when a speaker says 3+ words then IMMEDIATELY repeats the same words ("coming back to talk coming back to talk", "recruiters are going to become even more valuable, I think recruiters are going to become even more valuable"). Keep the second (cleaner) version. Also cut when a speaker rephrases the exact same idea immediately — the second version must fully replace the first with zero loss of meaning. Make ONE continuous cut covering all abandoned versions, ending right at the start of the kept version.
 - META-COMMENTARY: Remove ALL pre-detected meta-commentary listed above using the exact timestamps. Also scan the transcript for any meta-commentary the pre-detection missed — moments where a speaker comments on the recording itself, their own performance, or breaks from the conversation topic to address a technical issue. These break the listener's immersion and must be removed. IMPORTANT: Each meta-commentary must be its own separate Content Cut with its own start_ms and end_ms. Do NOT merge meta-commentary with nearby stumble cuts into one giant cut — keep them as separate decisions so the system can process them independently.
@@ -1405,6 +1425,7 @@ CRITICAL RULES — DO NOT VIOLATE:
 - Do NOT cut content where a speaker is elaborating or developing a NEW thought.
 - Natural thematic repetition across paragraphs is fine — only cut IMMEDIATE back-to-back repetition of the same words.
 - Do NOT cut abandoned thoughts that contain meaningful NEW content.
+- Do NOT cut sentences where the speaker completes a thought then continues. "It's going to be a very different work. It's probably going to be less around sourcing" — this is a completed statement followed by elaboration, NOT a restart.
 - Do NOT cut sentences with a long pause in them — pauses are natural.
 - Maximum cut length: 8 seconds. If you think something longer needs cutting, you're probably cutting content.
 - Only make cuts where you are VERY confident (>90%) the result sounds better.
@@ -1742,22 +1763,6 @@ def apply_audio_edits(audio_path, cuts_ms, words=None):
                 print(f"Injecting gap trim: {s}ms-{e}ms ({gap_info['gap_ms']}ms gap between '{gap_info['before_word']}' and '{gap_info['after_word']}')")
                 cuts_ms.append((s, e))
 
-    # Soften short filler/stutter cuts: shrink by 30ms on each side so a tiny
-    # natural breath/gap remains. Without this the crossfade butts two words
-    # right against each other and the listener hears an audible "jump cut".
-    # Only applies to short cuts (< 500ms) — longer cuts (stumbles, meta) don't
-    # need it because they already span multiple words with natural gaps.
-    FILLER_PAD_MS = 30
-    softened = []
-    for s, e in cuts_ms:
-        s, e = int(s), int(e)
-        duration = e - s
-        if duration < 500 and duration > FILLER_PAD_MS * 2 + 20:
-            s += FILLER_PAD_MS
-            e -= FILLER_PAD_MS
-        softened.append((s, e))
-    cuts_ms = softened
-
     # Clamp, sort, merge overlapping cuts
     adjusted = []
     for s, e in cuts_ms:
@@ -1905,12 +1910,12 @@ def apply_audio_edits(audio_path, cuts_ms, words=None):
         # Chain acrossfade between all segments
         full_filter = ";".join(filter_parts)
         # First crossfade: [s0][s1] -> [x0]
-        full_filter += f";[s0][s1]acrossfade=d={XFADE_S}:c1=tri:c2=tri[x0]"
+        full_filter += f";[s0][s1]acrossfade=d={XFADE_S}:c1=exp:c2=exp[x0]"
         for i in range(2, len(keeps)):
             prev = f"x{i-2}"
             curr = f"s{i}"
             out = f"x{i-1}" if i < len(keeps) - 1 else "out"
-            full_filter += f";[{prev}][{curr}]acrossfade=d={XFADE_S}:c1=tri:c2=tri[{out}]"
+            full_filter += f";[{prev}][{curr}]acrossfade=d={XFADE_S}:c1=exp:c2=exp[{out}]"
         if len(keeps) == 2:
             # Only one crossfade, rename x0 -> out
             full_filter = full_filter.replace("[x0]", "[out]")

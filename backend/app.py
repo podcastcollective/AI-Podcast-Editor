@@ -293,27 +293,37 @@ def _find_fillers(words):
 
         if filler_text:
             # Classify: is this filler disruptive or natural?
+            # Default is disruptive — only mark as natural if there's strong
+            # evidence the filler serves a purpose (real sentence boundary +
+            # long pause, indicating a deliberate thinking sound).
             context = 'disruptive'
 
-            # Check if at a sentence boundary (word before ends with punctuation)
+            # Only sentence-ENDING punctuation counts (not commas — ASR adds
+            # commas everywhere). A filler after "really." or "right?" is natural
+            # thinking. A filler after "I think," is mid-sentence and disruptive.
+            at_sentence_boundary = False
             if i > 0:
                 prev_text = words[i - 1].get('text', '').rstrip()
-                if prev_text.endswith(('.', '?', '!', ',')):
-                    context = 'natural'
+                if prev_text.endswith(('.', '?', '!')):
+                    at_sentence_boundary = True
 
-            # Check if there's a significant pause before this filler (>300ms)
+            # Check for a meaningful pause (>500ms) — indicates deliberate thought
+            has_long_pause = False
             if i > 0:
                 gap_before = w.get('start', 0) - words[i - 1].get('end', 0)
-                if gap_before > 300:
-                    context = 'natural'
-
-            # Check if there's a significant pause after this filler (>300ms)
+                if gap_before > 500:
+                    has_long_pause = True
             if filler_end_idx + 1 < len(words):
                 gap_after = words[filler_end_idx + 1].get('start', 0) - words[filler_end_idx].get('end', 0)
-                if gap_after > 300:
-                    context = 'natural'
+                if gap_after > 500:
+                    has_long_pause = True
 
-            # Clustered fillers (another filler within 3 words) = disruptive
+            # Natural = at a real sentence boundary AND has a long pause.
+            # This is a deliberate "um..." while thinking between thoughts.
+            if at_sentence_boundary and has_long_pause:
+                context = 'natural'
+
+            # Clustered fillers (another filler within 3 words) = always disruptive
             for offset in range(max(0, i - 3), min(len(words), filler_end_idx + 4)):
                 if offset == i or offset == filler_end_idx:
                     continue
@@ -1277,26 +1287,33 @@ Call the submit_edit_decisions tool with your decisions."""
                 review_decisions = block.input.get("decisions", [])
                 break
 
-    # Review pass is ADVISORY ONLY — it finds potential issues but does NOT
-    # auto-cut. Convert all review cuts to Notes so they appear in the edit
-    # summary but don't affect the audio. This prevents the review pass from
-    # accidentally removing content.
+    # Review pass: high-confidence short cuts (>=93%, <=3s) are applied.
+    # Everything else becomes advisory Notes to prevent content removal.
+    applied_review = 0
+    advisory_review = 0
     for d in review_decisions:
         d['review_pass'] = True
         s, e = d.get('start_ms'), d.get('end_ms')
         if s is not None and e is not None:
+            duration = e - s
+            confidence = d.get('confidence', 0) or 0
             desc = d.get('description', d.get('reason', 'Review pass suggestion'))
-            print(f"Review pass advisory: {s}ms-{e}ms — {desc[:80]}")
-            # Convert to a Note — remove the timestamps so it won't be applied as a cut
-            d['original_start_ms'] = s
-            d['original_end_ms'] = e
-            del d['start_ms']
-            del d['end_ms']
-            d['type'] = 'Note'
-            d['description'] = f"[REVIEW] {desc}"
+            # Apply high-confidence, short cuts (mispronunciations, clear stumbles)
+            if confidence >= 93 and duration <= 3000:
+                print(f"Review pass APPLYING: {s}ms-{e}ms ({confidence}%) — {desc[:80]}")
+                applied_review += 1
+            else:
+                # Convert to advisory Note
+                print(f"Review pass advisory: {s}ms-{e}ms ({confidence}%) — {desc[:80]}")
+                d['original_start_ms'] = s
+                d['original_end_ms'] = e
+                del d['start_ms']
+                del d['end_ms']
+                d['type'] = 'Note'
+                d['description'] = f"[REVIEW] {desc}"
+                advisory_review += 1
 
-    review_notes = [d for d in review_decisions if d.get('original_start_ms') is not None]
-    print(f"Review pass found {len(review_notes)} advisory notes (no auto-cuts)")
+    print(f"Review pass: {applied_review} cuts applied, {advisory_review} advisory notes")
 
     # Combine initial + review decisions
     all_decisions = edit_decisions + review_decisions

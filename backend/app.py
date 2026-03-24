@@ -607,13 +607,17 @@ def _find_stumbles(words):
                   'interesting', 'disruptive'}
 
     def _check_between_content(first_idx, last_idx, phrase, phrase_len):
-        """Check that words between two phrase occurrences are topically related."""
+        """Check that words between two phrase occurrences are topically related.
+        Connectors (very, more, really, etc.) are treated as neutral — they don't
+        count as evidence of either related or unrelated content."""
         phrase_stems = set(stem(w) for w in phrase if len(w) >= 3)
         between_content = []
         for k in range(first_idx + phrase_len, last_idx):
             w = clean(words[k])
             if w in function_words or len(w) < 3:
                 continue
+            if w in connectors:
+                continue  # neutral — not evidence either way
             between_content.append(w)
         if not between_content:
             return True
@@ -621,12 +625,21 @@ def _find_stumbles(words):
         for w in between_content:
             w_stem = stem(w)
             related = (w_stem in phrase_stems or
-                       w in connectors or
                        any(w_stem.startswith(ps[:3]) or ps.startswith(w_stem[:3])
                            for ps in phrase_stems))
             if not related:
                 unrelated += 1
         return unrelated <= len(between_content) * 0.5
+
+    def _has_sentence_boundary(first_idx, last_idx, phrase_len):
+        """Check if sentence-ending punctuation exists between phrase occurrences.
+        A period/question mark/exclamation between repetitions strongly suggests
+        two complete sentences rather than a stumble."""
+        for k in range(first_idx + phrase_len, last_idx):
+            text = words[k].get('text', '').rstrip()
+            if text.endswith(('.', '?', '!')):
+                return True
+        return False
 
     def _has_other_speaker(first_idx, last_idx, speaker, phrase_len):
         """Check if another speaker talks between the phrase occurrences."""
@@ -738,9 +751,17 @@ def _find_stumbles(words):
         if _has_other_speaker(first_idx, last_idx, speaker, phrase_len):
             continue
 
-        # Content check for wider gaps
+        # Sentence boundary check: if there's sentence-ending punctuation between
+        # the phrases, this is very likely two complete sentences, not a stumble.
+        # Require the content check to pass in this case regardless of gap size.
+        if _has_sentence_boundary(first_idx, last_idx, phrase_len):
+            if not _check_between_content(first_idx, last_idx, phrase, phrase_len):
+                continue
+
+        # Content check for gaps >= 4 words (lowered from 10 to catch short
+        # but meaningful between-content like "trying to augment")
         gap_words = last_idx - first_idx
-        if gap_words >= 10 and not _check_between_content(first_idx, last_idx, phrase, phrase_len):
+        if gap_words >= 4 and not _check_between_content(first_idx, last_idx, phrase, phrase_len):
             continue
 
         # Divergence check: if the word immediately AFTER each occurrence is a
@@ -825,6 +846,13 @@ def _find_stumbles(words):
 
         if _has_other_speaker(first_idx, last_idx, speaker, 2):
             continue
+
+        # Sentence boundary check: two complete sentences reusing a phrase is
+        # not a stumble (e.g. "our hiring process. We're trying to augment
+        # our hiring process")
+        if _has_sentence_boundary(first_idx, last_idx, 2):
+            if not _check_between_content(first_idx, last_idx, anchor, 2):
+                continue
 
         # For multi-attempt restarts, the between-content is expected to be
         # variations of the same idea — check it's topically related

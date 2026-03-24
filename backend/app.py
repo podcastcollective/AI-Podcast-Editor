@@ -581,10 +581,14 @@ def _find_stumbles(words):
                     break
             if common >= 2:
                 return True
-            # One word is very short (1-2 chars) AND the other matching words
-            # in the phrase are content words — likely a fragment/mispronunciation
+            # One word is very short (1-2 chars) AND shares at least 1 leading
+            # char with the other — likely a fragment/mispronunciation.
+            # Without the prefix check, unrelated short words like "in" would
+            # match "we're", causing false positives.
             if (len(a) <= 2 or len(b) <= 2) and len(phrase_a) >= 3:
-                return True
+                short, long = (a, b) if len(a) <= len(b) else (b, a)
+                if short and long and short[0] == long[0]:
+                    return True
         return False
 
     function_words = {'um', 'uh', 'uhm', 'hmm', 'like', 'so', 'and', 'but', 'the',
@@ -731,12 +735,25 @@ def _find_stumbles(words):
         if _has_other_speaker(first_idx, last_idx, speaker, phrase_len):
             continue
 
-        # Skip content check for short-gap repetitions (< 10 words apart).
-        # A 3-word phrase repeated by the same speaker within 10 words is
-        # almost certainly a restart, not deliberate topical reuse.
+        # Content check for wider gaps
         gap_words = last_idx - first_idx
         if gap_words >= 10 and not _check_between_content(first_idx, last_idx, phrase, phrase_len):
             continue
+
+        # Divergence check: if the word immediately AFTER each occurrence is a
+        # different content word, this is parallel structure / list, not a restart.
+        # "because of the economic... because of AI" → diverges → skip
+        # "the TA leaders Are... the TA leaders who" → function words → restart
+        # "I think we're... I think in" → diverges → skip
+        if len(occurrences) == 2:
+            after_first = clean(words[first_idx + phrase_len]) if first_idx + phrase_len < len(words) else ''
+            after_last = clean(words[last_idx + phrase_len]) if last_idx + phrase_len < len(words) else ''
+            if (after_first and after_last and
+                    after_first != after_last and
+                    after_first not in function_words and after_first not in FILLER_WORDS and
+                    after_last not in function_words and after_last not in FILLER_WORDS and
+                    len(after_first) >= 3 and len(after_last) >= 3):
+                continue
 
         found.append(_build_stumble(first_idx, last_idx, phrase, speaker, phrase_len, occurrences))
 
@@ -1231,7 +1248,13 @@ Each pause above is tagged [EMPHATIC] or [UNCERTAIN] based on surrounding contex
 - STUTTERS: Remove ALL pre-detected stutters listed above. For each stutter, cut the partial/duplicate word using its start_ms and end_ms. These are the safest type of content cut.
 - STUTTERS (scan independently): Also look through the transcript for stutters the pre-detection missed. These include: exact word duplicates ("so so"), partial-word false starts where a speaker begins a word then restarts it ("comm community", "compu computer", "tic particularly"), and repeated short phrases ("I think I think"). The transcriber may garble the partial word, so look for any short word immediately before a longer word that sounds like a false start of that word. Cut the partial/duplicate.
 - STUMBLES: For each PRE-DETECTED STUMBLE listed above, verify before applying: (1) read the removed text — is it genuinely abandoned/repeated phrasing? If it contains NEW ideas, names, facts, or meaningful content NOT present elsewhere, SKIP this stumble. (2) Read the resulting sentence with the cut applied — is it grammatical and natural? If not, SKIP. (3) Only if both checks pass, apply the cut using the EXACT start_ms and end_ms provided. CRITICAL FALSE POSITIVE CHECK: Parallel structures like "before that I spent 3 years at X... before that I spent 8 years at Y" or "focus on volume... focus on quality" reuse the same opening but introduce DIFFERENT content. These are NOT stumbles — they are deliberate rhetorical structure. If the content AFTER the repeated phrase is different, SKIP.
-- FALSE STARTS: Only cut when a speaker clearly abandons a sentence and restarts it. You must be very confident the restart is cleaner. If in doubt, leave both. Always make ONE continuous cut — never split into separate cuts that leave fragments between them.
+- FALSE STARTS: Only cut when a speaker clearly abandons a sentence and restarts THE SAME sentence with the SAME words. You must be very confident the restart is cleaner. If in doubt, leave both. Always make ONE continuous cut — never split into separate cuts that leave fragments between them.
+  DO NOT CUT these patterns — they are natural speech, not false starts:
+  - LISTS: "because of the economy, because of AI" — parallel items in a list
+  - QUALIFICATION: "I think we're seeing... at least I think in the tech space" — narrowing a claim
+  - PREPOSITIONAL CHAINS: "impact some of the nature of the workforce" — not a repetition
+  - PARENTHETICAL ASIDES: "for our... for everyone once they're here, for our existing people" — the aside adds context
+  Only cut when the SAME words are repeated with NO new information between them.
 - RESTATED THOUGHTS / IMMEDIATE REPETITIONS: Cut when a speaker says 3+ words then IMMEDIATELY repeats the same words ("coming back to talk coming back to talk", "recruiters are going to become even more valuable, I think recruiters are going to become even more valuable"). Keep the second (cleaner) version. Also cut when a speaker rephrases the exact same idea immediately — the second version must fully replace the first with zero loss of meaning. Make ONE continuous cut covering all abandoned versions, ending right at the start of the kept version.
 - META-COMMENTARY: Remove ALL pre-detected meta-commentary listed above using the exact timestamps. Also scan the transcript for any meta-commentary the pre-detection missed — moments where a speaker comments on the recording itself, their own performance, or breaks from the conversation topic to address a technical issue. These break the listener's immersion and must be removed. IMPORTANT: Each meta-commentary must be its own separate Content Cut with its own start_ms and end_ms. Do NOT merge meta-commentary with nearby stumble cuts into one giant cut — keep them as separate decisions so the system can process them independently.
 - HEDGING CLUSTERS: In regions flagged as hedging clusters above, you may remove 1-2 individual hedging phrases ("you know", "I mean", "kind of") — cut ONLY those exact words, not the sentence around them. Do NOT strip all hedging \u2014 some is natural.

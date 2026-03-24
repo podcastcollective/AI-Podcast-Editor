@@ -1911,7 +1911,7 @@ def apply_audio_edits(audio_path, cuts_ms, words=None):
 
     # Filter out segments shorter than 50ms — too short for crossfade and inaudible anyway.
     # These can appear when two cuts are very close but don't quite merge.
-    MIN_SEGMENT_MS = 50
+    MIN_SEGMENT_MS = 100
     keeps = [(s, e) for s, e in keeps if e - s >= MIN_SEGMENT_MS]
     if not keeps:
         keeps = [(0, min(1000, total_ms))]
@@ -1919,7 +1919,7 @@ def apply_audio_edits(audio_path, cuts_ms, words=None):
     # Build ffmpeg filter_complex: trim each keep segment, crossfade between them
     # Using acrossfade (20ms, equal-power curve) instead of concat + independent fades
     # to eliminate pops/glitches at cut boundaries
-    XFADE_S = 0.040  # 40ms crossfade — smooths filler removals without being audible
+    XFADE_S = 0.080  # 80ms crossfade — long enough to smooth mid-sentence filler removals
     filter_parts = []
     for i, (start, end) in enumerate(keeps):
         start_s = start / 1000

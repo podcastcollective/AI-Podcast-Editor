@@ -719,19 +719,22 @@ def _find_stumbles(words):
             if _fuzzy_phrase_match(candidate, phrase):
                 occurrences.append(j)
 
-            if len(occurrences) < 2:
-                continue
+        # Collect ALL occurrences first, then build stumble using the last one.
+        # This ensures multi-attempt restarts (3+ tries) cut all the way to the
+        # final clean version rather than stopping at the second attempt.
+        if len(occurrences) < 2:
+            continue
 
-            first_idx = occurrences[0]
-            last_idx = occurrences[-1]
+        first_idx = occurrences[0]
+        last_idx = occurrences[-1]
 
-            if _has_other_speaker(first_idx, last_idx, speaker, phrase_len):
-                continue
+        if _has_other_speaker(first_idx, last_idx, speaker, phrase_len):
+            continue
 
-            if not _check_between_content(first_idx, last_idx, phrase, phrase_len):
-                continue
+        if not _check_between_content(first_idx, last_idx, phrase, phrase_len):
+            continue
 
-            found.append(_build_stumble(first_idx, last_idx, phrase, speaker, phrase_len, occurrences))
+        found.append(_build_stumble(first_idx, last_idx, phrase, speaker, phrase_len, occurrences))
 
     # ── PASS 3: Multi-attempt restart detection ──
     # Catches patterns like: "it's certainly very disruptive in terms of, uh,

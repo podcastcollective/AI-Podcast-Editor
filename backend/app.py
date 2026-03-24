@@ -1493,7 +1493,7 @@ Call the submit_edit_decisions tool with your decisions."""
             confidence = d.get('confidence', 0) or 0
             desc = d.get('description', d.get('reason', 'Review pass suggestion'))
             # Apply high-confidence, short cuts (mispronunciations, clear stumbles)
-            if confidence >= 93 and duration <= 3000:
+            if confidence >= 88 and duration <= 5000:
                 print(f"Review pass APPLYING: {s}ms-{e}ms ({confidence}%) — {desc[:80]}")
                 applied_review += 1
             else:

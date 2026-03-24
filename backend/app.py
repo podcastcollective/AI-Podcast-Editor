@@ -606,10 +606,13 @@ def _find_stumbles(words):
                   'voice', 'lot', 'bit', 'much', 'more', 'also',
                   'interesting', 'disruptive'}
 
-    def _check_between_content(first_idx, last_idx, phrase, phrase_len):
+    def _check_between_content(first_idx, last_idx, phrase, phrase_len,
+                               has_sentence_boundary=False):
         """Check that words between two phrase occurrences are topically related.
         Connectors (very, more, really, etc.) are treated as neutral — they don't
-        count as evidence of either related or unrelated content."""
+        count as evidence of either related or unrelated content.
+        If has_sentence_boundary=True, apply stricter checking (no short-gap exemption)
+        because sentence boundaries indicate potentially complete thoughts."""
         phrase_stems = set(stem(w) for w in phrase if len(w) >= 3)
         between_content = []
         for k in range(first_idx + phrase_len, last_idx):
@@ -620,6 +623,13 @@ def _find_stumbles(words):
                 continue  # neutral — not evidence either way
             between_content.append(w)
         if not between_content:
+            return True
+        # With only 1-2 content words between phrases and NO sentence boundary,
+        # there's not enough material for a meaningful new idea — trust that
+        # it's a restart. But if there IS a sentence boundary (period/question
+        # mark), even 2 words can carry meaning ("We're trying to augment")
+        # so we must still check.
+        if len(between_content) <= 2 and not has_sentence_boundary:
             return True
         unrelated = 0
         for w in between_content:
@@ -758,7 +768,8 @@ def _find_stumbles(words):
         # the phrases, this is very likely two complete sentences, not a stumble.
         # Require the content check to pass in this case regardless of gap size.
         if _has_sentence_boundary(first_idx, last_idx, phrase_len):
-            if not _check_between_content(first_idx, last_idx, phrase, phrase_len):
+            if not _check_between_content(first_idx, last_idx, phrase, phrase_len,
+                                          has_sentence_boundary=True):
                 continue
 
         # Content check for gaps >= 4 words (lowered from 10 to catch short
@@ -850,17 +861,26 @@ def _find_stumbles(words):
         if _has_other_speaker(first_idx, last_idx, speaker, 2):
             continue
 
-        # Sentence boundary check: two complete sentences reusing a phrase is
-        # not a stumble (e.g. "our hiring process. We're trying to augment
-        # our hiring process")
-        if _has_sentence_boundary(first_idx, last_idx, 2):
+        # Content checks only for 2-occurrence cases. With 3+ occurrences
+        # of the same anchor by the same speaker within 15s, the evidence of
+        # a multi-attempt restart is overwhelming — the between-content will
+        # naturally contain words from abandoned continuations that don't
+        # match the anchor stems (e.g. "it's certainly very disruptive in
+        # terms of, uh, it's certainly disruptive. It's certainly very
+        # disruptive and..." — "disruptive" and "terms" are from the
+        # abandoned attempts, not genuinely new content).
+        if len(occurrences) == 2:
+            # Sentence boundary check: two complete sentences reusing a phrase is
+            # not a stumble (e.g. "our hiring process. We're trying to augment
+            # our hiring process")
+            if _has_sentence_boundary(first_idx, last_idx, 2):
+                if not _check_between_content(first_idx, last_idx, anchor, 2,
+                                              has_sentence_boundary=True):
+                    continue
+
+            # For 2-occurrence restarts, check between-content is topically related
             if not _check_between_content(first_idx, last_idx, anchor, 2):
                 continue
-
-        # For multi-attempt restarts, the between-content is expected to be
-        # variations of the same idea — check it's topically related
-        if not _check_between_content(first_idx, last_idx, anchor, 2):
-            continue
 
         # Expand cut start backward: if the word(s) before the first occurrence
         # are a false start of the same phrase (e.g. "it's um, it's certainly" —
@@ -926,18 +946,22 @@ def _find_stumbles(words):
                     # (e.g. "before that I spent 3 years at Citadel... before that
                     # I spent 8 years at Red Hat"). If they continue similarly or
                     # the first attempt is abandoned (ends in filler/pause), it's a restart.
-                    after_first = clean(words[i + phrase_len]) if i + phrase_len < len(words) else ''
-                    after_second = clean(words[j + phrase_len]) if j + phrase_len < len(words) else ''
-                    # If the words after both occurrences are different content words,
-                    # this is parallel structure, not a restart
-                    if (after_first and after_second and
-                            after_first != after_second and
-                            after_first not in function_words and
-                            after_first not in FILLER_WORDS and
-                            after_second not in function_words and
-                            after_second not in FILLER_WORDS and
-                            len(after_first) >= 3 and len(after_second) >= 3):
-                        continue
+                    # SKIP this check when phrases are adjacent or nearly adjacent
+                    # (j <= i + phrase_len + 2) — in that case, "after_first" is just
+                    # the start of the second occurrence, not real continuation content.
+                    if j > i + phrase_len + 2:
+                        after_first = clean(words[i + phrase_len]) if i + phrase_len < len(words) else ''
+                        after_second = clean(words[j + phrase_len]) if j + phrase_len < len(words) else ''
+                        # If the words after both occurrences are different content words,
+                        # this is parallel structure, not a restart
+                        if (after_first and after_second and
+                                after_first != after_second and
+                                after_first not in function_words and
+                                after_first not in FILLER_WORDS and
+                                after_second not in function_words and
+                                after_second not in FILLER_WORDS and
+                                len(after_first) >= 3 and len(after_second) >= 3):
+                            continue
                     found.append(_build_stumble(i, j, phrase, speaker, phrase_len, [i, j]))
                     break
 

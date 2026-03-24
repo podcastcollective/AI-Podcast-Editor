@@ -2053,54 +2053,72 @@ def apply_audio_edits(audio_path, cuts_ms, words=None, transcript_id=None):
     for i, (s, e) in enumerate(merged):
         print(f"Final cut [{i}]: {s}ms - {e}ms ({(e-s)/1000:.1f}s)")
 
-    # Calculate keep segments
-    keeps = []
+    # Build segment list: audio keeps + silence pads for short cuts.
+    # Short cuts (fillers/stutters < 500ms) get an 150ms silence pad inserted
+    # to preserve natural speech pacing. Without this, removing a filler snaps
+    # the surrounding words together unnaturally fast.
+    PACE_PAD_MS = 150  # generates ~50-80ms perceived gap after crossfade overlap
+    segments = []  # ('audio', start_ms, end_ms) or ('silence', duration_ms)
     pos = 0
+    short_pad_count = 0
     for s, e in merged:
         if s > pos:
-            keeps.append((pos, s))
+            segments.append(('audio', pos, s))
+        if e - s < 500:
+            # Short cut (filler/stutter) — insert silence to preserve pacing
+            segments.append(('silence', PACE_PAD_MS))
+            short_pad_count += 1
         pos = e
     if pos < total_ms:
-        keeps.append((pos, total_ms))
+        segments.append(('audio', pos, total_ms))
 
     removed_ms = sum(e - s for s, e in merged)
     remaining_ms = total_ms - removed_ms
     print(f"Cuts: {len(merged)} cuts, removed {removed_ms}ms, {remaining_ms}ms remaining")
+    if short_pad_count:
+        print(f"Pacing: inserted {short_pad_count} silence pads ({PACE_PAD_MS}ms each) for short filler/stutter cuts")
 
-    if not keeps:
-        keeps = [(0, min(1000, total_ms))]
+    if not segments:
+        segments = [('audio', 0, min(1000, total_ms))]
 
-    # Filter out segments shorter than 50ms — too short for crossfade and inaudible anyway.
-    # These can appear when two cuts are very close but don't quite merge.
+    # Filter out tiny audio segments — too short for crossfade and inaudible anyway.
     MIN_SEGMENT_MS = 100
-    keeps = [(s, e) for s, e in keeps if e - s >= MIN_SEGMENT_MS]
-    if not keeps:
-        keeps = [(0, min(1000, total_ms))]
+    segments = [seg for seg in segments
+                if seg[0] == 'silence' or seg[2] - seg[1] >= MIN_SEGMENT_MS]
+    if not segments:
+        segments = [('audio', 0, min(1000, total_ms))]
 
-    # Build ffmpeg filter_complex: trim each keep segment, crossfade between them
-    # Using acrossfade (20ms, equal-power curve) instead of concat + independent fades
-    # to eliminate pops/glitches at cut boundaries
-    XFADE_S = 0.050  # 50ms crossfade — smooths filler cuts without volume drop at speaker transitions
+    # Build ffmpeg filter_complex: trim each segment, crossfade between them
+    # Audio segments: trim from source. Silence segments: trim from source + mute.
+    # Using source audio for silence (with volume=0) ensures sample rate/channels match.
+    XFADE_S = 0.050  # 50ms crossfade — smooths cuts without volume drop at speaker transitions
     filter_parts = []
-    for i, (start, end) in enumerate(keeps):
-        start_s = start / 1000
-        end_s = end / 1000
-        chain = [f"atrim={start_s}:{end_s}", "asetpts=N/SR/TB"]
-        filter_parts.append(f"[0:a]{','.join(chain)}[s{i}]")
+    for i, seg in enumerate(segments):
+        if seg[0] == 'audio':
+            start_s = seg[1] / 1000
+            end_s = seg[2] / 1000
+            chain = [f"atrim={start_s}:{end_s}", "asetpts=N/SR/TB"]
+            filter_parts.append(f"[0:a]{','.join(chain)}[s{i}]")
+        else:
+            # Silence pad: use source audio trimmed + muted to match format
+            dur_s = seg[1] / 1000
+            chain = [f"atrim=0:{dur_s}", "asetpts=N/SR/TB", "volume=0"]
+            filter_parts.append(f"[0:a]{','.join(chain)}[s{i}]")
 
-    if len(keeps) == 1:
+    seg_count = len(segments)
+    if seg_count == 1:
         full_filter = ";".join(filter_parts) + ";[s0]acopy[out]"
     else:
         # Chain acrossfade between all segments
         full_filter = ";".join(filter_parts)
         # First crossfade: [s0][s1] -> [x0]
         full_filter += f";[s0][s1]acrossfade=d={XFADE_S}:c1=exp:c2=exp[x0]"
-        for i in range(2, len(keeps)):
+        for i in range(2, seg_count):
             prev = f"x{i-2}"
             curr = f"s{i}"
-            out = f"x{i-1}" if i < len(keeps) - 1 else "out"
+            out = f"x{i-1}" if i < seg_count - 1 else "out"
             full_filter += f";[{prev}][{curr}]acrossfade=d={XFADE_S}:c1=exp:c2=exp[{out}]"
-        if len(keeps) == 2:
+        if seg_count == 2:
             # Only one crossfade, rename x0 -> out
             full_filter = full_filter.replace("[x0]", "[out]")
 

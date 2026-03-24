@@ -651,7 +651,10 @@ def _find_stumbles(words):
     def _build_stumble(first_idx, last_idx, phrase, speaker, phrase_len, occurrences):
         """Build a stumble dict and mark indices as used."""
         stumble_start_ms = words[first_idx].get('start', 0)
-        clean_start_ms = words[last_idx].get('start', 0)
+        # Pull back cut end by 80ms to protect the first word of the clean version.
+        # Without this buffer, the crossfade eats into the start of the kept word,
+        # clipping consonants and making the transition sound unnatural.
+        clean_start_ms = max(0, words[last_idx].get('start', 0) - 80)
         clean_end_idx = last_idx + phrase_len - 1
         clean_end_ms = words[clean_end_idx].get('end', 0)
 
@@ -1936,6 +1939,18 @@ def apply_audio_edits(audio_path, cuts_ms, words=None, transcript_id=None):
         for cut in merged:
             cut[0] = _safe_cut_start(cut[0])
             cut[1] = _safe_cut_end(cut[1])
+
+    # Protect the word after each cut from crossfade clipping.
+    # The 50ms crossfade fades in the start of the next segment, making the first
+    # ~50ms of the word after a cut quieter. Pulling the cut end back by 30ms
+    # gives the crossfade room to fade in on silence/room tone rather than speech.
+    # Skip pre-chat cuts (they should go right up to the opener).
+    WORD_PROTECT_MS = 30
+    for cut in merged:
+        if cut[0] < 2000:  # pre-chat cut
+            continue
+        if cut[1] - cut[0] > WORD_PROTECT_MS * 2:
+            cut[1] -= WORD_PROTECT_MS
         # Pre-chat cut enforcement: if we detect pre-chat indicators, ensure the
         # cut extends all the way to the opener (not just where Claude placed it)
         # Buffer is only 50ms — just enough for the crossfade, so no pre-chat audio leaks

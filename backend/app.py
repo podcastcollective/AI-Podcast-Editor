@@ -660,15 +660,17 @@ def _find_stumbles(words):
     # Catches "how it, how it", "Very cool. Very cool.", "how does that, how does that"
     # Allows up to 1-word gap between pairs (punctuation attaches to words in ASR,
     # so "how it," is one token — the next "how" starts the duplicate).
+    # No function word filter — consecutive exact duplicates are always stutters
+    # regardless of word type ("how it, how it" is clearly a stutter).
     for i in range(len(words) - 3):
         if i in used_ranges:
             continue
         speaker = words[i].get('speaker', '?')
         pair_a = (clean(words[i]), clean(words[i + 1]))
-        # Need at least one content word
-        if all(w in function_words or len(w) < 2 for w in pair_a):
-            continue
         if not pair_a[0] or not pair_a[1]:
+            continue
+        # Skip if both words are single characters (too short to be meaningful)
+        if len(pair_a[0]) < 2 and len(pair_a[1]) < 2:
             continue
         # Look for the duplicate starting at i+2 or i+3 (allowing 1-word gap)
         for gap in range(0, 2):

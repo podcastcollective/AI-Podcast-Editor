@@ -69,6 +69,9 @@ _edit_jobs_lock = threading.Lock()
 # Multi-track metadata: tracks raw file paths for cleanup after editing
 _multitrack_meta: dict = {}  # transcript_id → {track_paths, ...}
 _multitrack_meta_lock = threading.Lock()
+# Pre-detection cache: store results from analysis so audio editing doesn't re-run
+_predetection_cache: dict = {}  # transcript_id → {stumbles, meta, stutters, fillers, filler_pct}
+_predetection_cache_lock = threading.Lock()
 
 
 def allowed_file(filename):
@@ -1390,11 +1393,13 @@ Example tool input for reference:
         if s is not None and e is not None:
             initial_cuts.append((int(s), int(e)))
 
-    # Also include injected stumble/meta cuts
-    for stum in _find_stumbles(words):
+    # Also include injected stumble/meta/stutter cuts (using already-computed data)
+    for stum in stumbles:
         initial_cuts.append((int(stum['stumble_start_ms']), int(stum['clean_start_ms'])))
-    for meta in _find_meta_commentary(words):
+    for meta in meta_comments:
         initial_cuts.append((int(meta['start_ms']), int(meta['end_ms'])))
+    for stut in stutters:
+        initial_cuts.append((int(stut['start_ms']), int(stut['end_ms'])))
 
     # Sort and merge
     initial_cuts.sort()
@@ -1537,7 +1542,14 @@ Call the submit_edit_decisions tool with your decisions."""
 
     return {
         "edit_decisions": all_decisions,
-        "analysis_timestamp": datetime.now().isoformat()
+        "analysis_timestamp": datetime.now().isoformat(),
+        "predetection": {
+            "stumbles": stumbles,
+            "meta_comments": meta_comments,
+            "stutters": stutters,
+            "fillers": fillers,
+            "filler_pct": filler_pct,
+        },
     }
 
 
@@ -1545,12 +1557,13 @@ Call the submit_edit_decisions tool with your decisions."""
 # AUDIO EDITING — ffmpeg-based cuts (no pydub, avoids OOM on large files)
 # ============================================================================
 
-def apply_audio_edits(audio_path, cuts_ms, words=None):
+def apply_audio_edits(audio_path, cuts_ms, words=None, transcript_id=None):
     """
     Remove segments from audio using ffmpeg filter_complex, export as WAV.
     Streams the file through ffmpeg instead of loading into memory.
     cuts_ms: list of (start_ms, end_ms) tuples to remove.
     words: optional word dicts for snapping cuts to word boundaries.
+    transcript_id: optional, used to retrieve cached pre-detection results.
     """
     # Normalize words for consistent timestamps and speaker labels
     if words:
@@ -1764,9 +1777,32 @@ def apply_audio_edits(audio_path, cuts_ms, words=None):
             cleaned_cuts.append((s, e))
     cuts_ms = cleaned_cuts
 
-    # Inject pre-detected stumble and meta-commentary cuts directly — these have
-    # word-level precise boundaries and must always be applied regardless of what
-    # Claude decided. This ensures they're never missed or merged into giant cuts.
+    # Retrieve cached pre-detection results (from analysis phase) or re-compute
+    cached_predetection = None
+    if transcript_id:
+        with _predetection_cache_lock:
+            cached_predetection = _predetection_cache.get(transcript_id)
+    if cached_predetection:
+        print(f"Using cached pre-detection for {transcript_id}")
+        stumbles = cached_predetection['stumbles']
+        meta_comments = cached_predetection['meta_comments']
+        stutters = cached_predetection['stutters']
+        fillers = cached_predetection['fillers']
+        filler_pct = cached_predetection.get('filler_pct', 60)
+    elif words:
+        print("No cached pre-detection — recomputing")
+        stumbles = _find_stumbles(words)
+        meta_comments = _find_meta_commentary(words)
+        stutters = _find_stutters(words)
+        fillers = _find_fillers(words)
+        filler_pct = 60  # default
+    else:
+        stumbles, meta_comments, stutters, fillers = [], [], [], []
+        filler_pct = 60
+
+    # Inject pre-detected stumble, meta-commentary, stutter, and filler cuts directly —
+    # these have word-level precise boundaries and must always be applied regardless of
+    # what Claude decided. This ensures they're never missed or merged into giant cuts.
     # Also expand cuts backward to include the gap before the first word — this
     # captures coughs, throat clears, and other non-speech sounds that precede stumbles.
     if words:
@@ -1790,18 +1826,57 @@ def apply_audio_edits(audio_path, cuts_ms, words=None):
                     break
             return start_ms
 
-        for stum in _find_stumbles(words):
+        for stum in stumbles:
             s, e = int(stum['stumble_start_ms']), int(stum['clean_start_ms'])
             if e > s:
                 s = _expand_cut_start(s)
                 print(f"Injecting stumble cut: {s}ms-{e}ms ('{stum['phrase']}' x{stum['repetitions']})")
                 cuts_ms.append((s, e))
-        for meta in _find_meta_commentary(words):
+        for meta in meta_comments:
             s, e = int(meta['start_ms']), int(meta['end_ms'])
             if e > s:
                 s = _expand_cut_start(s)
                 print(f"Injecting meta-commentary cut: {s}ms-{e}ms ('{meta['text'][:50]}')")
                 cuts_ms.append((s, e))
+        # Auto-inject stutters (partial word + complete word, e.g. "commu" → "community")
+        for stut in stutters:
+            s, e = int(stut['start_ms']), int(stut['end_ms'])
+            if e > s:
+                print(f"Injecting stutter cut: {s}ms-{e}ms ('{stut['partial']}' → '{stut['full']}' [{stut['type']}])")
+                cuts_ms.append((s, e))
+        # Auto-inject disruptive fillers up to filler_pct target
+        disruptive_fillers = [f for f in fillers if f.get('context') == 'disruptive']
+        if disruptive_fillers:
+            target_count = int(len(disruptive_fillers) * filler_pct / 100)
+            # Count how many disruptive fillers Claude already cut
+            already_cut = 0
+            for f in disruptive_fillers:
+                fs, fe = int(f['start_ms']), int(f['end_ms'])
+                for cs, ce in cuts_ms:
+                    if fs >= int(cs) - 50 and fe <= int(ce) + 50:
+                        already_cut += 1
+                        break
+            needed = target_count - already_cut
+            if needed > 0:
+                # Inject uncovered disruptive fillers
+                uncovered = []
+                for f in disruptive_fillers:
+                    fs, fe = int(f['start_ms']), int(f['end_ms'])
+                    covered = any(fs >= int(cs) - 50 and fe <= int(ce) + 50 for cs, ce in cuts_ms)
+                    if not covered:
+                        uncovered.append(f)
+                injected = 0
+                for f in uncovered[:needed]:
+                    s, e = int(f['start_ms']), int(f['end_ms'])
+                    if e > s:
+                        print(f"Injecting filler cut: {s}ms-{e}ms ('{f['text']}' Speaker {f['speaker']})")
+                        cuts_ms.append((s, e))
+                        injected += 1
+                print(f"Filler injection: {already_cut} already cut by Claude, "
+                      f"injected {injected} more (target {target_count}/{len(disruptive_fillers)} disruptive, {filler_pct}%)")
+            else:
+                print(f"Filler injection: Claude already cut {already_cut}/{target_count} target "
+                      f"({len(disruptive_fillers)} disruptive, {filler_pct}%) — no injection needed")
         # Inject non-verbal gap trims — coughs, throat clears between words
         for gap_info in _find_nonverbal_gaps(words):
             s, e = int(gap_info['start_ms']), int(gap_info['end_ms'])
@@ -1882,12 +1957,12 @@ def apply_audio_edits(audio_path, cuts_ms, words=None):
 
     # Safety: reject mid-episode content cuts > 8s UNLESS they contain pre-detected
     # meta-commentary or stumbles (which can legitimately be longer)
+    # Uses already-computed pre-detection data (no re-running)
     meta_ranges = []
-    if words:
-        for m in _find_meta_commentary(words):
-            meta_ranges.append((m['start_ms'], m['end_ms']))
-        for s in _find_stumbles(words):
-            meta_ranges.append((s['stumble_start_ms'], s['clean_start_ms']))
+    for m in meta_comments:
+        meta_ranges.append((m['start_ms'], m['end_ms']))
+    for s_item in stumbles:
+        meta_ranges.append((s_item['stumble_start_ms'], s_item['clean_start_ms']))
 
     safe_merged = []
     for s, e in merged:
@@ -1910,6 +1985,69 @@ def apply_audio_edits(audio_path, cuts_ms, words=None):
         else:
             safe_merged.append([s, e])
     merged = safe_merged
+
+    # Post-cut verification: scan surviving words for remaining stutters/duplicates
+    # that only become adjacent after other cuts bring them together.
+    if words:
+        surviving_words = []
+        for w in words:
+            ws = w.get('start', 0)
+            we = w.get('end', 0)
+            cut_flag = False
+            for cs, ce in merged:
+                if ws >= cs and we <= ce:
+                    cut_flag = True
+                    break
+            if not cut_flag:
+                surviving_words.append(w)
+
+        verification_cuts = []
+        # Check for consecutive duplicate words (stutters created by adjacent cuts)
+        for i in range(len(surviving_words) - 1):
+            if surviving_words[i].get('speaker', '?') != surviving_words[i + 1].get('speaker', '?'):
+                continue
+            t1 = surviving_words[i].get('text', '').lower().strip('.,!?;:')
+            t2 = surviving_words[i + 1].get('text', '').lower().strip('.,!?;:')
+            if t1 == t2 and len(t1) >= 2 and t1 not in FILLER_WORDS:
+                s = int(surviving_words[i].get('start', 0))
+                e = int(surviving_words[i].get('end', 0))
+                if e > s:
+                    verification_cuts.append((s, e))
+
+        # Check for consecutive 2-word phrase duplicates
+        for i in range(len(surviving_words) - 3):
+            if surviving_words[i].get('speaker', '?') != surviving_words[i + 2].get('speaker', '?'):
+                continue
+            p1 = (surviving_words[i].get('text', '').lower().strip('.,!?;:') + ' ' +
+                   surviving_words[i + 1].get('text', '').lower().strip('.,!?;:'))
+            p2 = (surviving_words[i + 2].get('text', '').lower().strip('.,!?;:') + ' ' +
+                   surviving_words[i + 3].get('text', '').lower().strip('.,!?;:') if i + 3 < len(surviving_words) else '')
+            if p1 == p2 and len(p1) >= 5:
+                s = int(surviving_words[i].get('start', 0))
+                e = int(surviving_words[i + 1].get('end', 0))
+                if e > s:
+                    verification_cuts.append((s, e))
+
+        if verification_cuts:
+            print(f"Post-cut verification: found {len(verification_cuts)} remaining duplicates")
+            for s, e in verification_cuts:
+                # Find what word this is for logging
+                for w in surviving_words:
+                    if w.get('start', 0) == s:
+                        print(f"  Verification cut: {s}ms-{e}ms ('{w.get('text', '')}')")
+                        break
+                merged.append([s, e])
+            # Re-sort and re-merge
+            merged.sort(key=lambda x: x[0])
+            re_merged = []
+            for s, e in merged:
+                if re_merged and s <= re_merged[-1][1] + 150:
+                    re_merged[-1][1] = max(re_merged[-1][1], e)
+                else:
+                    re_merged.append([s, e])
+            merged = re_merged
+        else:
+            print("Post-cut verification: no remaining duplicates found")
 
     # Log final cuts
     for i, (s, e) in enumerate(merged):
@@ -2584,7 +2722,7 @@ def _run_edit_job(job_id, audio_path, cuts_ms, transcript_id=None,
 
         with _edit_jobs_lock:
             _edit_jobs[job_id]['status'] = 'cutting'
-        wav_path = apply_audio_edits(audio_path, cuts_ms, words=words)
+        wav_path = apply_audio_edits(audio_path, cuts_ms, words=words, transcript_id=transcript_id)
 
         # Analyze cut audio and pause for user approval of enhance mix
         current_step = 'awaiting_enhance'
@@ -2636,15 +2774,19 @@ def _run_edit_job(job_id, audio_path, cuts_ms, transcript_id=None,
             _edit_jobs[job_id]['status'] = 'mastering'
         _finalize_audio(job_id, enhanced_path)
 
-        # Clean up raw multi-track files if this was a multi-track job
+        # Clean up raw multi-track files and predetection cache
         if transcript_id:
             _cleanup_multitrack_files(transcript_id)
+            with _predetection_cache_lock:
+                _predetection_cache.pop(transcript_id, None)
 
     except Exception as e:
         import traceback
         traceback.print_exc()
         if transcript_id:
             _cleanup_multitrack_files(transcript_id)
+            with _predetection_cache_lock:
+                _predetection_cache.pop(transcript_id, None)
         with _edit_jobs_lock:
             _edit_jobs[job_id] = {
                 'status': 'error',
@@ -3187,9 +3329,19 @@ def _run_analysis_job(job_id, transcript_data, filename, preset_name, transcript
         report = generate_edit_report(filename, transcript_data, edit_analysis, preset_cfg)
         cuts_count = sum(1 for d in edit_analysis['edit_decisions'] if 'start_ms' in d and 'end_ms' in d)
 
+        # Cache pre-detection results so audio editing doesn't re-run them
+        predetection = edit_analysis.get('predetection')
+        if predetection and transcript_id:
+            with _predetection_cache_lock:
+                _predetection_cache[transcript_id] = predetection
+                print(f"Cached pre-detection for {transcript_id}: "
+                      f"{len(predetection.get('stumbles', []))} stumbles, "
+                      f"{len(predetection.get('stutters', []))} stutters, "
+                      f"{len(predetection.get('fillers', []))} fillers, "
+                      f"{len(predetection.get('meta_comments', []))} meta")
+
         # Filler stats: total detected vs removed by Claude
-        words = transcript_data.get('words', [])
-        all_fillers = _find_fillers(words)
+        all_fillers = predetection.get('fillers', []) if predetection else _find_fillers(transcript_data.get('words', []))
         filler_removed = sum(1 for d in edit_analysis['edit_decisions'] if d.get('type') == 'Remove Filler')
         filler_pct_used = preset_cfg.get('filler_pct', 60)
 

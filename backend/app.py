@@ -2055,22 +2055,52 @@ def apply_audio_edits(audio_path, cuts_ms, words=None, transcript_id=None):
 
     # Pacing fix: for short/medium cuts (fillers, stutters, short stumbles < 2s),
     # shrink the cut end to leave a natural gap. This prevents surrounding words
-    # snapping together unnaturally fast. We pull back the cut end by PACE_PAD_MS,
+    # snapping together unnaturally fast. We pull back the cut end by a padding amount,
     # leaving that much of the original audio gap in place.
     # Skip pre-chat (first 60s) and post-chat (last 15%) cuts — those are full removals.
-    PACE_PAD_MS = 120  # leave 120ms of post-cut gap for natural pacing
+    #
+    # Density-aware: when multiple cuts cluster in a 30s window, the cumulative effect
+    # strips out all breathing room. We detect dense windows and increase padding there.
+    BASE_PAD_MS = 120   # default pacing pad for isolated cuts
+    DENSE_PAD_MS = 220  # extra padding in dense cut regions
+    WINDOW_S = 30       # sliding window size for density check (seconds)
+    DENSE_THRESHOLD = 4  # 4+ short cuts in a window = dense region
+
+    # Count short cuts per window to find dense regions
+    short_cuts = [(i, cut) for i, cut in enumerate(merged)
+                  if cut[1] - cut[0] < 2000
+                  and cut[0] >= 60000
+                  and cut[1] <= total_ms * 0.85]
+    dense_indices = set()
+    for idx, (i, cut) in enumerate(short_cuts):
+        # Count how many other short cuts are within WINDOW_S of this one
+        window_start = cut[0] - WINDOW_S * 500  # center the window
+        window_end = cut[0] + WINDOW_S * 500
+        nearby = sum(1 for _, c in short_cuts
+                     if c[0] >= window_start and c[0] <= window_end)
+        if nearby >= DENSE_THRESHOLD:
+            dense_indices.add(i)
+
     paced = 0
+    dense_paced = 0
     for cut in merged:
         duration = cut[1] - cut[0]
         is_start = cut[0] < 60000
         is_end = cut[1] > total_ms * 0.85
         if is_start or is_end:
             continue
-        if duration < 2000 and duration > PACE_PAD_MS + 50:
-            cut[1] -= PACE_PAD_MS
+        cut_idx = merged.index(cut)
+        if cut_idx in dense_indices:
+            pad = DENSE_PAD_MS
+            dense_paced += 1
+        else:
+            pad = BASE_PAD_MS
+        if duration < 2000 and duration > pad + 50:
+            cut[1] -= pad
             paced += 1
     if paced:
-        print(f"Pacing: shortened {paced} cuts (<2s) by {PACE_PAD_MS}ms to preserve speech rhythm")
+        print(f"Pacing: shortened {paced} cuts (<2s) — {dense_paced} in dense regions ({DENSE_PAD_MS}ms), "
+              f"{paced - dense_paced} isolated ({BASE_PAD_MS}ms)")
 
     # Calculate keep segments
     keeps = []

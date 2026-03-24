@@ -1919,7 +1919,7 @@ def apply_audio_edits(audio_path, cuts_ms, words=None):
     # Build ffmpeg filter_complex: trim each keep segment, crossfade between them
     # Using acrossfade (20ms, equal-power curve) instead of concat + independent fades
     # to eliminate pops/glitches at cut boundaries
-    XFADE_S = 0.080  # 80ms crossfade — long enough to smooth mid-sentence filler removals
+    XFADE_S = 0.050  # 50ms crossfade — smooths filler cuts without volume drop at speaker transitions
     filter_parts = []
     for i, (start, end) in enumerate(keeps):
         start_s = start / 1000

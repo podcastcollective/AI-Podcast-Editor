@@ -731,7 +731,11 @@ def _find_stumbles(words):
         if _has_other_speaker(first_idx, last_idx, speaker, phrase_len):
             continue
 
-        if not _check_between_content(first_idx, last_idx, phrase, phrase_len):
+        # Skip content check for short-gap repetitions (< 10 words apart).
+        # A 3-word phrase repeated by the same speaker within 10 words is
+        # almost certainly a restart, not deliberate topical reuse.
+        gap_words = last_idx - first_idx
+        if gap_words >= 10 and not _check_between_content(first_idx, last_idx, phrase, phrase_len):
             continue
 
         found.append(_build_stumble(first_idx, last_idx, phrase, speaker, phrase_len, occurrences))

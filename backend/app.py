@@ -2053,19 +2053,24 @@ def apply_audio_edits(audio_path, cuts_ms, words=None, transcript_id=None):
     for i, (s, e) in enumerate(merged):
         print(f"Final cut [{i}]: {s}ms - {e}ms ({(e-s)/1000:.1f}s)")
 
-    # Pacing fix: for short cuts (fillers/stutters < 500ms), shrink the cut end
-    # to leave a small gap. This prevents surrounding words snapping together
-    # unnaturally fast. We pull back the cut end by PACE_PAD_MS, leaving that
-    # much of the original audio gap (the quiet tail after the filler) in place.
-    PACE_PAD_MS = 100  # leave 100ms of post-filler gap for natural pacing
+    # Pacing fix: for short/medium cuts (fillers, stutters, short stumbles < 2s),
+    # shrink the cut end to leave a natural gap. This prevents surrounding words
+    # snapping together unnaturally fast. We pull back the cut end by PACE_PAD_MS,
+    # leaving that much of the original audio gap in place.
+    # Skip pre-chat (first 60s) and post-chat (last 15%) cuts — those are full removals.
+    PACE_PAD_MS = 120  # leave 120ms of post-cut gap for natural pacing
     paced = 0
     for cut in merged:
         duration = cut[1] - cut[0]
-        if duration < 500 and duration > PACE_PAD_MS + 50:
+        is_start = cut[0] < 60000
+        is_end = cut[1] > total_ms * 0.85
+        if is_start or is_end:
+            continue
+        if duration < 2000 and duration > PACE_PAD_MS + 50:
             cut[1] -= PACE_PAD_MS
             paced += 1
     if paced:
-        print(f"Pacing: shortened {paced} short filler/stutter cuts by {PACE_PAD_MS}ms to preserve speech rhythm")
+        print(f"Pacing: shortened {paced} cuts (<2s) by {PACE_PAD_MS}ms to preserve speech rhythm")
 
     # Calculate keep segments
     keeps = []

@@ -772,12 +772,26 @@ def _find_stumbles(words):
             if cand == anchor:
                 occurrences.append(j)
 
-        # Need 3+ attempts for 2-word anchors. (Previously allowed 2 occurrences
-        # for strong words but this causes false positives on deliberate reuse like
-        # "focus on volume... focus on quality" or "before that I spent 3 years...
-        # before that I spent 8 years". Require 3 to be safe.)
-        if len(occurrences) < 3:
+        # Need 3+ attempts for generic 2-word anchors to avoid false positives
+        # on deliberate reuse ("focus on volume... focus on quality").
+        # Allow 2 occurrences ONLY if the words immediately AFTER the anchor
+        # are the same or fillers (true restart) — not different content words
+        # (which indicates parallel structure).
+        if len(occurrences) < 2:
             continue
+        if len(occurrences) == 2:
+            # Check: is this a restart or parallel structure?
+            idx_a, idx_b = occurrences[0], occurrences[1]
+            after_a = clean(words[idx_a + 2]) if idx_a + 2 < len(words) else ''
+            after_b = clean(words[idx_b + 2]) if idx_b + 2 < len(words) else ''
+            # If the words after both anchors are different content words,
+            # this is parallel structure ("focus on volume... focus on quality")
+            if (after_a and after_b and
+                    after_a != after_b and
+                    after_a not in function_words and after_a not in FILLER_WORDS and
+                    after_b not in function_words and after_b not in FILLER_WORDS and
+                    len(after_a) >= 3 and len(after_b) >= 3):
+                continue
 
         first_idx = occurrences[0]
         last_idx = occurrences[-1]

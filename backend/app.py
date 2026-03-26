@@ -804,9 +804,12 @@ def _find_stumbles(words):
     #
     # Strategy: find 2-word content anchors repeated 2+ times by same speaker
     # within 15s. Then pick the last occurrence as the clean version.
+    #
+    # NOTE: This pass deliberately ignores used_ranges so it can detect the full
+    # multi-attempt pattern even when Pass 1 already consumed some occurrences
+    # as simple duplicates. The resulting wider cut will just merge with the
+    # narrower Pass 1 cut harmlessly.
     for i in range(len(words) - 2):
-        if i in used_ranges:
-            continue
         speaker = words[i].get('speaker', '?')
         anchor = (clean(words[i]), clean(words[i + 1]))
 
@@ -824,8 +827,6 @@ def _find_stumbles(words):
         occurrences = [i]
 
         for j in range(i + 1, min(len(words) - 1, i + 25)):
-            if j in used_ranges:
-                continue
             if words[j].get('speaker', '?') != speaker:
                 continue
             if words[j].get('start', 0) - first_start > 15000:
@@ -915,10 +916,11 @@ def _find_stumbles(words):
     # IMPORTANT: Must NOT catch deliberate parallel structure like "before that I
     # spent 3 years at Citadel... before that I spent 8 years at Red Hat" — these
     # reuse the same opening but introduce different content after.
+    #
+    # NOTE: Like Pass 3, this pass ignores used_ranges so it can detect wider
+    # patterns even when earlier passes consumed part of the repeated phrase.
     for phrase_len in [5, 4]:
         for i in range(len(words) - phrase_len):
-            if i in used_ranges:
-                continue
             speaker = words[i].get('speaker', '?')
             phrase = tuple(clean(words[i + k]) for k in range(phrase_len))
 
@@ -930,8 +932,6 @@ def _find_stumbles(words):
             first_start = words[i].get('start', 0)
 
             for j in range(i + phrase_len, min(len(words) - phrase_len + 1, i + 35)):
-                if j in used_ranges:
-                    continue
                 if words[j].get('speaker', '?') != speaker:
                     continue
                 if words[j].get('start', 0) - first_start > 20000:

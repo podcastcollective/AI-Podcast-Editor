@@ -1987,25 +1987,21 @@ def apply_audio_edits(audio_path, cuts_ms, words=None, transcript_id=None):
             cut[0] = _safe_cut_start(cut[0])
             cut[1] = _safe_cut_end(cut[1])
 
-    # Protect words at cut boundaries from crossfade clipping.
-    # The 80ms crossfade fades out the end of segment A and fades in the start
-    # of segment B. Without protection, this clips the tail of the last word
-    # before the cut and the onset of the first word after the cut.
-    # - Pull cut END back so the fade-in happens on room tone, not speech
-    # - Push cut START forward so the fade-out happens on room tone, not speech
+    # Protect words at cut boundaries from the micro-fade.
+    # With 8ms fades (no crossfade overlap), we only need small buffers to
+    # ensure the fade happens on room tone rather than clipping speech.
+    # - Pull cut END back so the word after the cut starts cleanly
+    # - Push cut START forward so the word before the cut ends cleanly
     # Skip pre-chat cuts (they should go right up to the opener).
-    WORD_PROTECT_END_MS = 80   # protect word AFTER cut (matches crossfade duration)
-    WORD_PROTECT_START_MS = 50  # protect word BEFORE cut (fade-out is less noticeable)
+    WORD_PROTECT_END_MS = 20   # protect word AFTER cut
+    WORD_PROTECT_START_MS = 15  # protect word BEFORE cut
     for cut in merged:
         if cut[0] < 2000:  # pre-chat cut
             continue
         duration = cut[1] - cut[0]
         total_protect = WORD_PROTECT_END_MS + WORD_PROTECT_START_MS
-        if duration > total_protect + 50:  # only if cut stays meaningful after protection
+        if duration > total_protect + 50:
             cut[0] += WORD_PROTECT_START_MS
-            cut[1] -= WORD_PROTECT_END_MS
-        elif duration > WORD_PROTECT_END_MS + 30:
-            # Not enough room for both — at least protect the end (more audible)
             cut[1] -= WORD_PROTECT_END_MS
         # Pre-chat cut enforcement: if we detect pre-chat indicators, ensure the
         # cut extends all the way to the opener (not just where Claude placed it)
@@ -2233,31 +2229,36 @@ def apply_audio_edits(audio_path, cuts_ms, words=None, transcript_id=None):
     if not keeps:
         keeps = [(0, min(1000, total_ms))]
 
-    # Build ffmpeg filter_complex: trim each keep segment, crossfade between them
-    # Using acrossfade (50ms, equal-power curve) to eliminate pops/glitches at cut boundaries
-    XFADE_S = 0.080  # 80ms crossfade — longer fade smooths transitions without audible volume dip
+    # Build ffmpeg filter_complex: trim each segment, apply fade-out/fade-in at
+    # cut boundaries, then concatenate. This avoids the crossfade approach which
+    # overlaps two audio environments and sounds "stitched together." Instead,
+    # each segment fades out cleanly at the end and fades in at the start — like
+    # a human editor would do. No audio overlap means no blending artifacts.
+    FADE_MS = 8  # 8ms micro-fade — just enough to prevent clicks, short enough
+                  # to be inaudible. Human editors use <10ms fades for invisible cuts.
+    FADE_S = FADE_MS / 1000
     filter_parts = []
     for i, (start, end) in enumerate(keeps):
         start_s = start / 1000
         end_s = end / 1000
+        seg_dur = end_s - start_s
         chain = [f"atrim={start_s}:{end_s}", "asetpts=N/SR/TB"]
+        # Apply fade-in at start and fade-out at end of each segment
+        # Skip fade-in on the very first segment and fade-out on the very last
+        if i > 0 and seg_dur > FADE_S * 3:
+            chain.append(f"afade=t=in:d={FADE_S}")
+        if i < len(keeps) - 1 and seg_dur > FADE_S * 3:
+            fade_start = max(0, seg_dur - FADE_S)
+            chain.append(f"afade=t=out:st={fade_start:.4f}:d={FADE_S}")
         filter_parts.append(f"[0:a]{','.join(chain)}[s{i}]")
 
     if len(keeps) == 1:
         full_filter = ";".join(filter_parts) + ";[s0]acopy[out]"
     else:
-        # Chain acrossfade between all segments
+        # Concatenate all segments (no overlap — just sequential join)
         full_filter = ";".join(filter_parts)
-        # First crossfade: [s0][s1] -> [x0]
-        full_filter += f";[s0][s1]acrossfade=d={XFADE_S}:c1=exp:c2=exp[x0]"
-        for i in range(2, len(keeps)):
-            prev = f"x{i-2}"
-            curr = f"s{i}"
-            out = f"x{i-1}" if i < len(keeps) - 1 else "out"
-            full_filter += f";[{prev}][{curr}]acrossfade=d={XFADE_S}:c1=exp:c2=exp[{out}]"
-        if len(keeps) == 2:
-            # Only one crossfade, rename x0 -> out
-            full_filter = full_filter.replace("[x0]", "[out]")
+        labels = "".join(f"[s{i}]" for i in range(len(keeps)))
+        full_filter += f";{labels}concat=n={len(keeps)}:v=0:a=1[out]"
 
     # Write filter to script file to avoid command-line length limits
     filter_path = audio_path + '_filter.txt'

@@ -862,14 +862,37 @@ def _find_stumbles(words):
         if _has_other_speaker(first_idx, last_idx, speaker, 2):
             continue
 
-        # Content checks only for 2-occurrence cases. With 3+ occurrences
-        # of the same anchor by the same speaker within 15s, the evidence of
-        # a multi-attempt restart is overwhelming — the between-content will
-        # naturally contain words from abandoned continuations that don't
-        # match the anchor stems (e.g. "it's certainly very disruptive in
-        # terms of, uh, it's certainly disruptive. It's certainly very
-        # disruptive and..." — "disruptive" and "terms" are from the
-        # abandoned attempts, not genuinely new content).
+        # Content checks: for 3+ occurrences, distinguish restarts from natural
+        # reuse. Key insight: in genuine restarts, each occurrence appears at a
+        # restart boundary (preceded by fillers, pauses, or sentence breaks).
+        # In natural reuse, the anchor is embedded mid-sentence.
+        # "it's certainly... uh, it's certainly... It's certainly" → restart
+        # "I think that... I think we're seeing... I think in" → embedded hedging
+        if len(occurrences) >= 3:
+            # Check how many occurrences (after the first) appear at restart
+            # boundaries — preceded by a filler, short pause, or sentence break
+            restart_count = 0
+            for occ_idx in range(1, len(occurrences)):
+                occ = occurrences[occ_idx]
+                if occ == 0:
+                    restart_count += 1
+                    continue
+                prev_word = clean(words[occ - 1]) if occ > 0 else ''
+                prev_text = words[occ - 1].get('text', '').rstrip() if occ > 0 else ''
+                # Restart boundary: previous word is filler, ends with punctuation,
+                # or there's a >300ms gap before this occurrence
+                is_filler = prev_word in FILLER_WORDS or prev_word in function_words
+                is_sentence_break = prev_text.endswith(('.', '?', '!', ','))
+                gap_before = words[occ].get('start', 0) - words[occ - 1].get('end', 0) if occ > 0 else 0
+                is_pause = gap_before > 300
+                if is_filler or is_sentence_break or is_pause:
+                    restart_count += 1
+            # If most occurrences are at restart boundaries, it's a genuine restart
+            # If most are embedded mid-sentence, it's natural reuse → skip
+            if restart_count < len(occurrences) - 1:
+                # Most occurrences are mid-sentence → natural reuse, not restart
+                continue
+
         if len(occurrences) == 2:
             # Sentence boundary check: two complete sentences reusing a phrase is
             # not a stumble (e.g. "our hiring process. We're trying to augment

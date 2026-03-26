@@ -2206,6 +2206,63 @@ def apply_audio_edits(audio_path, cuts_ms, words=None, transcript_id=None):
         print(f"Pacing: shortened {paced} cuts (<2s) — {dense_paced} in dense regions ({DENSE_PAD_MS}ms), "
               f"{paced - dense_paced} isolated ({BASE_PAD_MS}ms)")
 
+    # ── QUALITY GATE: Pacing validation ──
+    # After all cuts and pacing, verify that no two adjacent surviving words
+    # are closer together in the edited timeline than they would be in natural
+    # speech. If a cut brings two words too close, widen the gap by shrinking
+    # the cut further.
+    MIN_WORD_GAP_MS = 80  # minimum gap between words at a cut boundary
+    if words:
+        # Build list of surviving words with their timestamps
+        sw = []
+        for w in words:
+            ws, we = w.get('start', 0), w.get('end', 0)
+            if we <= ws:
+                continue
+            cut_flag = False
+            for cs, ce in merged:
+                if ws >= cs and we <= ce:
+                    cut_flag = True
+                    break
+            if not cut_flag:
+                sw.append((ws, we))
+        sw.sort()
+
+        # For each cut, check the gap between the last word before and first word after
+        pacing_fixes = 0
+        for cut in merged:
+            cs, ce = cut
+            if cs < 60000 or ce > total_ms * 0.85:
+                continue
+            # Find last word ending before cut start
+            last_end = None
+            for ws, we in sw:
+                if we <= cs:
+                    last_end = we
+                else:
+                    break
+            # Find first word starting after cut end
+            first_start = None
+            for ws, we in sw:
+                if ws >= ce:
+                    first_start = ws
+                    break
+            if last_end is None or first_start is None:
+                continue
+            # Gap in edited timeline: (time from last word end to cut start) +
+            #                         (time from cut end to first word start)
+            gap_before_cut = cs - last_end
+            gap_after_cut = first_start - ce
+            effective_gap = gap_before_cut + gap_after_cut
+            if effective_gap < MIN_WORD_GAP_MS:
+                # Too tight — shrink the cut to widen the gap
+                needed = MIN_WORD_GAP_MS - effective_gap
+                if cut[1] - cut[0] > needed + 30:
+                    cut[1] -= needed
+                    pacing_fixes += 1
+        if pacing_fixes:
+            print(f"Quality gate: widened {pacing_fixes} cuts where words were <{MIN_WORD_GAP_MS}ms apart")
+
     # Calculate keep segments
     keeps = []
     pos = 0
@@ -2280,6 +2337,65 @@ def apply_audio_edits(audio_path, cuts_ms, words=None, transcript_id=None):
             os.remove(filter_path)
 
     print(f"Exported: {wav_path} ({remaining_ms}ms, {os.path.getsize(wav_path) // 1024}KB)")
+
+    # ── QUALITY GATE: Post-edit level continuity check ──
+    # Analyze the edited WAV for RMS level discontinuities at join points.
+    # Measures RMS of 150ms windows before and after each cut join. If the
+    # level jumps by more than 8dB, the cut created a harsh transition that
+    # a human editor would smooth out. In that case, report the issues.
+    if len(keeps) > 1:
+        # Calculate output-timeline positions of each join
+        output_pos_ms = 0
+        joins = []
+        for i in range(len(keeps)):
+            if i > 0:
+                joins.append(output_pos_ms)
+            output_pos_ms += keeps[i][1] - keeps[i][0]
+
+        # Sample up to 20 join points (evenly spaced if there are many)
+        if len(joins) > 20:
+            step = len(joins) / 20
+            sampled = [joins[int(i * step)] for i in range(20)]
+        else:
+            sampled = joins
+
+        harsh_count = 0
+        for join_ms in sampled:
+            try:
+                # Measure RMS of 150ms before the join
+                before_s = max(0, (join_ms - 150) / 1000)
+                before_e = join_ms / 1000
+                # Measure RMS of 150ms after the join
+                after_s = join_ms / 1000
+                after_e = (join_ms + 150) / 1000
+
+                rms_vals = []
+                for start_s, end_s in [(before_s, before_e), (after_s, after_e)]:
+                    r = subprocess.run(
+                        ['ffmpeg', '-i', wav_path, '-ss', f'{start_s:.3f}',
+                         '-to', f'{end_s:.3f}', '-af', 'volumedetect',
+                         '-f', 'null', '-'],
+                        capture_output=True, text=True, timeout=10,
+                    )
+                    # Parse mean_volume from stderr
+                    import re
+                    m = re.search(r'mean_volume:\s*(-?[\d.]+)', r.stderr)
+                    rms_vals.append(float(m.group(1)) if m else -60.0)
+
+                if len(rms_vals) == 2:
+                    diff = abs(rms_vals[0] - rms_vals[1])
+                    if diff > 8.0:
+                        harsh_count += 1
+                        print(f"Quality gate: harsh transition at {join_ms}ms "
+                              f"(level jump {diff:.1f}dB: {rms_vals[0]:.1f} → {rms_vals[1]:.1f})")
+            except Exception:
+                pass  # don't fail the edit for quality check errors
+
+        if harsh_count:
+            print(f"Quality gate: {harsh_count}/{len(sampled)} sampled joins have level jumps >8dB")
+        else:
+            print(f"Quality gate: all {len(sampled)} sampled joins pass level continuity check")
+
     return wav_path
 
 

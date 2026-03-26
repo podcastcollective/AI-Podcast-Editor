@@ -1964,17 +1964,26 @@ def apply_audio_edits(audio_path, cuts_ms, words=None, transcript_id=None):
             cut[0] = _safe_cut_start(cut[0])
             cut[1] = _safe_cut_end(cut[1])
 
-    # Protect the word after each cut from crossfade clipping.
-    # The 50ms crossfade fades in the start of the next segment, making the first
-    # ~50ms of the word after a cut quieter. Pulling the cut end back by 30ms
-    # gives the crossfade room to fade in on silence/room tone rather than speech.
+    # Protect words at cut boundaries from crossfade clipping.
+    # The 80ms crossfade fades out the end of segment A and fades in the start
+    # of segment B. Without protection, this clips the tail of the last word
+    # before the cut and the onset of the first word after the cut.
+    # - Pull cut END back so the fade-in happens on room tone, not speech
+    # - Push cut START forward so the fade-out happens on room tone, not speech
     # Skip pre-chat cuts (they should go right up to the opener).
-    WORD_PROTECT_MS = 40  # pull cut end back to protect first syllable from crossfade
+    WORD_PROTECT_END_MS = 80   # protect word AFTER cut (matches crossfade duration)
+    WORD_PROTECT_START_MS = 50  # protect word BEFORE cut (fade-out is less noticeable)
     for cut in merged:
         if cut[0] < 2000:  # pre-chat cut
             continue
-        if cut[1] - cut[0] > WORD_PROTECT_MS * 2:
-            cut[1] -= WORD_PROTECT_MS
+        duration = cut[1] - cut[0]
+        total_protect = WORD_PROTECT_END_MS + WORD_PROTECT_START_MS
+        if duration > total_protect + 50:  # only if cut stays meaningful after protection
+            cut[0] += WORD_PROTECT_START_MS
+            cut[1] -= WORD_PROTECT_END_MS
+        elif duration > WORD_PROTECT_END_MS + 30:
+            # Not enough room for both — at least protect the end (more audible)
+            cut[1] -= WORD_PROTECT_END_MS
         # Pre-chat cut enforcement: if we detect pre-chat indicators, ensure the
         # cut extends all the way to the opener (not just where Claude placed it)
         # Buffer is only 50ms — just enough for the crossfade, so no pre-chat audio leaks

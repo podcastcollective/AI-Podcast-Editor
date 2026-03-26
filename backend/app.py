@@ -1969,7 +1969,7 @@ def apply_audio_edits(audio_path, cuts_ms, words=None, transcript_id=None):
     # ~50ms of the word after a cut quieter. Pulling the cut end back by 30ms
     # gives the crossfade room to fade in on silence/room tone rather than speech.
     # Skip pre-chat cuts (they should go right up to the opener).
-    WORD_PROTECT_MS = 30
+    WORD_PROTECT_MS = 40  # pull cut end back to protect first syllable from crossfade
     for cut in merged:
         if cut[0] < 2000:  # pre-chat cut
             continue
@@ -2128,10 +2128,11 @@ def apply_audio_edits(audio_path, cuts_ms, words=None, transcript_id=None):
     #
     # Density-aware: when multiple cuts cluster in a 30s window, the cumulative effect
     # strips out all breathing room. We detect dense windows and increase padding there.
-    BASE_PAD_MS = 120   # default pacing pad for isolated cuts
-    DENSE_PAD_MS = 220  # extra padding in dense cut regions
+    BASE_PAD_MS = 160   # default pacing pad for isolated cuts
+    DENSE_PAD_MS = 300  # extra padding in dense cut regions
+    LONG_CUT_PAD_MS = 250  # pacing for longer cuts (2-8s) — stumble/restart removals
     WINDOW_S = 30       # sliding window size for density check (seconds)
-    DENSE_THRESHOLD = 4  # 4+ short cuts in a window = dense region
+    DENSE_THRESHOLD = 3  # 3+ short cuts in a window = dense region
 
     # Count short cuts per window to find dense regions
     short_cuts = [(i, cut) for i, cut in enumerate(merged)
@@ -2157,12 +2158,20 @@ def apply_audio_edits(audio_path, cuts_ms, words=None, transcript_id=None):
         if is_start or is_end:
             continue
         cut_idx = merged.index(cut)
-        if cut_idx in dense_indices:
-            pad = DENSE_PAD_MS
-            dense_paced += 1
+        if duration < 2000:
+            # Short cuts (fillers, stutters): density-aware padding
+            if cut_idx in dense_indices:
+                pad = DENSE_PAD_MS
+                dense_paced += 1
+            else:
+                pad = BASE_PAD_MS
+        elif duration <= 8000:
+            # Longer cuts (stumble/restart removals): need breathing room too
+            # otherwise words snap together across big gaps and sound jumpy
+            pad = LONG_CUT_PAD_MS
         else:
-            pad = BASE_PAD_MS
-        if duration < 2000 and duration > pad + 50:
+            continue  # very long cuts (pre/post-chat) — no padding
+        if duration > pad + 50:
             cut[1] -= pad
             paced += 1
     if paced:
@@ -2194,7 +2203,7 @@ def apply_audio_edits(audio_path, cuts_ms, words=None, transcript_id=None):
 
     # Build ffmpeg filter_complex: trim each keep segment, crossfade between them
     # Using acrossfade (50ms, equal-power curve) to eliminate pops/glitches at cut boundaries
-    XFADE_S = 0.050  # 50ms crossfade — smooths cuts without volume drop at speaker transitions
+    XFADE_S = 0.080  # 80ms crossfade — longer fade smooths transitions without audible volume dip
     filter_parts = []
     for i, (start, end) in enumerate(keeps):
         start_s = start / 1000

@@ -1987,6 +1987,39 @@ def apply_audio_edits(audio_path, cuts_ms, words=None, transcript_id=None):
             cut[0] = _safe_cut_start(cut[0])
             cut[1] = _safe_cut_end(cut[1])
 
+    # ── Expand ALL cuts backward into pre-cut gaps ──
+    # When a filler/stutter is removed, any breath, lip smack, or intake noise
+    # in the gap just before it becomes exposed and sounds unnatural. A human
+    # editor would include that noise in the cut. Expand the cut start backward
+    # into the gap between the previous word and the cut, capturing those sounds.
+    # This applies to ALL cuts (fillers, stutters, stumbles) — not just stumbles.
+    if words:
+        GAP_EXPAND_MIN_MS = 80   # only expand if gap is at least this long
+        GAP_LEAVE_MS = 30        # leave this much after previous word's tail
+        expanded_count = 0
+        for cut in merged:
+            if cut[0] < 2000:  # skip pre-chat
+                continue
+            cs = cut[0]
+            # Find the word that starts at or just after the cut start
+            # (the first word being cut, or the cut boundary)
+            # Then find the previous word's end to measure the gap
+            prev_word_end = None
+            for i, (ws, we) in enumerate(word_intervals):
+                if we <= cs:
+                    prev_word_end = we
+                elif ws >= cs:
+                    break
+            if prev_word_end is not None:
+                gap = cs - prev_word_end
+                if gap >= GAP_EXPAND_MIN_MS:
+                    new_start = prev_word_end + GAP_LEAVE_MS
+                    if new_start < cs:
+                        cut[0] = new_start
+                        expanded_count += 1
+        if expanded_count:
+            print(f"Gap expansion: extended {expanded_count} cuts backward to capture pre-cut noises")
+
     # Protect words at cut boundaries from the micro-fade.
     # With 8ms fades (no crossfade overlap), we only need small buffers to
     # ensure the fade happens on room tone rather than clipping speech.

@@ -2008,9 +2008,14 @@ def _compute_audio_segments(words, total_ms):
         last_word = seg['words'][-1]
 
         # Segment audio start
-        if seg_idx == 0:
-            # First segment: start from beginning of audio
+        if seg_idx == 0 and seg['first_idx'] == 0:
+            # First segment AND first word is KEEP: start from beginning of audio
             seg_start = 0
+        elif seg_idx == 0:
+            # First segment but there are CUT words before it (e.g. pre-chat).
+            # Start just before the first KEEP word — don't include pre-chat audio.
+            word_start = first_word.get('start', 0)
+            seg_start = max(0, word_start - HEAD_MS)
         else:
             # Find the last CUT word before this segment
             prev_cut_end = 0

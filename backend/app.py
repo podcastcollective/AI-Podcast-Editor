@@ -1632,22 +1632,438 @@ Call the submit_edit_decisions tool with your decisions."""
 
 
 # ============================================================================
-# AUDIO EDITING — ffmpeg-based cuts (no pydub, avoids OOM on large files)
+# AUDIO EDITING — word-level edit model (no pydub, avoids OOM on large files)
 # ============================================================================
+
+# Strong opener phrases — 2-3 word sequences that reliably signal "on air"
+_OPENER_PHRASES = [
+    ('welcome', 'to'), ('welcome', 'back'), ('welcome', 'everyone'),
+    ('welcome', 'ladies'), ('welcome', 'listeners'),
+    ('hello', 'and'), ('hello', 'everyone'), ('hello', 'listeners'),
+    ('hey', 'everyone'), ('hey', 'folks'), ('hey', 'guys'), ('hey', 'listeners'),
+    ('hi', 'everyone'), ('hi', 'folks'), ('hi', 'guys'), ('hi', 'listeners'),
+    ('hi', 'there'),
+    ('good', 'morning'), ('good', 'afternoon'), ('good', 'evening'),
+    ('thanks', 'for', 'joining'), ('thanks', 'for', 'tuning'),
+    ('thank', 'you', 'for'),
+    ('this', 'is', 'the'), ('this', 'is', 'episode'),
+    ('today', 'we'), ("today's", 'episode'), ('today', 'on'),
+    ('in', 'this', 'episode'), ('on', 'this', 'episode'),
+    ("on", "today's", "episode"),
+    ("i'm", 'your', 'host'), ('my', 'name', 'is'),
+    ('episode', 'number'), ('episode', 'one'), ('episode', 'two'),
+]
+_PRECHAT_PHRASES = [
+    ('are', 'we', 'recording'), ('is', 'it', 'recording'),
+    ('hit', 'record'), ('start', 'recording'), ('stop', 'recording'),
+    ('can', 'you', 'hear'), ('mic', 'check'), ('sound', 'check'),
+    ('okay', 'recording'), ("we're", 'recording'), ('we', 'are', 'recording'),
+    ("i'll", 'hit', 'record'), ('let', 'me', 'record'),
+    ('are', 'you', 'all', 'set'), ('all', 'set'),
+    ('ready', 'to', 'go'), ('shall', 'we', 'start'),
+    ("let's", 'get', 'into'), ("let's", 'go'), ('here', 'we', 'go'),
+    ("i'll", 'start', 'with'), ("let's", 'start'),
+    ('are', 'you', 'ready'), ('you', 'ready'),
+    ('up', 'and', 'running'),
+]
+_GREETING_WORDS = {'hi', 'hello', 'welcome'}
+
+
+def _find_opener_ms(words):
+    """Find the start_ms of the episode opener using phrase-based detection.
+    Returns (opener_ms, has_prechat) or (None, False)."""
+    tokens = []
+    for w in words:
+        ws = w.get('start', 0)
+        if ws > 90000:
+            break
+        tok = w.get('text', '').lower().strip('.,!?;:\'"')
+        tokens.append((tok, ws))
+    if not tokens:
+        return None, False
+
+    # Detect pre-chat indicators
+    has_prechat = False
+    prechat_end_ms = 0
+    for phrase in _PRECHAT_PHRASES:
+        plen = len(phrase)
+        for i in range(len(tokens) - plen + 1):
+            if all(tokens[i + j][0] == phrase[j] for j in range(plen)):
+                has_prechat = True
+                prechat_end_ms = max(prechat_end_ms, tokens[i + plen - 1][1])
+                print(f"Pre-chat indicator: '{' '.join(phrase)}' at {tokens[i][1]}ms")
+                break
+
+    # Find earliest opener phrase (after pre-chat if present)
+    best_ms = None
+    best_label = None
+    for phrase in _OPENER_PHRASES:
+        plen = len(phrase)
+        for i in range(len(tokens) - plen + 1):
+            if all(tokens[i + j][0] == phrase[j] for j in range(plen)):
+                ms = tokens[i][1]
+                if has_prechat and ms <= prechat_end_ms:
+                    continue
+                if best_ms is None or ms < best_ms:
+                    best_ms = ms
+                    best_label = f"phrase '{' '.join(phrase)}'"
+                break
+
+    # Check greeting + name (e.g. "Hi, L.J.")
+    if has_prechat:
+        skip = {'um', 'uh', 'and', 'the', 'a', 'so', 'but', 'or', 'yeah', 'yes',
+                'no', 'okay', 'ok', 'right', 'well', 'like', 'just', 'i', 'we',
+                'you', 'can', 'do', 'is', 'are', 'how', 'what', 'there', 'it'}
+        for i in range(len(tokens) - 1):
+            tok, ms = tokens[i]
+            if ms <= prechat_end_ms:
+                continue
+            if tok in _GREETING_WORDS:
+                next_tok = tokens[i + 1][0]
+                if next_tok not in skip:
+                    if best_ms is None or ms < best_ms:
+                        best_ms = ms
+                        best_label = f"greeting '{tok} {next_tok}'"
+                    break
+
+    if best_ms is not None:
+        print(f"Opener detected: {best_label} at {best_ms}ms")
+        return best_ms, has_prechat
+
+    # Fallback: look for pause after last pre-chat word
+    if has_prechat and prechat_end_ms > 0:
+        for i in range(len(tokens) - 1):
+            if tokens[i][1] < prechat_end_ms:
+                continue
+            if i + 1 < len(tokens):
+                gap = tokens[i + 1][1] - tokens[i][1]
+                if gap > 500:
+                    print(f"Post-prechat pause {gap}ms, opener at {tokens[i+1][1]}ms")
+                    return tokens[i + 1][1], has_prechat
+        for i in range(len(tokens)):
+            if tokens[i][1] > prechat_end_ms:
+                return tokens[i][1], has_prechat
+
+    return None, has_prechat
+
+
+def _build_word_edit_map(words, cuts_ms, stumbles, meta_comments, stutters,
+                         fillers, filler_pct, total_ms):
+    """Phase 1: Mark each word as KEEP or CUT. No millisecond math.
+
+    Returns words list with 'edit_action' ('keep'/'cut') and 'cut_reason' added.
+    """
+    # Start with every word marked KEEP
+    for w in words:
+        w['edit_action'] = 'keep'
+        w['cut_reason'] = ''
+
+    def _mark_range(start_ms, end_ms, reason):
+        """Mark all words fully inside a time range as CUT."""
+        count = 0
+        for w in words:
+            ws, we = w.get('start', 0), w.get('end', 0)
+            if ws >= start_ms - 30 and we <= end_ms + 30 and we > ws:
+                if w['edit_action'] != 'cut':
+                    w['edit_action'] = 'cut'
+                    w['cut_reason'] = reason
+                    count += 1
+        return count
+
+    # 1. Pre-chat: mark all words before opener
+    opener_ms, has_prechat = _find_opener_ms(words)
+    if opener_ms is not None and has_prechat:
+        prechat_count = 0
+        safety_buffer = 500  # ms before opener to preserve
+        cut_before = max(0, opener_ms - safety_buffer)
+        for w in words:
+            if w.get('end', 0) <= cut_before:
+                w['edit_action'] = 'cut'
+                w['cut_reason'] = 'prechat'
+                prechat_count += 1
+        if prechat_count:
+            print(f"Word map: marked {prechat_count} pre-chat words as CUT (opener at {opener_ms}ms)")
+
+    # 2. Pre-detected stumbles
+    for stum in stumbles:
+        s, e = int(stum['stumble_start_ms']), int(stum['clean_start_ms'])
+        n = _mark_range(s, e, f"stumble:{stum.get('phrase', '')}")
+        if n:
+            print(f"Word map: stumble '{stum.get('phrase', '')}' — {n} words CUT ({s}-{e}ms)")
+
+    # 3. Pre-detected stutters
+    for stut in stutters:
+        s, e = int(stut['start_ms']), int(stut['end_ms'])
+        n = _mark_range(s, e, f"stutter:{stut.get('partial', '')}")
+        if n:
+            print(f"Word map: stutter '{stut.get('partial', '')}→{stut.get('full', '')}' — {n} words CUT")
+
+    # 4. Pre-detected meta-commentary
+    for meta in meta_comments:
+        s, e = int(meta['start_ms']), int(meta['end_ms'])
+        n = _mark_range(s, e, f"meta:{meta.get('text', '')[:30]}")
+        if n:
+            print(f"Word map: meta '{meta.get('text', '')[:40]}' — {n} words CUT")
+
+    # 5. Disruptive fillers (up to filler_pct target)
+    disruptive = [f for f in fillers if f.get('context') == 'disruptive']
+    if disruptive:
+        target = int(len(disruptive) * filler_pct / 100)
+        already = sum(1 for f in disruptive
+                      if any(w.get('start', 0) >= int(f['start_ms']) - 30 and
+                             w.get('end', 0) <= int(f['end_ms']) + 30 and
+                             w['edit_action'] == 'cut' for w in words))
+        needed = target - already
+        if needed > 0:
+            uncovered = [f for f in disruptive
+                         if not any(w.get('start', 0) >= int(f['start_ms']) - 30 and
+                                    w.get('end', 0) <= int(f['end_ms']) + 30 and
+                                    w['edit_action'] == 'cut' for w in words)]
+            injected = 0
+            for f in uncovered[:needed]:
+                n = _mark_range(int(f['start_ms']), int(f['end_ms']),
+                                f"filler:{f.get('text', '')}")
+                if n:
+                    injected += 1
+            print(f"Word map: {already} fillers already cut, injected {injected} more "
+                  f"(target {target}/{len(disruptive)}, {filler_pct}%)")
+
+    # 6. Claude's content cuts — mark words fully inside each range as CUT.
+    # Only words FULLY inside the range are cut. Partial overlap = KEEP.
+    # Skip cuts > 10s mid-episode (likely Claude errors) unless they align with
+    # pre-detected ranges.
+    claude_cuts = 0
+    for s, e in cuts_ms:
+        s, e = int(s), int(e)
+        if e <= s:
+            continue
+        duration = e - s
+        is_start = s < 60000
+        is_end = e > total_ms * 0.85
+        if duration > 10000 and not is_start and not is_end:
+            # Check if pre-detected ranges cover most of it
+            known = sum(max(0, min(e, int(m.get('end_ms', 0))) -
+                            max(s, int(m.get('start_ms', 0))))
+                        for m in meta_comments)
+            known += sum(max(0, min(e, int(st['clean_start_ms'])) -
+                             max(s, int(st['stumble_start_ms'])))
+                         for st in stumbles)
+            if known < duration * 0.5:
+                print(f"Word map: skipping oversized Claude cut {s}-{e}ms ({duration/1000:.1f}s)")
+                continue
+        n = _mark_range(s, e, 'claude')
+        claude_cuts += n
+    if claude_cuts:
+        print(f"Word map: Claude marked {claude_cuts} additional words as CUT")
+
+    # 7. Speaker boundary check: if a run of CUT words spans speakers, only cut
+    # the dominant speaker's words.
+    i = 0
+    while i < len(words):
+        if words[i]['edit_action'] != 'cut':
+            i += 1
+            continue
+        # Find the run of CUT words
+        run_start = i
+        while i < len(words) and words[i]['edit_action'] == 'cut':
+            i += 1
+        run_end = i
+        run_words = words[run_start:run_end]
+        speakers = set(w.get('speaker', '?') for w in run_words)
+        if len(speakers) > 1 and run_words[0].get('start', 0) > 60000:
+            # Multiple speakers — only cut dominant speaker
+            from collections import Counter
+            counts = Counter(w.get('speaker', '?') for w in run_words)
+            dominant = counts.most_common(1)[0][0]
+            restored = 0
+            for w in run_words:
+                if w.get('speaker', '?') != dominant:
+                    w['edit_action'] = 'keep'
+                    w['cut_reason'] = ''
+                    restored += 1
+            if restored:
+                print(f"Word map: speaker boundary — restored {restored} words from non-dominant speaker")
+
+    # Summary
+    cut_count = sum(1 for w in words if w['edit_action'] == 'cut')
+    keep_count = sum(1 for w in words if w['edit_action'] == 'keep')
+    print(f"Word edit map complete: {cut_count} CUT, {keep_count} KEEP out of {len(words)} words")
+
+    return words
+
+
+def _post_mark_verification(words):
+    """Scan KEEP words for adjacent duplicates (same text, same speaker) that
+    became neighbours after other words were cut. Mark the first as CUT.
+    Also catches 2-word phrase duplicates."""
+    fixes = 0
+    keep_words = [(i, w) for i, w in enumerate(words) if w['edit_action'] == 'keep']
+
+    # Single-word duplicates
+    for k in range(len(keep_words) - 1):
+        idx_a, wa = keep_words[k]
+        idx_b, wb = keep_words[k + 1]
+        if wa.get('speaker', '?') != wb.get('speaker', '?'):
+            continue
+        ta = wa.get('text', '').lower().strip('.,!?;:')
+        tb = wb.get('text', '').lower().strip('.,!?;:')
+        if ta == tb and len(ta) >= 2 and ta not in FILLER_WORDS:
+            wa['edit_action'] = 'cut'
+            wa['cut_reason'] = 'post-verify-dup'
+            fixes += 1
+            print(f"Post-verify: duplicate '{ta}' at {wa.get('start', 0)}ms — marking first as CUT")
+
+    # 2-word phrase duplicates
+    keep_words = [(i, w) for i, w in enumerate(words) if w['edit_action'] == 'keep']
+    for k in range(len(keep_words) - 3):
+        _, wa = keep_words[k]
+        _, wb = keep_words[k + 1]
+        _, wc = keep_words[k + 2]
+        _, wd = keep_words[k + 3]
+        if wa.get('speaker', '?') != wc.get('speaker', '?'):
+            continue
+        p1 = (wa.get('text', '').lower().strip('.,!?;:') + ' ' +
+              wb.get('text', '').lower().strip('.,!?;:'))
+        p2 = (wc.get('text', '').lower().strip('.,!?;:') + ' ' +
+              wd.get('text', '').lower().strip('.,!?;:'))
+        if p1 == p2 and len(p1) >= 5:
+            wa['edit_action'] = 'cut'
+            wa['cut_reason'] = 'post-verify-dup'
+            wb['edit_action'] = 'cut'
+            wb['cut_reason'] = 'post-verify-dup'
+            fixes += 1
+            print(f"Post-verify: duplicate phrase '{p1}' at {wa.get('start', 0)}ms — marking first pair as CUT")
+
+    if fixes:
+        print(f"Post-verify: fixed {fixes} duplicate(s)")
+    else:
+        print("Post-verify: no new duplicates found")
+    return fixes
+
+
+def _compute_audio_segments(words, total_ms):
+    """Phase 2: From the KEEP/CUT word marks, compute audio keep-segments.
+
+    Key principle: each segment boundary is computed FROM word timestamps.
+    The gap between the last KEEP word and the first CUT word is split,
+    preserving natural room tone and preventing clipping.
+
+    Returns list of (start_ms, end_ms) keep-segments ready for ffmpeg.
+    """
+    TAIL_MS = 15   # preserve after last KEEP word before a cut
+    HEAD_MS = 15   # preserve before first KEEP word after a cut
+    MIN_GAP_MS = 60  # minimum gap to leave in the edit (natural pacing)
+
+    # Build runs of consecutive KEEP words (a "segment")
+    segments = []  # list of {'words': [...], 'first_idx': int, 'last_idx': int}
+    current_seg = None
+    for i, w in enumerate(words):
+        if w['edit_action'] == 'keep':
+            if current_seg is None:
+                current_seg = {'words': [w], 'first_idx': i, 'last_idx': i}
+            else:
+                current_seg['words'].append(w)
+                current_seg['last_idx'] = i
+        else:
+            if current_seg is not None:
+                segments.append(current_seg)
+                current_seg = None
+    if current_seg is not None:
+        segments.append(current_seg)
+
+    if not segments:
+        return [(0, min(1000, total_ms))]
+
+    # Convert word-segments to audio time ranges
+    keeps = []
+    for seg_idx, seg in enumerate(segments):
+        first_word = seg['words'][0]
+        last_word = seg['words'][-1]
+
+        # Segment audio start
+        if seg_idx == 0:
+            # First segment: start from beginning of audio
+            seg_start = 0
+        else:
+            # Find the last CUT word before this segment
+            prev_cut_end = 0
+            for j in range(seg['first_idx'] - 1, -1, -1):
+                if words[j]['edit_action'] == 'cut':
+                    prev_cut_end = words[j].get('end', 0)
+                    break
+            # Start: preserve HEAD_MS before first word, but don't go before
+            # the previous cut word's end + a small gap for room tone
+            word_start = first_word.get('start', 0)
+            # Use the midpoint of the gap between cut end and keep start,
+            # biased toward preserving the keep word's onset
+            gap = word_start - prev_cut_end
+            if gap > MIN_GAP_MS:
+                # Leave MIN_GAP_MS/2 after the cut, take the rest
+                seg_start = max(prev_cut_end + MIN_GAP_MS // 2,
+                                word_start - HEAD_MS)
+            else:
+                seg_start = max(prev_cut_end, word_start - HEAD_MS)
+
+        # Segment audio end
+        if seg_idx == len(segments) - 1:
+            # Last segment: go to end of audio
+            seg_end = total_ms
+        else:
+            # Find the first CUT word after this segment
+            next_cut_start = total_ms
+            for j in range(seg['last_idx'] + 1, len(words)):
+                if words[j]['edit_action'] == 'cut':
+                    next_cut_start = words[j].get('start', total_ms)
+                    break
+            # End: preserve TAIL_MS after last word, but don't go past
+            # the next cut word's start
+            word_end = last_word.get('end', 0)
+            gap = next_cut_start - word_end
+            if gap > MIN_GAP_MS:
+                seg_end = min(next_cut_start - MIN_GAP_MS // 2,
+                              word_end + TAIL_MS)
+            else:
+                seg_end = min(next_cut_start, word_end + TAIL_MS)
+
+        if seg_end > seg_start:
+            keeps.append((int(seg_start), int(seg_end)))
+
+    # Handle gap-only cuts (non-verbal gaps between words that are both KEEP).
+    # These are audio regions between KEEP words where coughs/noises live.
+    # The _find_nonverbal_gaps detection already identified them. We need to
+    # split any keep-segment that spans such a gap.
+    # (This is handled naturally because non-verbal gap trims are converted to
+    # word-level "cut" marks on the gap region. Since there are no words in the
+    # gap, the gap audio stays in the segment. We handle this explicitly here.)
+    # For now, the gap trims from _find_nonverbal_gaps are handled by marking
+    # a virtual gap region. Since there are no words there, the segment
+    # boundary computation already trims into the gap via TAIL_MS/HEAD_MS.
+
+    # Filter tiny segments
+    keeps = [(s, e) for s, e in keeps if e - s >= 100]
+    if not keeps:
+        keeps = [(0, min(1000, total_ms))]
+
+    return keeps
+
 
 def apply_audio_edits(audio_path, cuts_ms, words=None, transcript_id=None):
     """
-    Remove segments from audio using ffmpeg filter_complex, export as WAV.
-    Streams the file through ffmpeg instead of loading into memory.
-    cuts_ms: list of (start_ms, end_ms) tuples to remove.
-    words: optional word dicts for snapping cuts to word boundaries.
-    transcript_id: optional, used to retrieve cached pre-detection results.
+    Remove segments from audio using word-level edit model + ffmpeg.
+
+    Architecture: instead of mutating millisecond ranges through 14 competing
+    steps, we mark each word as KEEP or CUT, then compute audio boundaries
+    FROM word timestamps. This eliminates the class of bugs where modifications
+    interact and swallow content.
+
+    Phase 1: _build_word_edit_map — mark words KEEP/CUT
+    Phase 2: _compute_audio_segments — compute audio boundaries from word marks
+    Phase 3: ffmpeg filter_complex — trim + micro-fade + concatenate
     """
-    # Normalize words for consistent timestamps and speaker labels
     if words:
         words = _normalize_words(words)
 
-    # Get audio duration with ffprobe
+    # Get audio duration
     probe = subprocess.run(
         ['ffprobe', '-v', 'error', '-show_entries', 'format=duration',
          '-of', 'csv=p=0', audio_path],
@@ -1655,212 +2071,7 @@ def apply_audio_edits(audio_path, cuts_ms, words=None, transcript_id=None):
     )
     total_ms = int(float(probe.stdout.strip()) * 1000)
 
-    word_intervals = [
-        (w.get('start', 0), w.get('end', 0))
-        for w in (words or [])
-        if w.get('end', 0) > w.get('start', 0)
-    ]
-
-    def _lands_inside_word(ms):
-        for ws, we in word_intervals:
-            if ws < ms < we:
-                return (ws, we)
-        return None
-
-    def _safe_cut_start(ms):
-        """If cut start lands inside a word, push it to AFTER the word (preserve it)."""
-        hit = _lands_inside_word(ms)
-        return hit[1] if hit else ms
-
-    def _safe_cut_end(ms):
-        """If cut end lands inside a word, pull it to BEFORE the word (preserve it)."""
-        hit = _lands_inside_word(ms)
-        return hit[0] if hit else ms
-
-    # Strong opener phrases — 2-3 word sequences that reliably signal "on air"
-    OPENER_PHRASES = [
-        # "welcome" combos — very strong signal
-        ('welcome', 'to'), ('welcome', 'back'), ('welcome', 'everyone'),
-        ('welcome', 'ladies'), ('welcome', 'listeners'),
-        # "hello/hey/hi" + audience word — strong signal
-        ('hello', 'and'), ('hello', 'everyone'), ('hello', 'listeners'),
-        ('hey', 'everyone'), ('hey', 'folks'), ('hey', 'guys'), ('hey', 'listeners'),
-        ('hi', 'everyone'), ('hi', 'folks'), ('hi', 'guys'), ('hi', 'listeners'),
-        ('hi', 'there'),
-        # "good morning/afternoon/evening" — strong signal
-        ('good', 'morning'), ('good', 'afternoon'), ('good', 'evening'),
-        # "thanks/thank you for" — strong signal
-        ('thanks', 'for', 'joining'), ('thanks', 'for', 'tuning'),
-        ('thank', 'you', 'for'),
-        # "today/this is/this episode" — moderate signal
-        ('this', 'is', 'the'), ('this', 'is', 'episode'),
-        ('today', 'we'), ("today's", 'episode'), ('today', 'on'),
-        ('in', 'this', 'episode'), ('on', 'this', 'episode'),
-        ("on", "today's", "episode"),
-        # "I'm your host" — strong signal
-        ("i'm", 'your', 'host'), ('my', 'name', 'is'),
-        # "episode X" — moderate signal
-        ('episode', 'number'), ('episode', 'one'), ('episode', 'two'),
-    ]
-
-    # Pre-chat indicators — logistics AND readiness cues that confirm pre-chat exists
-    PRECHAT_PHRASES = [
-        # Recording logistics
-        ('are', 'we', 'recording'), ('is', 'it', 'recording'),
-        ('hit', 'record'), ('start', 'recording'), ('stop', 'recording'),
-        ('can', 'you', 'hear'), ('mic', 'check'), ('sound', 'check'),
-        ('okay', 'recording'), ("we're", 'recording'), ('we', 'are', 'recording'),
-        ("i'll", 'hit', 'record'), ('let', 'me', 'record'),
-        # Readiness cues — host confirming they're about to begin
-        ('are', 'you', 'all', 'set'), ('all', 'set'),
-        ('ready', 'to', 'go'), ('shall', 'we', 'start'),
-        ("let's", 'get', 'into'), ("let's", 'go'), ('here', 'we', 'go'),
-        ("i'll", 'start', 'with'), ("let's", 'start'),
-        ('are', 'you', 'ready'), ('you', 'ready'),
-        ('up', 'and', 'running'),
-    ]
-
-    def _get_word_tokens(words_list, max_ms=90000):
-        """Extract (lowercase_token, start_ms) pairs from word list."""
-        tokens = []
-        for w in words_list:
-            ws = w.get('start', 0)
-            if ws > max_ms:
-                break
-            tok = w.get('text', '').lower().strip('.,!?;:\'"')
-            tokens.append((tok, ws))
-        return tokens
-
-    def _find_phrase(tokens, phrase):
-        """Find a phrase (tuple of words) in token list. Returns start_ms or None."""
-        plen = len(phrase)
-        for i in range(len(tokens) - plen + 1):
-            if all(tokens[i + j][0] == phrase[j] for j in range(plen)):
-                return tokens[i][1]
-        return None
-
-    # Greeting words that signal an opener when followed by a name (after pre-chat)
-    GREETING_WORDS = {'hi', 'hello', 'welcome'}
-
-    def _find_prechat_end(tokens):
-        """Find the latest pre-chat indicator and return (has_prechat, end_ms)."""
-        has_prechat = False
-        prechat_end_ms = 0
-        for phrase in PRECHAT_PHRASES:
-            ms = _find_phrase(tokens, phrase)
-            if ms is not None:
-                has_prechat = True
-                plen = len(phrase)
-                for i in range(len(tokens) - plen + 1):
-                    if all(tokens[i + j][0] == phrase[j] for j in range(plen)):
-                        prechat_end_ms = max(prechat_end_ms, tokens[i + plen - 1][1])
-                        break
-                print(f"Pre-chat indicator: '{' '.join(phrase)}' at {ms}ms")
-        return has_prechat, prechat_end_ms
-
-    def _find_opener_start(words_list):
-        """Find the start_ms of the episode opener using phrase-based detection."""
-        tokens = _get_word_tokens(words_list, max_ms=90000)
-        if not tokens:
-            return None
-
-        # Step 1: detect pre-chat indicators
-        has_prechat, prechat_end_ms = _find_prechat_end(tokens)
-
-        # Step 2: look for opener phrases AND greeting+name, pick the earliest one
-        # "Hi, L.J. Welcome to the podcast" — "Hi, L.J." comes first and is the real start
-        best_ms = None
-        best_label = None
-
-        # 2a: check opener phrases (only AFTER pre-chat if pre-chat exists)
-        for phrase in OPENER_PHRASES:
-            ms = _find_phrase(tokens, phrase)
-            if ms is not None:
-                if has_prechat and ms <= prechat_end_ms:
-                    continue
-                if best_ms is None or ms < best_ms:
-                    best_ms = ms
-                    best_label = f"phrase '{' '.join(phrase)}'"
-
-        # 2b: check greeting + name (e.g. "Hi, L.J.") — if it comes before any
-        # opener phrase, it's the real start of on-air content
-        if has_prechat:
-            for i in range(len(tokens) - 1):
-                tok, ms = tokens[i]
-                if ms <= prechat_end_ms:
-                    continue
-                if tok in GREETING_WORDS:
-                    next_tok = tokens[i + 1][0]
-                    skip = {'um', 'uh', 'and', 'the', 'a', 'so', 'but', 'or', 'yeah', 'yes',
-                            'no', 'okay', 'ok', 'right', 'well', 'like', 'just', 'i', 'we',
-                            'you', 'can', 'do', 'is', 'are', 'how', 'what', 'there', 'it'}
-                    if next_tok not in skip:
-                        if best_ms is None or ms < best_ms:
-                            best_ms = ms
-                            best_label = f"greeting '{tok} {next_tok}'"
-                        break
-
-        if best_ms is not None:
-            print(f"Opener detected: {best_label} at {best_ms}ms")
-            return best_ms
-
-        # Step 4: if pre-chat detected, look for a pause after the last pre-chat word.
-        # Hosts typically leave a beat (500ms+) before starting the episode — the first
-        # speech after that pause is the opener.
-        if has_prechat and prechat_end_ms > 0:
-            # Find the gap right after the pre-chat end
-            for i in range(len(tokens) - 1):
-                if tokens[i][1] < prechat_end_ms:
-                    continue
-                if i + 1 < len(tokens):
-                    gap = tokens[i + 1][1] - tokens[i][1]
-                    if gap > 500:
-                        print(f"Post-prechat pause of {gap}ms detected, opener likely at {tokens[i+1][1]}ms")
-                        return tokens[i + 1][1]
-            # No obvious pause — just use the first word after pre-chat
-            for i in range(len(tokens)):
-                if tokens[i][1] > prechat_end_ms:
-                    print(f"No pause found, using first word after pre-chat at {tokens[i][1]}ms")
-                    return tokens[i][1]
-
-        if not has_prechat:
-            # No opener phrases and no pre-chat — probably no pre-chat to cut
-            print("No opener phrase or pre-chat indicator found")
-        else:
-            print("Pre-chat detected but could not identify opener — being conservative")
-        return None
-
-    def _protect_first_content(cut_end_ms, words_list):
-        """For pre-chat cuts, ensure we never cut past the episode opener."""
-        opener_ms = _find_opener_start(words_list)
-        if opener_ms is not None and cut_end_ms > opener_ms - 500:
-            safe_end = max(0, opener_ms - 500)
-            print(f"Pre-chat protection: cut end {cut_end_ms}ms would clip opener at {opener_ms}ms, "
-                  f"pulling back to {safe_end}ms (500ms buffer)")
-            return safe_end
-        return cut_end_ms
-
-    # Strip out any Claude cuts > 10s in the mid-episode — these are almost always
-    # incorrectly merged cuts. The precise injected cuts below will handle the
-    # actual removals.
-    cleaned_cuts = []
-    for s, e in cuts_ms:
-        s, e = int(s), int(e)
-        duration = e - s
-        is_start = s < 60000
-        is_end = e > total_ms * 0.85
-        if duration > 10000 and not is_start and not is_end:
-            # Find what words are in this cut for the warning
-            cut_words = [w.get('text', '') for w in (words or [])
-                         if w.get('start', 0) >= s and w.get('end', 0) <= e]
-            preview = ' '.join(cut_words[:8]) + ('...' if len(cut_words) > 8 else '')
-            print(f"WARNING: Stripping oversized Claude cut {s}ms-{e}ms ({duration/1000:.1f}s, "
-                  f"{len(cut_words)} words: '{preview}') — will use injected precise cuts instead")
-        else:
-            cleaned_cuts.append((s, e))
-    cuts_ms = cleaned_cuts
-
-    # Retrieve cached pre-detection results (from analysis phase) or re-compute
+    # ── Retrieve cached pre-detection results or recompute ──
     cached_predetection = None
     if transcript_id:
         with _predetection_cache_lock:
@@ -1878,704 +2089,126 @@ def apply_audio_edits(audio_path, cuts_ms, words=None, transcript_id=None):
         meta_comments = _find_meta_commentary(words)
         stutters = _find_stutters(words)
         fillers = _find_fillers(words)
-        filler_pct = 60  # default
+        filler_pct = 60
     else:
         stumbles, meta_comments, stutters, fillers = [], [], [], []
         filler_pct = 60
 
-    # Inject pre-detected stumble, meta-commentary, stutter, and filler cuts directly —
-    # these have word-level precise boundaries and must always be applied regardless of
-    # what Claude decided. This ensures they're never missed or merged into giant cuts.
-    # Also expand cuts backward to include the gap before the first word — this
-    # captures coughs, throat clears, and other non-speech sounds that precede stumbles.
+    # ── PHASE 1: Build word-level edit map ──
     if words:
-        word_starts = [w.get('start', 0) for w in words]
-        word_ends = [w.get('end', 0) for w in words]
+        words = _build_word_edit_map(
+            words, cuts_ms, stumbles, meta_comments, stutters,
+            fillers, filler_pct, total_ms,
+        )
+        _post_mark_verification(words)
 
-        def _expand_cut_start(start_ms):
-            """Expand cut start backward into the gap before the first word.
-            This captures coughs/throat clears that don't appear in the transcript."""
-            # Find the word that starts at or near start_ms
-            for i, ws in enumerate(word_starts):
-                if abs(ws - start_ms) < 50:
-                    # Found the word — look at the gap before it
-                    if i > 0:
-                        prev_end = word_ends[i - 1]
-                        gap = start_ms - prev_end
-                        # If there's a gap > 80ms before this word, extend into it
-                        # (leave 20ms after the previous word for its natural tail)
-                        if gap > 80:
-                            return prev_end + 20
-                    break
-            return start_ms
+        # ── Content diff: log what the listener hears at each cut boundary ──
+        cut_runs = []
+        in_cut = False
+        run_start = 0
+        for i, w in enumerate(words):
+            if w['edit_action'] == 'cut' and not in_cut:
+                in_cut = True
+                run_start = i
+            elif w['edit_action'] == 'keep' and in_cut:
+                in_cut = False
+                cut_runs.append((run_start, i - 1))
+        if in_cut:
+            cut_runs.append((run_start, len(words) - 1))
 
-        for stum in stumbles:
-            s, e = int(stum['stumble_start_ms']), int(stum['clean_start_ms'])
-            if e > s:
-                s = _expand_cut_start(s)
-                print(f"Injecting stumble cut: {s}ms-{e}ms ('{stum['phrase']}' x{stum['repetitions']})")
-                cuts_ms.append((s, e))
-        for meta in meta_comments:
-            s, e = int(meta['start_ms']), int(meta['end_ms'])
-            if e > s:
-                s = _expand_cut_start(s)
-                print(f"Injecting meta-commentary cut: {s}ms-{e}ms ('{meta['text'][:50]}')")
-                cuts_ms.append((s, e))
-        # Auto-inject stutters (partial word + complete word, e.g. "commu" → "community")
-        for stut in stutters:
-            s, e = int(stut['start_ms']), int(stut['end_ms'])
-            if e > s:
-                print(f"Injecting stutter cut: {s}ms-{e}ms ('{stut['partial']}' → '{stut['full']}' [{stut['type']}])")
-                cuts_ms.append((s, e))
-        # Auto-inject disruptive fillers up to filler_pct target
-        disruptive_fillers = [f for f in fillers if f.get('context') == 'disruptive']
-        if disruptive_fillers:
-            target_count = int(len(disruptive_fillers) * filler_pct / 100)
-            # Count how many disruptive fillers Claude already cut
-            already_cut = 0
-            for f in disruptive_fillers:
-                fs, fe = int(f['start_ms']), int(f['end_ms'])
-                for cs, ce in cuts_ms:
-                    if fs >= int(cs) - 50 and fe <= int(ce) + 50:
-                        already_cut += 1
+        print(f"--- Content diff ({len(cut_runs)} cuts) ---")
+        for first_idx, last_idx in cut_runs:
+            # 3 words before
+            before = []
+            for j in range(first_idx - 1, -1, -1):
+                if words[j]['edit_action'] == 'keep':
+                    before.insert(0, words[j].get('text', ''))
+                    if len(before) >= 3:
                         break
-            needed = target_count - already_cut
-            if needed > 0:
-                # Inject uncovered disruptive fillers
-                uncovered = []
-                for f in disruptive_fillers:
-                    fs, fe = int(f['start_ms']), int(f['end_ms'])
-                    covered = any(fs >= int(cs) - 50 and fe <= int(ce) + 50 for cs, ce in cuts_ms)
-                    if not covered:
-                        uncovered.append(f)
-                injected = 0
-                for f in uncovered[:needed]:
-                    s, e = int(f['start_ms']), int(f['end_ms'])
-                    if e > s:
-                        print(f"Injecting filler cut: {s}ms-{e}ms ('{f['text']}' Speaker {f['speaker']})")
-                        cuts_ms.append((s, e))
-                        injected += 1
-                print(f"Filler injection: {already_cut} already cut by Claude, "
-                      f"injected {injected} more (target {target_count}/{len(disruptive_fillers)} disruptive, {filler_pct}%)")
-            else:
-                print(f"Filler injection: Claude already cut {already_cut}/{target_count} target "
-                      f"({len(disruptive_fillers)} disruptive, {filler_pct}%) — no injection needed")
-        # Inject non-verbal gap trims — coughs, throat clears between words
-        for gap_info in _find_nonverbal_gaps(words):
-            s, e = int(gap_info['start_ms']), int(gap_info['end_ms'])
-            if e > s:
-                print(f"Injecting gap trim: {s}ms-{e}ms ({gap_info['gap_ms']}ms gap between '{gap_info['before_word']}' and '{gap_info['after_word']}')")
-                cuts_ms.append((s, e))
-
-    # ── Snapshot ALL intended cuts for post-modification verification ──
-    # Record what every cut intends to remove (pre-detected AND Claude's decisions),
-    # so we can verify that pacing/expansion/safety didn't erode any of them.
-    intended_removals = []
-    for stum in stumbles:
-        s, e = int(stum['stumble_start_ms']), int(stum['clean_start_ms'])
-        if e > s:
-            cut_words = [w for w in (words or [])
-                         if w.get('start', 0) >= s and w.get('end', 0) <= e]
-            intended_removals.append({
-                'type': 'stumble', 'start': s, 'end': e,
-                'phrase': stum.get('phrase', ''),
-                'words': [w.get('text', '') for w in cut_words],
-            })
-    for stut in stutters:
-        s, e = int(stut['start_ms']), int(stut['end_ms'])
-        if e > s:
-            cut_words = [w for w in (words or [])
-                         if w.get('start', 0) >= s and w.get('end', 0) <= e]
-            intended_removals.append({
-                'type': 'stutter', 'start': s, 'end': e,
-                'phrase': f"{stut.get('partial', '')} → {stut.get('full', '')}",
-                'words': [w.get('text', '') for w in cut_words],
-            })
-    for meta in meta_comments:
-        s, e = int(meta['start_ms']), int(meta['end_ms'])
-        if e > s:
-            cut_words = [w for w in (words or [])
-                         if w.get('start', 0) >= s and w.get('end', 0) <= e]
-            intended_removals.append({
-                'type': 'meta', 'start': s, 'end': e,
-                'phrase': meta.get('text', '')[:60],
-                'words': [w.get('text', '') for w in cut_words],
-            })
-    # Also track Claude's content cuts (duplicates, pre-chat, etc.) — these are
-    # the original cuts_ms entries before injection. They contain filler cuts AND
-    # content cuts. Only track ones with 2+ words (skip single-word fillers which
-    # are OK to partially trim with pacing).
-    if words:
-        for s, e in cuts_ms:
-            s, e = int(s), int(e)
-            if e <= s:
-                continue
-            cut_words = [w for w in words
-                         if w.get('start', 0) >= s and w.get('end', 0) <= e]
-            if len(cut_words) >= 2:
-                phrase = ' '.join(w.get('text', '') for w in cut_words[:6])
-                intended_removals.append({
-                    'type': 'claude', 'start': s, 'end': e,
-                    'phrase': phrase,
-                    'words': [w.get('text', '') for w in cut_words],
-                })
-
-    # Clamp, sort, merge overlapping cuts
-    adjusted = []
-    for s, e in cuts_ms:
-        s, e = int(s), int(e)
-        if e <= s:
-            continue
-        adjusted.append((max(0, s), min(total_ms, e)))
-    adjusted.sort(key=lambda x: x[0])
-
-    merged = []
-    for s, e in adjusted:
-        # Merge overlapping cuts AND cuts within 150ms of each other — adjacent
-        # cuts (e.g. false start + stutter) should merge to avoid leaving tiny
-        # audible fragments between them
-        if merged and s <= merged[-1][1] + 150:
-            merged[-1][1] = max(merged[-1][1], e)
-        else:
-            merged.append([s, e])
-
-    # Snap to word boundaries (zero-crossing snap removed — 5ms fades prevent clicks)
-    if word_intervals:
-        for cut in merged:
-            cut[0] = _safe_cut_start(cut[0])
-            cut[1] = _safe_cut_end(cut[1])
-
-    # ── Expand ALL cuts backward into pre-cut gaps ──
-    # When a filler/stutter is removed, any breath, lip smack, or intake noise
-    # in the gap just before it becomes exposed and sounds unnatural. A human
-    # editor would include that noise in the cut. Expand the cut start backward
-    # into the gap between the previous word and the cut, capturing those sounds.
-    # This applies to ALL cuts (fillers, stutters, stumbles) — not just stumbles.
-    if words:
-        GAP_EXPAND_MIN_MS = 50   # only expand if gap is at least this long
-        GAP_LEAVE_MS = 20        # leave this much after previous word's tail
-        expanded_count = 0
-        for cut in merged:
-            if cut[0] < 2000:  # skip pre-chat
-                continue
-            cs = cut[0]
-            # Find the word that starts at or just after the cut start
-            # (the first word being cut, or the cut boundary)
-            # Then find the previous word's end to measure the gap
-            prev_word_end = None
-            for i, (ws, we) in enumerate(word_intervals):
-                if we <= cs:
-                    prev_word_end = we
-                elif ws >= cs:
-                    break
-            if prev_word_end is not None:
-                gap = cs - prev_word_end
-                if gap >= GAP_EXPAND_MIN_MS:
-                    new_start = prev_word_end + GAP_LEAVE_MS
-                    if new_start < cs:
-                        cut[0] = new_start
-                        expanded_count += 1
-        if expanded_count:
-            print(f"Gap expansion: extended {expanded_count} cuts backward to capture pre-cut noises")
-
-    # Protect words at cut boundaries from the micro-fade.
-    # With 8ms fades (no crossfade overlap), we only need small buffers to
-    # ensure the fade happens on room tone rather than clipping speech.
-    # - Pull cut END back so the word after the cut starts cleanly
-    # - Push cut START forward so the word before the cut ends cleanly
-    # Skip pre-chat cuts (they should go right up to the opener).
-    WORD_PROTECT_END_MS = 20   # protect word AFTER cut
-    WORD_PROTECT_START_MS = 15  # protect word BEFORE cut
-    for cut in merged:
-        if cut[0] < 2000:  # pre-chat cut
-            continue
-        duration = cut[1] - cut[0]
-        total_protect = WORD_PROTECT_END_MS + WORD_PROTECT_START_MS
-        if duration > total_protect + 50:
-            cut[0] += WORD_PROTECT_START_MS
-            cut[1] -= WORD_PROTECT_END_MS
-        # Pre-chat cut enforcement: if we detect pre-chat indicators, ensure the
-        # cut extends all the way to the opener (not just where Claude placed it)
-        # Buffer is only 50ms — just enough for the crossfade, so no pre-chat audio leaks
-        if words:
-            opener_ms = _find_opener_start(words)
-            if opener_ms is not None:
-                safe_end = max(0, opener_ms - 50)
-                if merged and merged[0][0] < 2000:
-                    # There's already a pre-chat cut — extend it to the opener if needed
-                    if merged[0][1] < safe_end:
-                        print(f"Pre-chat enforcement: extending cut from {merged[0][1]}ms to {safe_end}ms (opener at {opener_ms}ms)")
-                        merged[0][1] = safe_end
-                    elif merged[0][1] > opener_ms:
-                        # Cut overshoots into the opener word — pull it back
-                        print(f"Pre-chat protection: cut end {merged[0][1]}ms would clip opener at {opener_ms}ms, pulling back to {safe_end}ms")
-                        merged[0][1] = safe_end
-                elif not merged or merged[0][0] >= 2000:
-                    # No pre-chat cut from Claude but we detected pre-chat — create one
-                    print(f"Pre-chat enforcement: Claude missed pre-chat, creating cut 0ms-{safe_end}ms (opener at {opener_ms}ms)")
-                    merged.insert(0, [0, safe_end])
-
-    # Speaker boundary enforcement: for mid-episode content cuts, ensure the cut
-    # doesn't span multiple speakers. If it does, shrink it to start at the first
-    # word of the dominant (most frequent) speaker in the cut region.
-    if words:
-        for cut in merged:
-            s, e = cut
-            if s < 60000 or e > total_ms * 0.85:
-                continue  # skip pre/post-chat cuts
-            # Find all words within this cut
-            words_in_cut = [w for w in words if w.get('start', 0) >= s and w.get('end', 0) <= e]
-            if len(words_in_cut) < 2:
-                continue
-            speakers = set(w.get('speaker', '?') for w in words_in_cut)
-            if len(speakers) > 1:
-                # Multiple speakers — find the dominant speaker (most words)
-                from collections import Counter
-                speaker_counts = Counter(w.get('speaker', '?') for w in words_in_cut)
-                dominant = speaker_counts.most_common(1)[0][0]
-                # Find the first word of the dominant speaker
-                dominant_words = [w for w in words_in_cut if w.get('speaker', '?') == dominant]
-                new_start = dominant_words[0].get('start', s)
-                if new_start > s:
-                    print(f"SPEAKER BOUNDARY: Cut {s}ms-{e}ms spans speakers {speakers}, "
-                          f"shrinking start from {s}ms to {new_start}ms (keeping only Speaker {dominant})")
-                    cut[0] = new_start
-
-    # Safety: reject mid-episode content cuts > 8s UNLESS they contain pre-detected
-    # meta-commentary or stumbles (which can legitimately be longer)
-    # Uses already-computed pre-detection data (no re-running)
-    meta_ranges = []
-    for m in meta_comments:
-        meta_ranges.append((m['start_ms'], m['end_ms']))
-    for s_item in stumbles:
-        meta_ranges.append((s_item['stumble_start_ms'], s_item['clean_start_ms']))
-
-    safe_merged = []
-    for s, e in merged:
-        duration = e - s
-        is_start = s < 60000  # first 60s — could be pre-chat
-        is_end = e > total_ms * 0.85  # last 15% — could be post-chat
-        # Check if pre-detected ranges cover a substantial portion of this cut
-        # (not just a tiny overlap). Sum the overlap of all known ranges.
-        known_coverage = 0
-        for ms, me in meta_ranges:
-            overlap_start = max(s, ms)
-            overlap_end = min(e, me)
-            if overlap_end > overlap_start:
-                known_coverage += overlap_end - overlap_start
-        # Known ranges must cover at least 50% of the cut to exempt it from safety
-        is_known = duration > 0 and known_coverage >= duration * 0.5
-        if duration > 8000 and not is_start and not is_end and not is_known:
-            cut_words = [w.get('text', '') for w in (words or [])
-                         if w.get('start', 0) >= s and w.get('end', 0) <= e]
-            preview = ' '.join(cut_words[:10]) + ('...' if len(cut_words) > 10 else '')
-            print(f"SAFETY: Dropping suspicious mid-episode cut {s}ms-{e}ms ({duration/1000:.1f}s) — "
-                  f"known coverage only {known_coverage}ms/{duration}ms — words: '{preview}'")
-        else:
-            safe_merged.append([s, e])
-    merged = safe_merged
-
-    # Post-cut verification: scan surviving words for remaining stutters/duplicates
-    # that only become adjacent after other cuts bring them together.
-    if words:
-        surviving_words = []
-        for w in words:
-            ws = w.get('start', 0)
-            we = w.get('end', 0)
-            cut_flag = False
-            for cs, ce in merged:
-                if ws >= cs and we <= ce:
-                    cut_flag = True
-                    break
-            if not cut_flag:
-                surviving_words.append(w)
-
-        verification_cuts = []
-        # Check for consecutive duplicate words (stutters created by adjacent cuts)
-        for i in range(len(surviving_words) - 1):
-            if surviving_words[i].get('speaker', '?') != surviving_words[i + 1].get('speaker', '?'):
-                continue
-            t1 = surviving_words[i].get('text', '').lower().strip('.,!?;:')
-            t2 = surviving_words[i + 1].get('text', '').lower().strip('.,!?;:')
-            if t1 == t2 and len(t1) >= 2 and t1 not in FILLER_WORDS:
-                s = int(surviving_words[i].get('start', 0))
-                e = int(surviving_words[i].get('end', 0))
-                if e > s:
-                    verification_cuts.append((s, e))
-
-        # Check for consecutive 2-word phrase duplicates
-        for i in range(len(surviving_words) - 3):
-            if surviving_words[i].get('speaker', '?') != surviving_words[i + 2].get('speaker', '?'):
-                continue
-            p1 = (surviving_words[i].get('text', '').lower().strip('.,!?;:') + ' ' +
-                   surviving_words[i + 1].get('text', '').lower().strip('.,!?;:'))
-            p2 = (surviving_words[i + 2].get('text', '').lower().strip('.,!?;:') + ' ' +
-                   surviving_words[i + 3].get('text', '').lower().strip('.,!?;:') if i + 3 < len(surviving_words) else '')
-            if p1 == p2 and len(p1) >= 5:
-                s = int(surviving_words[i].get('start', 0))
-                e = int(surviving_words[i + 1].get('end', 0))
-                if e > s:
-                    verification_cuts.append((s, e))
-
-        if verification_cuts:
-            print(f"Post-cut verification: found {len(verification_cuts)} remaining duplicates")
-            for s, e in verification_cuts:
-                # Find what word this is for logging
-                for w in surviving_words:
-                    if w.get('start', 0) == s:
-                        print(f"  Verification cut: {s}ms-{e}ms ('{w.get('text', '')}')")
+            before_text = ' '.join(before)
+            # Words removed
+            removed_text = ' '.join(words[k].get('text', '') for k in range(first_idx, last_idx + 1))
+            # 3 words after
+            after = []
+            for j in range(last_idx + 1, len(words)):
+                if words[j]['edit_action'] == 'keep':
+                    after.append(words[j].get('text', ''))
+                    if len(after) >= 3:
                         break
-                merged.append([s, e])
-            # Re-sort and re-merge
-            merged.sort(key=lambda x: x[0])
-            re_merged = []
-            for s, e in merged:
-                if re_merged and s <= re_merged[-1][1] + 150:
-                    re_merged[-1][1] = max(re_merged[-1][1], e)
-                else:
-                    re_merged.append([s, e])
-            merged = re_merged
-        else:
-            print("Post-cut verification: no remaining duplicates found")
-
-    # Log final cuts
-    for i, (s, e) in enumerate(merged):
-        print(f"Final cut [{i}]: {s}ms - {e}ms ({(e-s)/1000:.1f}s)")
-
-    # Pacing fix: for short/medium cuts (fillers, stutters, short stumbles < 2s),
-    # shrink the cut end to leave a natural gap. This prevents surrounding words
-    # snapping together unnaturally fast. We pull back the cut end by a padding amount,
-    # leaving that much of the original audio gap in place.
-    # Skip pre-chat (first 60s) and post-chat (last 15%) cuts — those are full removals.
-    #
-    # Density-aware: when multiple cuts cluster in a 30s window, the cumulative effect
-    # strips out all breathing room. We detect dense windows and increase padding there.
-    BASE_PAD_MS = 160   # default pacing pad for isolated cuts
-    DENSE_PAD_MS = 300  # extra padding in dense cut regions
-    LONG_CUT_PAD_MS = 250  # pacing for longer cuts (2-8s) — stumble/restart removals
-    WINDOW_S = 30       # sliding window size for density check (seconds)
-    DENSE_THRESHOLD = 3  # 3+ short cuts in a window = dense region
-
-    # Count short cuts per window to find dense regions
-    short_cuts = [(i, cut) for i, cut in enumerate(merged)
-                  if cut[1] - cut[0] < 2000
-                  and cut[0] >= 60000
-                  and cut[1] <= total_ms * 0.85]
-    dense_indices = set()
-    for idx, (i, cut) in enumerate(short_cuts):
-        # Count how many other short cuts are within WINDOW_S of this one
-        window_start = cut[0] - WINDOW_S * 500  # center the window
-        window_end = cut[0] + WINDOW_S * 500
-        nearby = sum(1 for _, c in short_cuts
-                     if c[0] >= window_start and c[0] <= window_end)
-        if nearby >= DENSE_THRESHOLD:
-            dense_indices.add(i)
-
-    paced = 0
-    dense_paced = 0
-    for cut in merged:
-        duration = cut[1] - cut[0]
-        is_start = cut[0] < 60000
-        is_end = cut[1] > total_ms * 0.85
-        if is_start or is_end:
-            continue
-        cut_idx = merged.index(cut)
-        if duration < 2000:
-            # Short cuts (fillers, stutters): density-aware padding
-            if cut_idx in dense_indices:
-                pad = DENSE_PAD_MS
-                dense_paced += 1
-            else:
-                pad = BASE_PAD_MS
-        elif duration <= 8000:
-            # Longer cuts (stumble/restart removals): need breathing room too
-            # otherwise words snap together across big gaps and sound jumpy
-            pad = LONG_CUT_PAD_MS
-        else:
-            continue  # very long cuts (pre/post-chat) — no padding
-        if duration > pad + 50:
-            # Determine which side to pad from. If the cut END is near a word
-            # start (stumble-type cut where we need to remove right up to the
-            # clean phrase), pad from the START instead — otherwise we leave
-            # the tail of the stumble audible.
-            end_near_word_start = False
-            if word_intervals:
-                for ws, we in word_intervals:
-                    if abs(cut[1] - ws) < 80:  # cut end near a word start
-                        end_near_word_start = True
-                        break
-            if end_near_word_start:
-                # Pad from START: move cut start forward (leave gap before cut)
-                cut[0] += pad
-            else:
-                # Pad from END: move cut end backward (leave gap after cut)
-                cut[1] -= pad
-            paced += 1
-    if paced:
-        print(f"Pacing: shortened {paced} cuts (<2s) — {dense_paced} in dense regions ({DENSE_PAD_MS}ms), "
-              f"{paced - dense_paced} isolated ({BASE_PAD_MS}ms)")
-
-    # ── QUALITY GATE: Pacing validation ──
-    # After all cuts and pacing, verify that no two adjacent surviving words
-    # are closer together in the edited timeline than they would be in natural
-    # speech. If a cut brings two words too close, widen the gap by shrinking
-    # the cut further.
-    MIN_WORD_GAP_MS = 80  # minimum gap between words at a cut boundary
-    if words:
-        # Build list of surviving words with their timestamps
-        sw = []
-        for w in words:
-            ws, we = w.get('start', 0), w.get('end', 0)
-            if we <= ws:
-                continue
-            cut_flag = False
-            for cs, ce in merged:
-                if ws >= cs and we <= ce:
-                    cut_flag = True
-                    break
-            if not cut_flag:
-                sw.append((ws, we))
-        sw.sort()
-
-        # For each cut, check the gap between the last word before and first word after
-        pacing_fixes = 0
-        for cut in merged:
-            cs, ce = cut
-            if cs < 60000 or ce > total_ms * 0.85:
-                continue
-            # Find last word ending before cut start
-            last_end = None
-            for ws, we in sw:
-                if we <= cs:
-                    last_end = we
-                else:
-                    break
-            # Find first word starting after cut end
-            first_start = None
-            for ws, we in sw:
-                if ws >= ce:
-                    first_start = ws
-                    break
-            if last_end is None or first_start is None:
-                continue
-            # Gap in edited timeline: (time from last word end to cut start) +
-            #                         (time from cut end to first word start)
-            gap_before_cut = cs - last_end
-            gap_after_cut = first_start - ce
-            effective_gap = gap_before_cut + gap_after_cut
-            if effective_gap < MIN_WORD_GAP_MS:
-                # Too tight — shrink the cut to widen the gap.
-                # Shrink from whichever side has less gap (that side needs more room).
-                # But if cut end is near a word start (stumble), shrink from start.
-                needed = MIN_WORD_GAP_MS - effective_gap
-                if cut[1] - cut[0] > needed + 30:
-                    end_near_word = any(abs(cut[1] - ws) < 80 for ws, we in word_intervals)
-                    if end_near_word or gap_after_cut < gap_before_cut:
-                        cut[0] += needed  # shrink from start
-                    else:
-                        cut[1] -= needed  # shrink from end
-                    pacing_fixes += 1
-        if pacing_fixes:
-            print(f"Quality gate: widened {pacing_fixes} cuts where words were <{MIN_WORD_GAP_MS}ms apart")
-
-    # ── VERIFICATION: compare final cuts against intended removals ──
-    # After all modifications (pacing, gap expansion, word protection, safety),
-    # check that every word we intended to remove is still inside a cut.
-    # If pacing/padding eroded a cut so that stumble words survived, auto-fix
-    # by extending the cut back to cover them.
-    if intended_removals and words:
-        verified = 0
-        leaked = 0
-        auto_fixed = 0
-        for removal in intended_removals:
-            # Find all word objects within this removal's time range
-            removal_words = [w for w in words
-                             if w.get('start', 0) >= removal['start'] - 50 and
-                             w.get('end', 0) <= removal['end'] + 50]
-            for w in removal_words:
-                ws, we = w.get('start', 0), w.get('end', 0)
-                word_text = w.get('text', '')
-                # Is this word still inside a final cut?
-                still_cut = False
-                for cut in merged:
-                    if ws >= cut[0] and we <= cut[1]:
-                        still_cut = True
-                        break
-                if still_cut:
-                    verified += 1
-                else:
-                    leaked += 1
-                    # Auto-fix: find the nearest cut and extend it to cover this word
-                    best_cut = None
-                    best_dist = float('inf')
-                    for cut in merged:
-                        # Word is just outside the cut end (pacing shrunk it)
-                        if cut[1] <= ws and ws - cut[1] < 500:
-                            dist = ws - cut[1]
-                            if dist < best_dist:
-                                best_dist = dist
-                                best_cut = cut
-                        # Word is just before the cut start (expansion missed it)
-                        elif cut[0] >= we and cut[0] - we < 500:
-                            dist = cut[0] - we
-                            if dist < best_dist:
-                                best_dist = dist
-                                best_cut = cut
-                    if best_cut is not None:
-                        if best_cut[1] <= ws:
-                            print(f"VERIFY FIX: extending cut end {best_cut[1]}ms→{we}ms "
-                                  f"to cover leaked {removal['type']} word '{word_text}'")
-                            best_cut[1] = we
-                        else:
-                            print(f"VERIFY FIX: extending cut start {best_cut[0]}ms→{ws}ms "
-                                  f"to cover leaked {removal['type']} word '{word_text}'")
-                            best_cut[0] = ws
-                        auto_fixed += 1
-                    else:
-                        print(f"VERIFY WARN: leaked {removal['type']} word '{word_text}' "
-                              f"at {ws}ms — no nearby cut to extend")
-        print(f"Verification: {verified} words confirmed removed, "
-              f"{leaked} leaked ({auto_fixed} auto-fixed)")
-        if leaked > auto_fixed:
-            print(f"WARNING: {leaked - auto_fixed} intended words could not be auto-fixed")
-
-        # Re-sort and re-merge after any fixes
-        if auto_fixed > 0:
-            merged.sort(key=lambda x: x[0])
-            re_merged = []
-            for s, e in merged:
-                if re_merged and s <= re_merged[-1][1] + 150:
-                    re_merged[-1][1] = max(re_merged[-1][1], e)
-                else:
-                    re_merged.append([s, e])
-            merged = re_merged
-
-    # ── TRANSCRIPT COMPARISON: pre-edit vs post-edit ──
-    # Build the "intended" surviving transcript from the original cuts (before
-    # pacing/expansion/safety modified them), and the "final" surviving transcript
-    # from the modified merged cuts. Any word that survives in the intended version
-    # but was accidentally cut in the final version is a bug — the modification
-    # pipeline swallowed content that should have been kept.
-    if words and merged:
-        # Build intended surviving words (from the original intended_removals)
-        intended_cut_ranges = [(r['start'], r['end']) for r in intended_removals]
-        # Also include the original Claude cuts (before injection expanded them)
-        # These are already in intended_removals as type='claude'
-
-        # Sort and merge intended ranges
-        intended_cut_ranges.sort()
-        intended_merged = []
-        for s, e in intended_cut_ranges:
-            if intended_merged and s <= intended_merged[-1][1] + 150:
-                intended_merged[-1] = (intended_merged[-1][0], max(intended_merged[-1][1], e))
-            else:
-                intended_merged.append((s, e))
-
-        def _word_survives(w, cut_list):
-            ws, we = w.get('start', 0), w.get('end', 0)
-            for cs, ce in cut_list:
-                if ws >= cs and we <= ce:
-                    return False
-            return True
-
-        intended_surviving = [w for w in words if _word_survives(w, intended_merged)]
-        final_surviving = [w for w in words if _word_survives(w, merged)]
-
-        # Find words that should survive (in intended) but were accidentally cut (not in final)
-        final_cut_set = set()
-        for w in words:
-            if not _word_survives(w, merged):
-                final_cut_set.add(id(w))
-
-        collateral_words = []
-        for w in intended_surviving:
-            if id(w) in final_cut_set:
-                collateral_words.append(w)
-
-        if collateral_words:
-            print(f"TRANSCRIPT COMPARISON: {len(collateral_words)} words accidentally cut "
-                  f"by modification pipeline (should have survived):")
-            for w in collateral_words:
-                ws = w.get('start', 0)
-                text = w.get('text', '')
-                # Find which final cut swallowed this word
-                for cs, ce in merged:
-                    if ws >= cs and w.get('end', 0) <= ce:
-                        print(f"  COLLATERAL: '{text}' at {ws}ms swallowed by cut {cs}-{ce}ms")
-                        # Auto-fix: shrink the cut to exclude this word
-                        for cut in merged:
-                            if cut[0] == cs and cut[1] == ce:
-                                we = w.get('end', 0)
-                                if ws - cut[0] < cut[1] - we:
-                                    # Word is closer to cut start — move cut start past this word
-                                    new_start = we + 10
-                                    if new_start < cut[1]:
-                                        print(f"  AUTO-FIX: moving cut start {cut[0]}ms→{new_start}ms "
-                                              f"to preserve '{text}'")
-                                        cut[0] = new_start
-                                else:
-                                    # Word is closer to cut end — move cut end before this word
-                                    new_end = ws - 10
-                                    if new_end > cut[0]:
-                                        print(f"  AUTO-FIX: moving cut end {cut[1]}ms→{new_end}ms "
-                                              f"to preserve '{text}'")
-                                        cut[1] = new_end
-                                break
-                        break
-            # Re-sort and re-merge after fixes
-            merged.sort(key=lambda x: x[0])
-            re_merged = []
-            for s, e in merged:
-                if e <= s:
-                    continue  # cut was shrunk to nothing
-                if re_merged and s <= re_merged[-1][1] + 150:
-                    re_merged[-1][1] = max(re_merged[-1][1], e)
-                else:
-                    re_merged.append([s, e])
-            merged = re_merged
-            print(f"  Fixed {len(collateral_words)} collateral cuts")
-        else:
-            print("TRANSCRIPT COMPARISON: OK — no accidental content loss")
-
-    # Calculate keep segments
-    keeps = []
-    pos = 0
-    for s, e in merged:
-        if s > pos:
-            keeps.append((pos, s))
-        pos = e
-    if pos < total_ms:
-        keeps.append((pos, total_ms))
-
-    removed_ms = sum(e - s for s, e in merged)
-    remaining_ms = total_ms - removed_ms
-    print(f"Cuts: {len(merged)} cuts, removed {removed_ms}ms, {remaining_ms}ms remaining")
-
-    # ── Content diff: log what's removed and what the join sounds like ──
-    # For each cut, show the words removed and the 3 words before/after the cut.
-    # This makes it easy to verify that cuts don't create nonsensical joins.
-    if words and merged:
-        print("--- Content diff (what listener hears at each cut boundary) ---")
-        for i, (cs, ce) in enumerate(merged):
-            before = [w for w in words if w.get('end', 0) <= cs]
-            before_text = ' '.join(w.get('text', '') for w in before[-3:])
-            removed = [w for w in words
-                       if w.get('start', 0) >= cs and w.get('end', 0) <= ce]
-            removed_text = ' '.join(w.get('text', '') for w in removed)
-            after = [w for w in words if w.get('start', 0) >= ce]
-            after_text = ' '.join(w.get('text', '') for w in after[:3])
-            print(f"  Cut [{i}] {cs}-{ce}ms ({(ce-cs)/1000:.1f}s): "
-                  f"...{before_text} [✂ {removed_text}] {after_text}...")
+            after_text = ' '.join(after)
+            start_ms = words[first_idx].get('start', 0)
+            end_ms = words[last_idx].get('end', 0)
+            reason = words[first_idx].get('cut_reason', '')
+            print(f"  [{reason}] {start_ms}-{end_ms}ms: ...{before_text} [CUT {removed_text}] {after_text}...")
         print("--- End content diff ---")
 
-    if not keeps:
-        keeps = [(0, min(1000, total_ms))]
+        # ── PHASE 2: Compute audio segments from word marks ──
+        keeps = _compute_audio_segments(words, total_ms)
 
-    # Filter out segments shorter than 50ms — too short for crossfade and inaudible anyway.
-    MIN_SEGMENT_MS = 100
-    keeps = [(s, e) for s, e in keeps if e - s >= MIN_SEGMENT_MS]
-    if not keeps:
-        keeps = [(0, min(1000, total_ms))]
+        # Apply nonverbal gap trims (coughs/throat clears between KEEP words).
+        # These are gap-only cuts — no words to mark. Split any segment that
+        # spans a detected gap.
+        nonverbal_gaps = _find_nonverbal_gaps(words)
+        if nonverbal_gaps:
+            gap_trims = [(int(g['start_ms']), int(g['end_ms'])) for g in nonverbal_gaps]
+            new_keeps = []
+            for seg_start, seg_end in keeps:
+                # Check if any gap trim falls inside this segment
+                splits = []
+                for gs, ge in gap_trims:
+                    if gs > seg_start and ge < seg_end:
+                        splits.append((gs, ge))
+                if not splits:
+                    new_keeps.append((seg_start, seg_end))
+                else:
+                    # Split the segment around the gap trims
+                    splits.sort()
+                    pos = seg_start
+                    for gs, ge in splits:
+                        if gs > pos:
+                            new_keeps.append((pos, gs))
+                        pos = ge
+                    if pos < seg_end:
+                        new_keeps.append((pos, seg_end))
+            keeps = [(s, e) for s, e in new_keeps if e - s >= 100]
+            if not keeps:
+                keeps = [(0, min(1000, total_ms))]
+            if len(keeps) != len(new_keeps):
+                print(f"Gap trims: split segments for {len(nonverbal_gaps)} nonverbal gaps")
+    else:
+        # Fallback: no words available — use raw millisecond cuts (legacy path)
+        adjusted = []
+        for s, e in cuts_ms:
+            s, e = int(s), int(e)
+            if e > s:
+                adjusted.append((max(0, s), min(total_ms, e)))
+        adjusted.sort()
+        merged = []
+        for s, e in adjusted:
+            if merged and s <= merged[-1][1] + 150:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], e))
+            else:
+                merged.append((s, e))
+        keeps = []
+        pos = 0
+        for s, e in merged:
+            if s > pos:
+                keeps.append((pos, s))
+            pos = e
+        if pos < total_ms:
+            keeps.append((pos, total_ms))
+        if not keeps:
+            keeps = [(0, min(1000, total_ms))]
+        keeps = [(s, e) for s, e in keeps if e - s >= 100]
+        if not keeps:
+            keeps = [(0, min(1000, total_ms))]
+
+    removed_ms = total_ms - sum(e - s for s, e in keeps)
+    remaining_ms = total_ms - removed_ms
+    print(f"Segments: {len(keeps)} keep-segments, removed {removed_ms}ms, {remaining_ms}ms remaining")
+
+    # ── PHASE 3: ffmpeg export ──
+    # (old pipeline code removed — replaced by word-level phases above)
 
     # Build ffmpeg filter_complex: trim each segment, apply fade-out/fade-in at
     # cut boundaries, then concatenate. This avoids the crossfade approach which

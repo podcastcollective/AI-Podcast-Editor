@@ -1897,10 +1897,10 @@ def apply_audio_edits(audio_path, cuts_ms, words=None, transcript_id=None):
                     if i > 0:
                         prev_end = word_ends[i - 1]
                         gap = start_ms - prev_end
-                        # If there's a gap > 200ms before this word, extend into it
-                        # (leave 50ms after the previous word for its natural tail)
-                        if gap > 200:
-                            return prev_end + 50
+                        # If there's a gap > 80ms before this word, extend into it
+                        # (leave 20ms after the previous word for its natural tail)
+                        if gap > 80:
+                            return prev_end + 20
                     break
             return start_ms
 
@@ -1994,8 +1994,8 @@ def apply_audio_edits(audio_path, cuts_ms, words=None, transcript_id=None):
     # into the gap between the previous word and the cut, capturing those sounds.
     # This applies to ALL cuts (fillers, stutters, stumbles) — not just stumbles.
     if words:
-        GAP_EXPAND_MIN_MS = 80   # only expand if gap is at least this long
-        GAP_LEAVE_MS = 30        # leave this much after previous word's tail
+        GAP_EXPAND_MIN_MS = 50   # only expand if gap is at least this long
+        GAP_LEAVE_MS = 20        # leave this much after previous word's tail
         expanded_count = 0
         for cut in merged:
             if cut[0] < 2000:  # skip pre-chat
@@ -2233,7 +2233,22 @@ def apply_audio_edits(audio_path, cuts_ms, words=None, transcript_id=None):
         else:
             continue  # very long cuts (pre/post-chat) — no padding
         if duration > pad + 50:
-            cut[1] -= pad
+            # Determine which side to pad from. If the cut END is near a word
+            # start (stumble-type cut where we need to remove right up to the
+            # clean phrase), pad from the START instead — otherwise we leave
+            # the tail of the stumble audible.
+            end_near_word_start = False
+            if word_intervals:
+                for ws, we in word_intervals:
+                    if abs(cut[1] - ws) < 80:  # cut end near a word start
+                        end_near_word_start = True
+                        break
+            if end_near_word_start:
+                # Pad from START: move cut start forward (leave gap before cut)
+                cut[0] += pad
+            else:
+                # Pad from END: move cut end backward (leave gap after cut)
+                cut[1] -= pad
             paced += 1
     if paced:
         print(f"Pacing: shortened {paced} cuts (<2s) — {dense_paced} in dense regions ({DENSE_PAD_MS}ms), "

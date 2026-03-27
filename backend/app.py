@@ -2142,6 +2142,147 @@ def apply_audio_edits(audio_path, cuts_ms, words=None, transcript_id=None):
             print(f"  [{reason}] {start_ms}-{end_ms}ms: ...{before_text} [CUT {removed_text}] {after_text}...")
         print("--- End content diff ---")
 
+        # ── PHASE 1b: Claude validates the cut decisions ──
+        # Build post-edit transcript from KEEP words and ask Claude to verify
+        # it reads naturally with no context lost or stumbles remaining.
+        try:
+            validation_client = anthropic.Anthropic(api_key=CLAUDE_API_KEY)
+
+            # Build original transcript (first 8000 chars)
+            original_lines = []
+            current_speaker = None
+            current_words = []
+            for w in words:
+                sp = w.get('speaker', '?')
+                if sp != current_speaker:
+                    if current_words:
+                        original_lines.append(f"Speaker {current_speaker}: {' '.join(current_words)}")
+                    current_speaker = sp
+                    current_words = []
+                current_words.append(w.get('text', ''))
+            if current_words:
+                original_lines.append(f"Speaker {current_speaker}: {' '.join(current_words)}")
+            original_transcript = '\n'.join(original_lines)[:8000]
+
+            # Build post-edit transcript from KEEP words with [CUT] markers
+            post_lines = []
+            current_speaker = None
+            current_words = []
+            in_cut = False
+            for w in words:
+                sp = w.get('speaker', '?')
+                if w['edit_action'] == 'cut':
+                    if not in_cut:
+                        current_words.append('[CUT]')
+                        in_cut = True
+                    continue
+                in_cut = False
+                if sp != current_speaker:
+                    if current_words:
+                        post_lines.append(f"Speaker {current_speaker}: {' '.join(current_words)}")
+                    current_speaker = sp
+                    current_words = []
+                current_words.append(f"{w.get('text', '')}({w.get('start', 0)})")
+            if current_words:
+                post_lines.append(f"Speaker {current_speaker}: {' '.join(current_words)}")
+            post_transcript = '\n'.join(post_lines)[:8000]
+
+            validation_prompt = f"""You are a podcast editor doing a FINAL QUALITY CHECK on edit decisions BEFORE they are applied to audio. Compare the original transcript with the post-edit version.
+
+ORIGINAL TRANSCRIPT:
+{original_transcript}
+
+POST-EDIT TRANSCRIPT (what the listener will hear — [CUT] shows where content was removed, timestamps in parentheses):
+{post_transcript}
+
+Check for these specific problems:
+
+1. CONTEXT LOSS: Did any cut remove words that change the meaning? For example, if "TA leaders" became just "leaders" because "TA" was cut. Look at each [CUT] marker — do the words before and after it still make sense together?
+
+2. REMAINING STUMBLES: Are there any repeated phrases or false starts in the KEEP words that should have been cut? Look for back-to-back identical phrases.
+
+3. BROKEN SENTENCES: Does any [CUT] create a grammatically broken or nonsensical sentence?
+
+4. OVER-CUTTING: Was any substantive content removed that wasn't a filler, stumble, or disfluency?
+
+Return your response as a JSON object with this structure:
+{{"issues": [
+  {{"type": "context_loss|remaining_stumble|broken_sentence|over_cut",
+    "timestamp_ms": <start ms of the affected word>,
+    "description": "brief description",
+    "fix": "restore_word|cut_word",
+    "word_text": "the affected word",
+    "word_start_ms": <start ms to match>}}
+], "verdict": "pass|has_issues"}}
+
+If everything looks clean, return: {{"issues": [], "verdict": "pass"}}
+
+IMPORTANT: Only flag CLEAR problems. Natural speech patterns, minor awkwardness, and stylistic choices are fine. Be conservative — false positives waste time."""
+
+            print("Running cut decision validation with Claude...")
+            val_response = validation_client.messages.create(
+                model="claude-sonnet-4-20250514",
+                max_tokens=2048,
+                messages=[{"role": "user", "content": validation_prompt}],
+            )
+            val_text = val_response.content[0].text.strip()
+
+            # Parse JSON from response (handle markdown code blocks)
+            import json as _json
+            if val_text.startswith('```'):
+                val_text = val_text.split('\n', 1)[1].rsplit('```', 1)[0].strip()
+            try:
+                val_result = _json.loads(val_text)
+            except _json.JSONDecodeError:
+                # Try to find JSON in the response
+                json_start = val_text.find('{')
+                json_end = val_text.rfind('}') + 1
+                if json_start >= 0 and json_end > json_start:
+                    val_result = _json.loads(val_text[json_start:json_end])
+                else:
+                    val_result = {"issues": [], "verdict": "parse_error"}
+
+            verdict = val_result.get('verdict', 'unknown')
+            issues = val_result.get('issues', [])
+
+            if verdict == 'pass' or not issues:
+                print("Cut validation: PASS — all decisions look clean")
+            else:
+                print(f"Cut validation: {len(issues)} issue(s) found")
+                for issue in issues:
+                    itype = issue.get('type', '?')
+                    desc = issue.get('description', '')
+                    fix = issue.get('fix', '')
+                    word_text = issue.get('word_text', '')
+                    word_ms = issue.get('word_start_ms', 0)
+                    print(f"  [{itype}] {desc} (word='{word_text}' at {word_ms}ms, fix={fix})")
+
+                    # Apply fix
+                    if fix == 'restore_word' and word_text:
+                        # Find the word and flip it to KEEP
+                        for w in words:
+                            if (w.get('text', '').lower().strip('.,!?;:') ==
+                                    word_text.lower().strip('.,!?;:') and
+                                    abs(w.get('start', 0) - word_ms) < 200 and
+                                    w['edit_action'] == 'cut'):
+                                w['edit_action'] = 'keep'
+                                w['cut_reason'] = ''
+                                print(f"    RESTORED: '{word_text}' at {w.get('start', 0)}ms")
+                                break
+                    elif fix == 'cut_word' and word_text:
+                        # Find the word and flip it to CUT
+                        for w in words:
+                            if (w.get('text', '').lower().strip('.,!?;:') ==
+                                    word_text.lower().strip('.,!?;:') and
+                                    abs(w.get('start', 0) - word_ms) < 200 and
+                                    w['edit_action'] == 'keep'):
+                                w['edit_action'] = 'cut'
+                                w['cut_reason'] = f'validation:{itype}'
+                                print(f"    CUT: '{word_text}' at {w.get('start', 0)}ms")
+                                break
+        except Exception as e:
+            print(f"Cut validation skipped (non-fatal): {e}")
+
         # ── PHASE 2: Compute audio segments from word marks ──
         keeps = _compute_audio_segments(words, total_ms)
 

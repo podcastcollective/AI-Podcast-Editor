@@ -2079,6 +2079,438 @@ def _compute_audio_segments(words, total_ms):
     return keeps
 
 
+# ============================================================================
+# PHASE 3 + 4: ffmpeg export and iterative join refinement
+# ============================================================================
+
+def _ffmpeg_concat_segments(audio_path, keeps, fade_ms=8, per_segment_fade=None):
+    """Phase 3: trim each segment, apply micro-fades, concatenate.
+
+    Args:
+        audio_path: source audio file
+        keeps: list of (start_ms, end_ms) tuples
+        fade_ms: default fade duration in ms (8ms = inaudible click prevention)
+        per_segment_fade: optional dict mapping segment index to custom fade_ms
+
+    Returns: path to exported WAV
+    """
+    if per_segment_fade is None:
+        per_segment_fade = {}
+
+    filter_parts = []
+    for i, (start, end) in enumerate(keeps):
+        seg_fade = per_segment_fade.get(i, fade_ms)
+        fade_s = seg_fade / 1000
+        start_s = start / 1000
+        end_s = end / 1000
+        seg_dur = end_s - start_s
+        chain = [f"atrim={start_s}:{end_s}", "asetpts=N/SR/TB"]
+        if i > 0 and seg_dur > fade_s * 3:
+            chain.append(f"afade=t=in:d={fade_s}")
+        if i < len(keeps) - 1 and seg_dur > fade_s * 3:
+            fade_start = max(0, seg_dur - fade_s)
+            chain.append(f"afade=t=out:st={fade_start:.4f}:d={fade_s}")
+        filter_parts.append(f"[0:a]{','.join(chain)}[s{i}]")
+
+    if len(keeps) == 1:
+        full_filter = ";".join(filter_parts) + ";[s0]acopy[out]"
+    else:
+        full_filter = ";".join(filter_parts)
+        labels = "".join(f"[s{i}]" for i in range(len(keeps)))
+        full_filter += f";{labels}concat=n={len(keeps)}:v=0:a=1[out]"
+
+    filter_path = audio_path + '_filter.txt'
+    wav_path = audio_path.rsplit('.', 1)[0] + '_edited.wav'
+    try:
+        with open(filter_path, 'w') as f:
+            f.write(full_filter)
+        result = subprocess.run(
+            ['ffmpeg', '-y', '-i', audio_path,
+             '-filter_complex_script', filter_path,
+             '-map', '[out]', '-f', 'wav', wav_path],
+            capture_output=True, text=True, timeout=600,
+        )
+        if result.returncode != 0:
+            raise Exception(f"ffmpeg edit failed: {result.stderr[-500:]}")
+    finally:
+        if os.path.exists(filter_path):
+            os.remove(filter_path)
+
+    remaining_ms = sum(e - s for s, e in keeps)
+    print(f"Exported: {wav_path} ({remaining_ms}ms, {os.path.getsize(wav_path) // 1024}KB)")
+    return wav_path
+
+
+def _analyze_join_points(wav_path, keeps):
+    """Analyze each join point in edited WAV for acoustic issues.
+
+    Measures RMS level in 150ms windows before/after each join to detect
+    harsh transitions. Returns list of issues with join index and severity.
+    """
+    # Calculate output-timeline positions of each join
+    output_pos_ms = 0
+    joins = []  # (join_idx, output_ms)
+    for i in range(len(keeps)):
+        if i > 0:
+            joins.append((i, output_pos_ms))
+        output_pos_ms += keeps[i][1] - keeps[i][0]
+
+    if not joins:
+        return []
+
+    # Sample up to 30 join points (evenly spaced if more)
+    if len(joins) > 30:
+        step = len(joins) / 30
+        sampled = [joins[int(i * step)] for i in range(30)]
+    else:
+        sampled = joins
+
+    issues = []
+    for join_idx, join_ms in sampled:
+        try:
+            before_s = max(0, (join_ms - 150) / 1000)
+            before_e = join_ms / 1000
+            after_s = join_ms / 1000
+            after_e = (join_ms + 150) / 1000
+
+            rms_vals = []
+            for ss, se in [(before_s, before_e), (after_s, after_e)]:
+                r = subprocess.run(
+                    ['ffmpeg', '-i', wav_path, '-ss', f'{ss:.3f}',
+                     '-to', f'{se:.3f}', '-af', 'volumedetect',
+                     '-f', 'null', '-'],
+                    capture_output=True, text=True, timeout=10,
+                )
+                m = re.search(r'mean_volume:\s*(-?[\d.]+)', r.stderr)
+                rms_vals.append(float(m.group(1)) if m else -60.0)
+
+            if len(rms_vals) == 2:
+                rms_diff = abs(rms_vals[0] - rms_vals[1])
+                if rms_diff > 6.0:
+                    issues.append({
+                        'join_idx': join_idx,
+                        'output_ms': join_ms,
+                        'issue': 'rms_jump',
+                        'rms_diff_db': rms_diff,
+                        'rms_before': rms_vals[0],
+                        'rms_after': rms_vals[1],
+                    })
+        except Exception:
+            pass  # don't fail the edit for analysis errors
+
+    return issues
+
+
+def _verify_edit_transcription(wav_path, expected_words, keeps):
+    """Re-transcribe edited audio and compare against expected words.
+
+    Sends the edited WAV to AssemblyAI, gets a fresh transcript, and checks
+    for missing or garbled words near cut join points. Returns list of issues.
+    """
+    # Build output-timeline join positions
+    output_joins_ms = set()
+    pos = 0
+    for i, (s, e) in enumerate(keeps):
+        if i > 0:
+            output_joins_ms.add(pos)
+        pos += e - s
+
+    # Upload and transcribe the edited audio
+    try:
+        with open(wav_path, 'rb') as f:
+            audio_data = f.read()
+        upload_url = stream_bytes_to_assemblyai(audio_data)
+        # Start transcription with simpler config (no disfluencies needed)
+        resp = requests.post(
+            "https://api.assemblyai.com/v2/transcript",
+            json={
+                "audio_url": upload_url,
+                "speech_models": ["universal-2"],
+                "punctuate": True,
+                "format_text": True,
+            },
+            headers={
+                "authorization": ASSEMBLYAI_API_KEY,
+                "content-type": "application/json",
+            },
+        )
+        if resp.status_code != 200:
+            print(f"Re-transcription submit failed: {resp.status_code}")
+            return []
+        tx_id = resp.json().get('id')
+        if not tx_id:
+            return []
+
+        # Poll for completion (max 120s)
+        for _ in range(40):
+            time.sleep(3)
+            tx_data = get_transcription(tx_id)
+            status = tx_data.get('status')
+            if status == 'completed':
+                break
+            if status == 'error':
+                print(f"Re-transcription failed: {tx_data.get('error')}")
+                return []
+        else:
+            print("Re-transcription timed out after 120s")
+            return []
+
+        new_words = tx_data.get('words', [])
+        if not new_words:
+            return []
+
+    except Exception as e:
+        print(f"Re-transcription error: {e}")
+        return []
+
+    # Align re-transcribed words to expected words and find issues near joins
+    from difflib import SequenceMatcher
+
+    # Build expected word list with output-timeline timestamps
+    expected = []
+    seg_offset = 0
+    seg_idx = 0
+    for w in expected_words:
+        ws = w.get('start', 0)
+        # Find which segment this word falls in
+        while seg_idx < len(keeps) and ws >= keeps[seg_idx][1]:
+            seg_offset += keeps[seg_idx][1] - keeps[seg_idx][0]
+            seg_idx += 1
+        if seg_idx < len(keeps):
+            output_ms = seg_offset + (ws - keeps[seg_idx][0])
+        else:
+            output_ms = seg_offset
+        expected.append({
+            'text': w.get('text', '').lower().strip('.,!?;:\'"'),
+            'output_ms': output_ms,
+        })
+
+    # Walk both lists with sliding window alignment
+    issues = []
+    new_idx = 0
+    for exp in expected:
+        # Is this word near a join point? (within 300ms)
+        near_join = any(abs(exp['output_ms'] - j) < 300 for j in output_joins_ms)
+        if not near_join:
+            continue
+
+        # Find best match in new transcript within a window
+        best_ratio = 0
+        best_conf = 1.0
+        best_text = ''
+        search_ms = exp['output_ms']
+        for ni in range(max(0, new_idx - 3), min(len(new_words), new_idx + 6)):
+            nw = new_words[ni]
+            nw_text = nw.get('text', '').lower().strip('.,!?;:\'"')
+            ratio = SequenceMatcher(None, exp['text'], nw_text).ratio()
+            # Also check timing proximity (within 500ms)
+            nw_start = nw.get('start', 0)
+            if abs(nw_start - search_ms) < 500 and ratio > best_ratio:
+                best_ratio = ratio
+                best_conf = nw.get('confidence', 1.0)
+                best_text = nw_text
+
+        # Find the join this word is closest to
+        closest_join_idx = 0
+        closest_dist = float('inf')
+        pos = 0
+        for ki in range(len(keeps)):
+            if ki > 0:
+                d = abs(exp['output_ms'] - pos)
+                if d < closest_dist:
+                    closest_dist = d
+                    closest_join_idx = ki
+            pos += keeps[ki][1] - keeps[ki][0]
+
+        if best_ratio < 0.5:
+            issues.append({
+                'join_idx': closest_join_idx,
+                'output_ms': exp['output_ms'],
+                'issue': 'missing_word',
+                'expected_word': exp['text'],
+                'got_word': best_text,
+                'confidence': best_conf,
+            })
+        elif best_conf < 0.6:
+            issues.append({
+                'join_idx': closest_join_idx,
+                'output_ms': exp['output_ms'],
+                'issue': 'low_confidence',
+                'expected_word': exp['text'],
+                'got_word': best_text,
+                'confidence': best_conf,
+            })
+
+        # Advance new_idx roughly
+        if best_ratio > 0.5:
+            for ni in range(max(0, new_idx - 3), min(len(new_words), new_idx + 6)):
+                nw_text = new_words[ni].get('text', '').lower().strip('.,!?;:\'"')
+                if SequenceMatcher(None, exp['text'], nw_text).ratio() == best_ratio:
+                    new_idx = ni + 1
+                    break
+
+    return issues
+
+
+def _compute_boundary_fixes(acoustic_issues, transcript_issues, keeps):
+    """Given detected issues, compute boundary adjustments.
+
+    Only adjusts the physical audio boundaries — never changes word-level
+    KEEP/CUT decisions. Fixes are conservative: widen fades first, shift
+    boundaries only if needed.
+
+    Returns:
+        adjusted_keeps: new list of (start_ms, end_ms) tuples
+        fixes_applied: list of description strings
+        per_segment_fade: dict mapping segment index to fade_ms override
+    """
+    adjusted = list(keeps)
+    per_segment_fade = {}
+    fixes = []
+
+    # Collect all problematic join indices
+    issues_by_join = {}
+    for issue in acoustic_issues + transcript_issues:
+        idx = issue['join_idx']
+        if idx not in issues_by_join:
+            issues_by_join[idx] = []
+        issues_by_join[idx].append(issue)
+
+    for join_idx, join_issues in sorted(issues_by_join.items()):
+        issue_types = [i['issue'] for i in join_issues]
+        has_rms = 'rms_jump' in issue_types
+        has_missing = 'missing_word' in issue_types or 'low_confidence' in issue_types
+
+        prev_idx = join_idx - 1
+        if prev_idx < 0 or join_idx >= len(adjusted):
+            continue
+
+        prev_start, prev_end = adjusted[prev_idx]
+        curr_start, curr_end = adjusted[join_idx]
+
+        # Step 1: Always widen fade for acoustic issues
+        if has_rms:
+            per_segment_fade[prev_idx] = max(per_segment_fade.get(prev_idx, 8), 20)
+            per_segment_fade[join_idx] = max(per_segment_fade.get(join_idx, 8), 20)
+            rms_issue = next(i for i in join_issues if i['issue'] == 'rms_jump')
+            fixes.append(
+                f"Join {join_idx}: widen fade 8→20ms "
+                f"(RMS jump {rms_issue['rms_diff_db']:.1f}dB)")
+
+        # Step 2: Shift boundaries for missing/garbled words
+        if has_missing:
+            for issue in join_issues:
+                if issue['issue'] not in ('missing_word', 'low_confidence'):
+                    continue
+                word = issue.get('expected_word', '?')
+                # Determine which side the word is on: end of prev or start of curr
+                # If output_ms is before the join, word is at end of prev segment
+                output_ms = issue.get('output_ms', 0)
+                pos = sum(adjusted[k][1] - adjusted[k][0] for k in range(join_idx))
+
+                SHIFT = 30  # ms
+                if output_ms < pos:
+                    # Word at end of previous segment — extend it
+                    new_end = min(prev_end + SHIFT, curr_start - 30)
+                    if new_end > prev_end and new_end - prev_start >= 100:
+                        adjusted[prev_idx] = (prev_start, new_end)
+                        fixes.append(
+                            f"Join {join_idx}: extend prev segment +{SHIFT}ms "
+                            f"('{word}' at end)")
+                else:
+                    # Word at start of current segment — start earlier
+                    new_start = max(curr_start - SHIFT, prev_end + 30)
+                    if new_start < curr_start and curr_end - new_start >= 100:
+                        adjusted[join_idx] = (new_start, curr_end)
+                        fixes.append(
+                            f"Join {join_idx}: shift start -{SHIFT}ms "
+                            f"('{word}' at start)")
+
+        # Step 3: For RMS jumps that are very harsh (>10dB), also shift
+        if has_rms and not has_missing:
+            rms_issue = next(i for i in join_issues if i['issue'] == 'rms_jump')
+            if rms_issue['rms_diff_db'] > 10.0:
+                SHIFT = 30
+                # Trim from the louder side
+                if rms_issue['rms_before'] > rms_issue['rms_after']:
+                    # Loud before, quiet after — trim end of prev
+                    new_end = max(prev_start + 100, prev_end - SHIFT)
+                    if new_end < prev_end:
+                        adjusted[prev_idx] = (prev_start, new_end)
+                        fixes.append(
+                            f"Join {join_idx}: trim prev segment -{SHIFT}ms "
+                            f"(RMS {rms_issue['rms_diff_db']:.1f}dB)")
+                else:
+                    # Quiet before, loud after — trim start of curr
+                    new_start = min(curr_end - 100, curr_start + SHIFT)
+                    if new_start > curr_start:
+                        adjusted[join_idx] = (new_start, curr_end)
+                        fixes.append(
+                            f"Join {join_idx}: trim curr start +{SHIFT}ms "
+                            f"(RMS {rms_issue['rms_diff_db']:.1f}dB)")
+
+    return adjusted, fixes, per_segment_fade
+
+
+def _iterate_join_refinement(audio_path, wav_path, keeps, words):
+    """Phase 4: Verify join quality and iteratively refine boundaries.
+
+    After the initial ffmpeg export, analyzes each join point for acoustic
+    issues (RMS jumps, clicks) and optionally re-transcribes to check for
+    clipped words. Applies fixes (wider fades, shifted boundaries) and
+    re-exports. Max 3 iterations — each fixes fewer issues than the last.
+
+    Word-level KEEP/CUT decisions are never changed. Only the physical
+    audio boundaries (keeps list) are adjusted.
+    """
+    MAX_ITERATIONS = 3
+    verify_tx = os.environ.get('VERIFY_EDIT_TRANSCRIPTION') == '1'
+    expected_keep_words = [w for w in words if w.get('edit_action') == 'keep']
+
+    for iteration in range(MAX_ITERATIONS):
+        # Acoustic analysis at join points
+        acoustic_issues = _analyze_join_points(wav_path, keeps)
+
+        # Optional re-transcription verification (first iteration only — expensive)
+        transcript_issues = []
+        if verify_tx and iteration == 0:
+            print("Re-transcribing edited audio for verification...")
+            transcript_issues = _verify_edit_transcription(
+                wav_path, expected_keep_words, keeps)
+            if transcript_issues:
+                print(f"Re-transcription found {len(transcript_issues)} issues near joins")
+
+        all_issues = acoustic_issues + transcript_issues
+        if not all_issues:
+            if iteration == 0:
+                print(f"Join refinement: all {len(keeps) - 1} joins pass on first check")
+            else:
+                print(f"Join refinement: clean after {iteration + 1} iterations")
+            break
+
+        print(f"Join refinement pass {iteration + 1}: "
+              f"{len(acoustic_issues)} acoustic + {len(transcript_issues)} transcript issues")
+
+        # Compute fixes
+        keeps, fixes, per_segment_fade = _compute_boundary_fixes(
+            acoustic_issues, transcript_issues, keeps)
+
+        if not fixes:
+            print(f"Join refinement: no fixable issues, stopping")
+            break
+
+        for desc in fixes:
+            print(f"  {desc}")
+
+        # Re-export with adjusted boundaries
+        wav_path = _ffmpeg_concat_segments(
+            audio_path, keeps, per_segment_fade=per_segment_fade)
+    else:
+        print(f"Join refinement: reached max iterations ({MAX_ITERATIONS})")
+
+    return keeps, wav_path
+
+
 def apply_audio_edits(audio_path, cuts_ms, words=None, transcript_id=None):
     """
     Remove segments from audio using word-level edit model + ffmpeg.
@@ -2380,118 +2812,12 @@ IMPORTANT: Only flag CLEAR problems. Natural speech patterns, minor awkwardness,
     remaining_ms = total_ms - removed_ms
     print(f"Segments: {len(keeps)} keep-segments, removed {removed_ms}ms, {remaining_ms}ms remaining")
 
-    # ── PHASE 3: ffmpeg export ──
-    # (old pipeline code removed — replaced by word-level phases above)
+    # ── PHASE 3: ffmpeg export + iteration loop ──
+    wav_path = _ffmpeg_concat_segments(audio_path, keeps)
 
-    # Build ffmpeg filter_complex: trim each segment, apply fade-out/fade-in at
-    # cut boundaries, then concatenate. This avoids the crossfade approach which
-    # overlaps two audio environments and sounds "stitched together." Instead,
-    # each segment fades out cleanly at the end and fades in at the start — like
-    # a human editor would do. No audio overlap means no blending artifacts.
-    FADE_MS = 8  # 8ms micro-fade — just enough to prevent clicks, short enough
-                  # to be inaudible. Human editors use <10ms fades for invisible cuts.
-    FADE_S = FADE_MS / 1000
-    filter_parts = []
-    for i, (start, end) in enumerate(keeps):
-        start_s = start / 1000
-        end_s = end / 1000
-        seg_dur = end_s - start_s
-        chain = [f"atrim={start_s}:{end_s}", "asetpts=N/SR/TB"]
-        # Apply fade-in at start and fade-out at end of each segment
-        # Skip fade-in on the very first segment and fade-out on the very last
-        if i > 0 and seg_dur > FADE_S * 3:
-            chain.append(f"afade=t=in:d={FADE_S}")
-        if i < len(keeps) - 1 and seg_dur > FADE_S * 3:
-            fade_start = max(0, seg_dur - FADE_S)
-            chain.append(f"afade=t=out:st={fade_start:.4f}:d={FADE_S}")
-        filter_parts.append(f"[0:a]{','.join(chain)}[s{i}]")
-
-    if len(keeps) == 1:
-        full_filter = ";".join(filter_parts) + ";[s0]acopy[out]"
-    else:
-        # Concatenate all segments (no overlap — just sequential join)
-        full_filter = ";".join(filter_parts)
-        labels = "".join(f"[s{i}]" for i in range(len(keeps)))
-        full_filter += f";{labels}concat=n={len(keeps)}:v=0:a=1[out]"
-
-    # Write filter to script file to avoid command-line length limits
-    filter_path = audio_path + '_filter.txt'
-    wav_path = audio_path.rsplit('.', 1)[0] + '_edited.wav'
-    try:
-        with open(filter_path, 'w') as f:
-            f.write(full_filter)
-
-        result = subprocess.run(
-            ['ffmpeg', '-y', '-i', audio_path,
-             '-filter_complex_script', filter_path,
-             '-map', '[out]', '-f', 'wav', wav_path],
-            capture_output=True, text=True, timeout=600,
-        )
-        if result.returncode != 0:
-            raise Exception(f"ffmpeg edit failed: {result.stderr[-500:]}")
-    finally:
-        if os.path.exists(filter_path):
-            os.remove(filter_path)
-
-    print(f"Exported: {wav_path} ({remaining_ms}ms, {os.path.getsize(wav_path) // 1024}KB)")
-
-    # ── QUALITY GATE: Post-edit level continuity check ──
-    # Analyze the edited WAV for RMS level discontinuities at join points.
-    # Measures RMS of 150ms windows before and after each cut join. If the
-    # level jumps by more than 8dB, the cut created a harsh transition that
-    # a human editor would smooth out. In that case, report the issues.
-    if len(keeps) > 1:
-        # Calculate output-timeline positions of each join
-        output_pos_ms = 0
-        joins = []
-        for i in range(len(keeps)):
-            if i > 0:
-                joins.append(output_pos_ms)
-            output_pos_ms += keeps[i][1] - keeps[i][0]
-
-        # Sample up to 20 join points (evenly spaced if there are many)
-        if len(joins) > 20:
-            step = len(joins) / 20
-            sampled = [joins[int(i * step)] for i in range(20)]
-        else:
-            sampled = joins
-
-        harsh_count = 0
-        for join_ms in sampled:
-            try:
-                # Measure RMS of 150ms before the join
-                before_s = max(0, (join_ms - 150) / 1000)
-                before_e = join_ms / 1000
-                # Measure RMS of 150ms after the join
-                after_s = join_ms / 1000
-                after_e = (join_ms + 150) / 1000
-
-                rms_vals = []
-                for start_s, end_s in [(before_s, before_e), (after_s, after_e)]:
-                    r = subprocess.run(
-                        ['ffmpeg', '-i', wav_path, '-ss', f'{start_s:.3f}',
-                         '-to', f'{end_s:.3f}', '-af', 'volumedetect',
-                         '-f', 'null', '-'],
-                        capture_output=True, text=True, timeout=10,
-                    )
-                    # Parse mean_volume from stderr
-                    import re
-                    m = re.search(r'mean_volume:\s*(-?[\d.]+)', r.stderr)
-                    rms_vals.append(float(m.group(1)) if m else -60.0)
-
-                if len(rms_vals) == 2:
-                    diff = abs(rms_vals[0] - rms_vals[1])
-                    if diff > 8.0:
-                        harsh_count += 1
-                        print(f"Quality gate: harsh transition at {join_ms}ms "
-                              f"(level jump {diff:.1f}dB: {rms_vals[0]:.1f} → {rms_vals[1]:.1f})")
-            except Exception:
-                pass  # don't fail the edit for quality check errors
-
-        if harsh_count:
-            print(f"Quality gate: {harsh_count}/{len(sampled)} sampled joins have level jumps >8dB")
-        else:
-            print(f"Quality gate: all {len(sampled)} sampled joins pass level continuity check")
+    # ── PHASE 4: Iteration loop — verify and refine join points ──
+    if len(keeps) > 1 and words:
+        keeps, wav_path = _iterate_join_refinement(audio_path, wav_path, keeps, words)
 
     return wav_path
 

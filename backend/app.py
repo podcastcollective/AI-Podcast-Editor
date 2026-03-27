@@ -1770,14 +1770,41 @@ def _build_word_edit_map(words, cuts_ms, stumbles, meta_comments, stutters,
                     count += 1
         return count
 
-    # 1. Pre-chat: mark all words before opener
+    # 1. Pre-chat: mark all words before opener.
+    # Two detection paths:
+    #   a) _find_opener_ms detects pre-chat phrases AND an opener
+    #   b) Claude included a pre-chat cut (start < 60s) — use that as confirmation
+    # If EITHER path fires, mark all words before the opener as CUT.
     opener_ms, has_prechat = _find_opener_ms(words)
+
+    # Check if Claude included a pre-chat cut (any cut starting near 0)
+    claude_prechat_end = 0
+    for s, e in cuts_ms:
+        s, e = int(s), int(e)
+        if s < 2000 and e > 2000:  # starts near beginning, extends past 2s
+            claude_prechat_end = max(claude_prechat_end, e)
+
+    # Use the best available information
+    if opener_ms is None and claude_prechat_end > 0:
+        # Claude found pre-chat but our phrase detection missed it.
+        # Use Claude's cut end as the opener position.
+        opener_ms = claude_prechat_end
+        has_prechat = True
+        print(f"Pre-chat: using Claude's cut end {claude_prechat_end}ms as opener (phrase detection missed it)")
+    elif opener_ms is not None and claude_prechat_end > 0:
+        # Both detected — use whichever gives the later cut point
+        # (Claude may have found content our phrase detection missed)
+        if claude_prechat_end > opener_ms:
+            print(f"Pre-chat: Claude's cut extends past our opener ({claude_prechat_end}ms > {opener_ms}ms), using opener")
+        has_prechat = True
+
     if opener_ms is not None and has_prechat:
         prechat_count = 0
-        safety_buffer = 500  # ms before opener to preserve
-        cut_before = max(0, opener_ms - safety_buffer)
+        # Mark all words whose START is before the opener as CUT.
+        # In word-level model we don't need a safety buffer — we just keep
+        # any word that starts at or after the opener timestamp.
         for w in words:
-            if w.get('end', 0) <= cut_before:
+            if w.get('start', 0) < opener_ms:
                 w['edit_action'] = 'cut'
                 w['cut_reason'] = 'prechat'
                 prechat_count += 1

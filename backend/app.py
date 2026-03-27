@@ -586,9 +586,8 @@ def _find_stumbles(words):
                 return True
             # One word is very short (1-2 chars) AND shares at least 1 leading
             # char with the other — likely a fragment/mispronunciation.
-            # Without the prefix check, unrelated short words like "in" would
-            # match "we're", causing false positives.
-            if (len(a) <= 2 or len(b) <= 2) and len(phrase_a) >= 3:
+            # e.g. "ta"/"tier" in "ta leaders"/"tier leaders"
+            if (len(a) <= 2 or len(b) <= 2):
                 short, long = (a, b) if len(a) <= len(b) else (b, a)
                 if short and long and short[0] == long[0]:
                     return True
@@ -713,7 +712,7 @@ def _find_stumbles(words):
             if words[j].get('speaker', '?') != speaker:
                 continue
             pair_b = (clean(words[j]), clean(words[j + 1]))
-            if pair_a == pair_b:
+            if pair_a == pair_b or _fuzzy_phrase_match(pair_a, pair_b):
                 # Check time proximity (within 4s)
                 t_start = words[i].get('start', 0)
                 t_end = words[j + 1].get('end', 0)
@@ -1540,7 +1539,7 @@ Below is the POST-EDIT transcript — this is what the listener will hear. Each 
 
 LOOK FOR ONLY THESE SPECIFIC ISSUES:
 
-1. MISPRONOUNCED WORDS: Speaker says a word wrong then immediately corrects it ("tier leaders... TA leaders"). Cut ONLY the mispronounced word(s), keep the correction.
+1. MISPRONOUNCED WORDS: Speaker says a word wrong then immediately corrects it ("tier leaders... TA leaders"). Cut ONLY the mispronounced word(s), keep the correction. CRITICAL: The mispronounced word must be in the SAME grammatical position as the correction — i.e., it replaces the same slot in the sentence. Do NOT cut a word from an earlier phrase just because it sounds vaguely similar to a later word. For example, in "the first thing I think about in this is TA leaders", "thing" is NOT a mispronunciation of "TA" — it belongs to a different phrase ("the first thing").
 
 2. META-COMMENTARY: Speaker says "sorry", "excuse me", "my voice is going" etc. Cut the meta-commentary only.
 
@@ -1558,6 +1557,7 @@ CRITICAL RULES — DO NOT VIOLATE:
 - Do NOT cut sentences with a long pause in them — pauses are natural.
 - Maximum cut length: 8 seconds. If you think something longer needs cutting, you're probably cutting content.
 - Only make cuts where you are VERY confident (>90%) the result sounds better.
+- SAFETY CHECK: Before making any cut, mentally read the sentence with the cut applied. If the remaining words do not form a complete, grammatical sentence, do NOT make the cut.
 - When in doubt, DO NOT CUT. It is better to leave a minor disfluency than to remove meaningful content.
 - If you find no clear issues, return a single Note saying "Review pass: no additional edits needed."
 

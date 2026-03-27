@@ -1962,6 +1962,42 @@ def apply_audio_edits(audio_path, cuts_ms, words=None, transcript_id=None):
                 print(f"Injecting gap trim: {s}ms-{e}ms ({gap_info['gap_ms']}ms gap between '{gap_info['before_word']}' and '{gap_info['after_word']}')")
                 cuts_ms.append((s, e))
 
+    # ── Snapshot intended cuts for post-modification verification ──
+    # Record what each pre-detected cut intended to remove, so we can verify
+    # that pacing/expansion/safety didn't erode critical removals.
+    intended_removals = []
+    for stum in stumbles:
+        s, e = int(stum['stumble_start_ms']), int(stum['clean_start_ms'])
+        if e > s:
+            # Collect the words this cut is supposed to remove
+            cut_words = [w for w in (words or [])
+                         if w.get('start', 0) >= s and w.get('end', 0) <= e]
+            intended_removals.append({
+                'type': 'stumble', 'start': s, 'end': e,
+                'phrase': stum.get('phrase', ''),
+                'words': [w.get('text', '') for w in cut_words],
+            })
+    for stut in stutters:
+        s, e = int(stut['start_ms']), int(stut['end_ms'])
+        if e > s:
+            cut_words = [w for w in (words or [])
+                         if w.get('start', 0) >= s and w.get('end', 0) <= e]
+            intended_removals.append({
+                'type': 'stutter', 'start': s, 'end': e,
+                'phrase': f"{stut.get('partial', '')} → {stut.get('full', '')}",
+                'words': [w.get('text', '') for w in cut_words],
+            })
+    for meta in meta_comments:
+        s, e = int(meta['start_ms']), int(meta['end_ms'])
+        if e > s:
+            cut_words = [w for w in (words or [])
+                         if w.get('start', 0) >= s and w.get('end', 0) <= e]
+            intended_removals.append({
+                'type': 'meta', 'start': s, 'end': e,
+                'phrase': meta.get('text', '')[:60],
+                'words': [w.get('text', '') for w in cut_words],
+            })
+
     # Clamp, sort, merge overlapping cuts
     adjusted = []
     for s, e in cuts_ms:
@@ -2311,6 +2347,79 @@ def apply_audio_edits(audio_path, cuts_ms, words=None, transcript_id=None):
         if pacing_fixes:
             print(f"Quality gate: widened {pacing_fixes} cuts where words were <{MIN_WORD_GAP_MS}ms apart")
 
+    # ── VERIFICATION: compare final cuts against intended removals ──
+    # After all modifications (pacing, gap expansion, word protection, safety),
+    # check that every word we intended to remove is still inside a cut.
+    # If pacing/padding eroded a cut so that stumble words survived, auto-fix
+    # by extending the cut back to cover them.
+    if intended_removals and words:
+        verified = 0
+        leaked = 0
+        auto_fixed = 0
+        for removal in intended_removals:
+            # Check each word that was supposed to be removed
+            for word_text in removal['words']:
+                # Find the actual word object to get its timestamps
+                for w in words:
+                    if (w.get('text', '') == word_text and
+                            w.get('start', 0) >= removal['start'] - 50 and
+                            w.get('end', 0) <= removal['end'] + 50):
+                        ws, we = w.get('start', 0), w.get('end', 0)
+                        # Is this word still inside a final cut?
+                        still_cut = False
+                        for cut in merged:
+                            if ws >= cut[0] and we <= cut[1]:
+                                still_cut = True
+                                break
+                        if still_cut:
+                            verified += 1
+                        else:
+                            leaked += 1
+                            # Auto-fix: find the nearest cut and extend it to cover this word
+                            best_cut = None
+                            best_dist = float('inf')
+                            for cut in merged:
+                                # Word is just outside the cut end (pacing shrunk it)
+                                if cut[1] <= ws and ws - cut[1] < 500:
+                                    dist = ws - cut[1]
+                                    if dist < best_dist:
+                                        best_dist = dist
+                                        best_cut = cut
+                                # Word is just before the cut start (expansion missed it)
+                                elif cut[0] >= we and cut[0] - we < 500:
+                                    dist = cut[0] - we
+                                    if dist < best_dist:
+                                        best_dist = dist
+                                        best_cut = cut
+                            if best_cut is not None:
+                                if best_cut[1] <= ws:
+                                    # Extend cut end to cover this word
+                                    print(f"VERIFY FIX: extending cut end {best_cut[1]}ms→{we}ms "
+                                          f"to cover leaked {removal['type']} word '{word_text}'")
+                                    best_cut[1] = we
+                                else:
+                                    # Extend cut start to cover this word
+                                    print(f"VERIFY FIX: extending cut start {best_cut[0]}ms→{ws}ms "
+                                          f"to cover leaked {removal['type']} word '{word_text}'")
+                                    best_cut[0] = ws
+                                auto_fixed += 1
+                        break  # found the word, stop searching
+        print(f"Verification: {verified} words confirmed removed, "
+              f"{leaked} leaked ({auto_fixed} auto-fixed)")
+        if leaked > auto_fixed:
+            print(f"WARNING: {leaked - auto_fixed} intended words could not be auto-fixed")
+
+        # Re-sort and re-merge after any fixes
+        if auto_fixed > 0:
+            merged.sort(key=lambda x: x[0])
+            re_merged = []
+            for s, e in merged:
+                if re_merged and s <= re_merged[-1][1] + 150:
+                    re_merged[-1][1] = max(re_merged[-1][1], e)
+                else:
+                    re_merged.append([s, e])
+            merged = re_merged
+
     # Calculate keep segments
     keeps = []
     pos = 0
@@ -2324,6 +2433,26 @@ def apply_audio_edits(audio_path, cuts_ms, words=None, transcript_id=None):
     removed_ms = sum(e - s for s, e in merged)
     remaining_ms = total_ms - removed_ms
     print(f"Cuts: {len(merged)} cuts, removed {removed_ms}ms, {remaining_ms}ms remaining")
+
+    # ── Content diff: log what's removed and what the join sounds like ──
+    # For each cut, show the words removed and the 3 words before/after the cut.
+    # This makes it easy to verify that cuts don't create nonsensical joins.
+    if words and merged:
+        print("--- Content diff (what listener hears at each cut boundary) ---")
+        for i, (cs, ce) in enumerate(merged):
+            # Words before the cut (last 3)
+            before = [w for w in words if w.get('end', 0) <= cs]
+            before_text = ' '.join(w.get('text', '') for w in before[-3:])
+            # Words removed by the cut
+            removed = [w for w in words
+                       if w.get('start', 0) >= cs and w.get('end', 0) <= ce]
+            removed_text = ' '.join(w.get('text', '') for w in removed)
+            # Words after the cut (first 3)
+            after = [w for w in words if w.get('start', 0) >= ce]
+            after_text = ' '.join(w.get('text', '') for w in after[:3])
+            print(f"  Cut [{i}] {cs}-{ce}ms ({(ce-cs)/1000:.1f}s): "
+                  f"...{before_text} [✂ {removed_text}] {after_text}...")
+        print("--- End content diff ---")
 
     if not keeps:
         keeps = [(0, min(1000, total_ms))]

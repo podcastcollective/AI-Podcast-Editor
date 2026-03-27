@@ -2450,6 +2450,93 @@ def apply_audio_edits(audio_path, cuts_ms, words=None, transcript_id=None):
                     re_merged.append([s, e])
             merged = re_merged
 
+    # ── TRANSCRIPT COMPARISON: pre-edit vs post-edit ──
+    # Build the "intended" surviving transcript from the original cuts (before
+    # pacing/expansion/safety modified them), and the "final" surviving transcript
+    # from the modified merged cuts. Any word that survives in the intended version
+    # but was accidentally cut in the final version is a bug — the modification
+    # pipeline swallowed content that should have been kept.
+    if words and merged:
+        # Build intended surviving words (from the original intended_removals)
+        intended_cut_ranges = [(r['start'], r['end']) for r in intended_removals]
+        # Also include the original Claude cuts (before injection expanded them)
+        # These are already in intended_removals as type='claude'
+
+        # Sort and merge intended ranges
+        intended_cut_ranges.sort()
+        intended_merged = []
+        for s, e in intended_cut_ranges:
+            if intended_merged and s <= intended_merged[-1][1] + 150:
+                intended_merged[-1] = (intended_merged[-1][0], max(intended_merged[-1][1], e))
+            else:
+                intended_merged.append((s, e))
+
+        def _word_survives(w, cut_list):
+            ws, we = w.get('start', 0), w.get('end', 0)
+            for cs, ce in cut_list:
+                if ws >= cs and we <= ce:
+                    return False
+            return True
+
+        intended_surviving = [w for w in words if _word_survives(w, intended_merged)]
+        final_surviving = [w for w in words if _word_survives(w, merged)]
+
+        # Find words that should survive (in intended) but were accidentally cut (not in final)
+        final_cut_set = set()
+        for w in words:
+            if not _word_survives(w, merged):
+                final_cut_set.add(id(w))
+
+        collateral_words = []
+        for w in intended_surviving:
+            if id(w) in final_cut_set:
+                collateral_words.append(w)
+
+        if collateral_words:
+            print(f"TRANSCRIPT COMPARISON: {len(collateral_words)} words accidentally cut "
+                  f"by modification pipeline (should have survived):")
+            for w in collateral_words:
+                ws = w.get('start', 0)
+                text = w.get('text', '')
+                # Find which final cut swallowed this word
+                for cs, ce in merged:
+                    if ws >= cs and w.get('end', 0) <= ce:
+                        print(f"  COLLATERAL: '{text}' at {ws}ms swallowed by cut {cs}-{ce}ms")
+                        # Auto-fix: shrink the cut to exclude this word
+                        for cut in merged:
+                            if cut[0] == cs and cut[1] == ce:
+                                we = w.get('end', 0)
+                                if ws - cut[0] < cut[1] - we:
+                                    # Word is closer to cut start — move cut start past this word
+                                    new_start = we + 10
+                                    if new_start < cut[1]:
+                                        print(f"  AUTO-FIX: moving cut start {cut[0]}ms→{new_start}ms "
+                                              f"to preserve '{text}'")
+                                        cut[0] = new_start
+                                else:
+                                    # Word is closer to cut end — move cut end before this word
+                                    new_end = ws - 10
+                                    if new_end > cut[0]:
+                                        print(f"  AUTO-FIX: moving cut end {cut[1]}ms→{new_end}ms "
+                                              f"to preserve '{text}'")
+                                        cut[1] = new_end
+                                break
+                        break
+            # Re-sort and re-merge after fixes
+            merged.sort(key=lambda x: x[0])
+            re_merged = []
+            for s, e in merged:
+                if e <= s:
+                    continue  # cut was shrunk to nothing
+                if re_merged and s <= re_merged[-1][1] + 150:
+                    re_merged[-1][1] = max(re_merged[-1][1], e)
+                else:
+                    re_merged.append([s, e])
+            merged = re_merged
+            print(f"  Fixed {len(collateral_words)} collateral cuts")
+        else:
+            print("TRANSCRIPT COMPARISON: OK — no accidental content loss")
+
     # Calculate keep segments
     keeps = []
     pos = 0
@@ -2470,14 +2557,11 @@ def apply_audio_edits(audio_path, cuts_ms, words=None, transcript_id=None):
     if words and merged:
         print("--- Content diff (what listener hears at each cut boundary) ---")
         for i, (cs, ce) in enumerate(merged):
-            # Words before the cut (last 3)
             before = [w for w in words if w.get('end', 0) <= cs]
             before_text = ' '.join(w.get('text', '') for w in before[-3:])
-            # Words removed by the cut
             removed = [w for w in words
                        if w.get('start', 0) >= cs and w.get('end', 0) <= ce]
             removed_text = ' '.join(w.get('text', '') for w in removed)
-            # Words after the cut (first 3)
             after = [w for w in words if w.get('start', 0) >= ce]
             after_text = ' '.join(w.get('text', '') for w in after[:3])
             print(f"  Cut [{i}] {cs}-{ce}ms ({(ce-cs)/1000:.1f}s): "

@@ -2126,60 +2126,77 @@ def _compute_audio_segments(words, total_ms):
 # ============================================================================
 
 def _ffmpeg_concat_segments(audio_path, keeps, fade_ms=8, per_segment_fade=None):
-    """Phase 3: trim each segment, apply micro-fades, concatenate.
+    """Phase 3: trim each segment, crossfade tight splices, concatenate.
+
+    Tight splices (filler removal, <200ms gap between segments) use a
+    crossfade that BLENDS the tail of one segment with the head of the
+    next, keeping energy constant through the transition. This is what
+    human editors do — it prevents the "dip to silence" artifact that
+    sequential fade-out + fade-in creates.
+
+    Natural gaps (>200ms, typically speaker transitions) get no fade at
+    all — the original audio already transitions cleanly.
 
     Args:
         audio_path: source audio file
         keeps: list of (start_ms, end_ms) tuples
-        fade_ms: default fade duration in ms (8ms = click prevention at natural gaps)
+        fade_ms: default fade duration in ms (unused for tight splices)
         per_segment_fade: optional dict mapping segment index to custom fade_ms
 
     Returns: path to exported WAV
     """
-    TIGHT_FADE_MS = 30  # longer fade for tight splices (filler removal)
+    XFADE_MS = 30   # crossfade duration for tight splices
     TIGHT_THRESHOLD = 200  # gaps below this are "tight splices"
 
     if per_segment_fade is None:
         per_segment_fade = {}
 
+    # Determine which joins are tight splices vs natural gaps
+    tight_joins = set()  # set of join indices (between segment i and i+1)
+    for i in range(len(keeps) - 1):
+        gap = keeps[i + 1][0] - keeps[i][1]
+        if gap < TIGHT_THRESHOLD:
+            tight_joins.add(i)
+
+    # For tight splices, extend segments to provide crossfade material.
+    # Each segment involved in a tight join gets extended by XFADE_MS on
+    # the appropriate side — the crossfade blends this overlapping audio.
+    adjusted = list(keeps)
+    for i in tight_joins:
+        s1, e1 = adjusted[i]
+        s2, e2 = adjusted[i + 1]
+        xfade = per_segment_fade.get(i + 1, XFADE_MS)
+        # Extend seg i's end and seg i+1's start into the gap
+        mid = (e1 + s2) // 2
+        adjusted[i] = (s1, min(mid + xfade, s2))
+        adjusted[i + 1] = (max(mid - xfade, e1), e2)
+
+    # Trim all segments
     filter_parts = []
-    for i, (start, end) in enumerate(keeps):
+    for i, (start, end) in enumerate(adjusted):
         start_s = start / 1000
         end_s = end / 1000
-        seg_dur = end_s - start_s
         chain = [f"atrim={start_s}:{end_s}", "asetpts=N/SR/TB"]
-
-        # Determine gap size to neighbours
-        gap_before = (start - keeps[i - 1][1]) if i > 0 else 9999
-        gap_after = (keeps[i + 1][0] - end) if i < len(keeps) - 1 else 9999
-
-        # Tight splices (filler/stutter removal, <200ms gap): use longer fade
-        # to smooth the level transition. Natural gaps (>200ms): skip fade
-        # entirely — the original audio already transitions cleanly.
-        if i > 0:
-            if gap_before < TIGHT_THRESHOLD:
-                seg_fade = per_segment_fade.get(i, TIGHT_FADE_MS)
-                fade_s = seg_fade / 1000
-                if seg_dur > fade_s * 3:
-                    # Exponential curve matches natural speech energy onset
-                    chain.append(f"afade=t=in:d={fade_s}:curve=exp")
-
-        if i < len(keeps) - 1:
-            if gap_after < TIGHT_THRESHOLD:
-                seg_fade = per_segment_fade.get(i, TIGHT_FADE_MS)
-                fade_s = seg_fade / 1000
-                if seg_dur > fade_s * 3:
-                    fade_start = max(0, seg_dur - fade_s)
-                    chain.append(f"afade=t=out:st={fade_start:.4f}:d={fade_s}:curve=exp")
-
         filter_parts.append(f"[0:a]{','.join(chain)}[s{i}]")
 
     if len(keeps) == 1:
         full_filter = ";".join(filter_parts) + ";[s0]acopy[out]"
     else:
+        # Chain segments together: acrossfade for tight joins, concat for natural gaps.
+        # Process left to right, accumulating into a running result.
         full_filter = ";".join(filter_parts)
-        labels = "".join(f"[s{i}]" for i in range(len(keeps)))
-        full_filter += f";{labels}concat=n={len(keeps)}:v=0:a=1[out]"
+        current = "s0"
+        for i in range(1, len(keeps)):
+            out_label = "out" if i == len(keeps) - 1 else f"m{i}"
+            if (i - 1) in tight_joins:
+                xfade = per_segment_fade.get(i, XFADE_MS)
+                xfade_s = xfade / 1000
+                full_filter += (f";[{current}][s{i}]acrossfade=d={xfade_s}:"
+                                f"c1=exp:c2=exp[{out_label}]")
+            else:
+                full_filter += (f";[{current}][s{i}]concat=n=2:v=0:a=1"
+                                f"[{out_label}]")
+            current = out_label
 
     filter_path = audio_path + '_filter.txt'
     wav_path = audio_path.rsplit('.', 1)[0] + '_edited.wav'

@@ -1999,8 +1999,9 @@ def _compute_audio_segments(words, total_ms):
 
     Returns list of (start_ms, end_ms) keep-segments ready for ffmpeg.
     """
-    TAIL_MS = 15   # preserve after last KEEP word before a cut
-    HEAD_MS = 15   # preserve before first KEEP word after a cut
+    TAIL_MS = 40   # preserve after last KEEP word before a cut — enough room tone
+                    # to prevent "to [uh] be" sounding like "to-be" after cut
+    HEAD_MS = 40   # preserve before first KEEP word after a cut
     MIN_GAP_MS = 60  # minimum gap to leave in the edit (natural pacing)
 
     # Build runs of consecutive KEEP words (a "segment")
@@ -2128,34 +2129,46 @@ def _ffmpeg_concat_segments(audio_path, keeps, fade_ms=8, per_segment_fade=None)
     Args:
         audio_path: source audio file
         keeps: list of (start_ms, end_ms) tuples
-        fade_ms: default fade duration in ms (8ms = inaudible click prevention)
+        fade_ms: default fade duration in ms (8ms = click prevention at natural gaps)
         per_segment_fade: optional dict mapping segment index to custom fade_ms
 
     Returns: path to exported WAV
     """
+    TIGHT_FADE_MS = 20  # longer fade for tight splices (filler removal)
+    TIGHT_THRESHOLD = 200  # gaps below this are "tight splices"
+
     if per_segment_fade is None:
         per_segment_fade = {}
 
     filter_parts = []
     for i, (start, end) in enumerate(keeps):
-        seg_fade = per_segment_fade.get(i, fade_ms)
-        fade_s = seg_fade / 1000
         start_s = start / 1000
         end_s = end / 1000
         seg_dur = end_s - start_s
         chain = [f"atrim={start_s}:{end_s}", "asetpts=N/SR/TB"]
-        # Only apply micro-fades at TIGHT splices where a filler/stutter was
-        # removed and two speech segments are now butted together. At natural
-        # gaps (>200ms between segments), the original audio already has a clean
-        # transition — adding a fade creates an audible energy dip ("ducking")
-        # that sounds unnatural at speaker transitions.
+
+        # Determine gap size to neighbours
         gap_before = (start - keeps[i - 1][1]) if i > 0 else 9999
         gap_after = (keeps[i + 1][0] - end) if i < len(keeps) - 1 else 9999
-        if i > 0 and seg_dur > fade_s * 3 and gap_before < 200:
-            chain.append(f"afade=t=in:d={fade_s}")
-        if i < len(keeps) - 1 and seg_dur > fade_s * 3 and gap_after < 200:
-            fade_start = max(0, seg_dur - fade_s)
-            chain.append(f"afade=t=out:st={fade_start:.4f}:d={fade_s}")
+
+        # Tight splices (filler/stutter removal, <200ms gap): use longer fade
+        # to smooth the level transition. Natural gaps (>200ms): skip fade
+        # entirely — the original audio already transitions cleanly.
+        if i > 0:
+            if gap_before < TIGHT_THRESHOLD:
+                seg_fade = per_segment_fade.get(i, TIGHT_FADE_MS)
+                fade_s = seg_fade / 1000
+                if seg_dur > fade_s * 3:
+                    chain.append(f"afade=t=in:d={fade_s}")
+
+        if i < len(keeps) - 1:
+            if gap_after < TIGHT_THRESHOLD:
+                seg_fade = per_segment_fade.get(i, TIGHT_FADE_MS)
+                fade_s = seg_fade / 1000
+                if seg_dur > fade_s * 3:
+                    fade_start = max(0, seg_dur - fade_s)
+                    chain.append(f"afade=t=out:st={fade_start:.4f}:d={fade_s}")
+
         filter_parts.append(f"[0:a]{','.join(chain)}[s{i}]")
 
     if len(keeps) == 1:

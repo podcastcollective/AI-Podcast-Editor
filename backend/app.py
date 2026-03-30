@@ -1911,6 +1911,28 @@ def _build_word_edit_map(words, cuts_ms, stumbles, meta_comments, stutters,
             if restored:
                 print(f"Word map: speaker boundary — restored {restored} words from non-dominant speaker")
 
+    # 8. Protect stumble "clean" versions: if a stumble was detected and we're
+    # keeping the corrected phrase, other cuts (Claude, review pass) must not
+    # have accidentally marked the clean version's words as CUT. Restore them.
+    restored_clean = 0
+    for stum in stumbles:
+        clean_s = int(stum.get('clean_start_ms', 0)) + 80  # undo the 80ms buffer
+        clean_e = int(stum.get('clean_end_ms', 0))
+        if clean_e <= clean_s:
+            continue
+        for w in words:
+            ws, we = w.get('start', 0), w.get('end', 0)
+            if ws >= clean_s - 50 and we <= clean_e + 50 and w['edit_action'] == 'cut':
+                # This word is in the clean version of a stumble — should be KEEP
+                if w['cut_reason'] != f"stumble:{stum.get('phrase', '')}":
+                    w['edit_action'] = 'keep'
+                    w['cut_reason'] = ''
+                    restored_clean += 1
+                    print(f"Word map: RESTORED '{w.get('text', '')}' at {ws}ms "
+                          f"— clean version of stumble '{stum.get('phrase', '')}'")
+    if restored_clean:
+        print(f"Word map: restored {restored_clean} words from stumble clean versions")
+
     # Summary
     cut_count = sum(1 for w in words if w['edit_action'] == 'cut')
     keep_count = sum(1 for w in words if w['edit_action'] == 'keep')
@@ -2076,6 +2098,23 @@ def _compute_audio_segments(words, total_ms):
     if not keeps:
         keeps = [(0, min(1000, total_ms))]
 
+    # Merge segments separated by micro-fragments (<60ms of audio between them).
+    # These are breath/room-tone scraps that survived word-level marking but create
+    # choppy, jumpy audio when left as separate segments with fades on each end.
+    merged = [keeps[0]]
+    for s, e in keeps[1:]:
+        prev_s, prev_e = merged[-1]
+        gap = s - prev_e
+        if gap < 60:
+            # Merge: extend previous segment to cover both
+            merged[-1] = (prev_s, e)
+        else:
+            merged.append((s, e))
+    if len(merged) < len(keeps):
+        print(f"Segments: merged {len(keeps) - len(merged)} micro-fragment gaps "
+              f"({len(keeps)} → {len(merged)} segments)")
+    keeps = merged
+
     return keeps
 
 
@@ -2105,9 +2144,16 @@ def _ffmpeg_concat_segments(audio_path, keeps, fade_ms=8, per_segment_fade=None)
         end_s = end / 1000
         seg_dur = end_s - start_s
         chain = [f"atrim={start_s}:{end_s}", "asetpts=N/SR/TB"]
-        if i > 0 and seg_dur > fade_s * 3:
+        # Only apply micro-fades at TIGHT splices where a filler/stutter was
+        # removed and two speech segments are now butted together. At natural
+        # gaps (>200ms between segments), the original audio already has a clean
+        # transition — adding a fade creates an audible energy dip ("ducking")
+        # that sounds unnatural at speaker transitions.
+        gap_before = (start - keeps[i - 1][1]) if i > 0 else 9999
+        gap_after = (keeps[i + 1][0] - end) if i < len(keeps) - 1 else 9999
+        if i > 0 and seg_dur > fade_s * 3 and gap_before < 200:
             chain.append(f"afade=t=in:d={fade_s}")
-        if i < len(keeps) - 1 and seg_dur > fade_s * 3:
+        if i < len(keeps) - 1 and seg_dur > fade_s * 3 and gap_after < 200:
             fade_start = max(0, seg_dur - fade_s)
             chain.append(f"afade=t=out:st={fade_start:.4f}:d={fade_s}")
         filter_parts.append(f"[0:a]{','.join(chain)}[s{i}]")

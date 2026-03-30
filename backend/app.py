@@ -1999,9 +1999,11 @@ def _compute_audio_segments(words, total_ms):
 
     Returns list of (start_ms, end_ms) keep-segments ready for ffmpeg.
     """
-    TAIL_MS = 40   # preserve after last KEEP word before a cut — enough room tone
-                    # to prevent "to [uh] be" sounding like "to-be" after cut
-    HEAD_MS = 40   # preserve before first KEEP word after a cut
+    TAIL_MS = 60   # preserve after last KEEP word before a cut — enough room tone
+                    # to prevent "to [uh] be" sounding like "to-be" after cut.
+                    # 60ms captures the natural word-end decay.
+    HEAD_MS = 60   # preserve before first KEEP word after a cut — captures
+                    # the natural pre-onset breath/room tone.
     MIN_GAP_MS = 60  # minimum gap to leave in the edit (natural pacing)
 
     # Build runs of consecutive KEEP words (a "segment")
@@ -2134,7 +2136,7 @@ def _ffmpeg_concat_segments(audio_path, keeps, fade_ms=8, per_segment_fade=None)
 
     Returns: path to exported WAV
     """
-    TIGHT_FADE_MS = 20  # longer fade for tight splices (filler removal)
+    TIGHT_FADE_MS = 30  # longer fade for tight splices (filler removal)
     TIGHT_THRESHOLD = 200  # gaps below this are "tight splices"
 
     if per_segment_fade is None:
@@ -2159,7 +2161,8 @@ def _ffmpeg_concat_segments(audio_path, keeps, fade_ms=8, per_segment_fade=None)
                 seg_fade = per_segment_fade.get(i, TIGHT_FADE_MS)
                 fade_s = seg_fade / 1000
                 if seg_dur > fade_s * 3:
-                    chain.append(f"afade=t=in:d={fade_s}")
+                    # Exponential curve matches natural speech energy onset
+                    chain.append(f"afade=t=in:d={fade_s}:curve=exp")
 
         if i < len(keeps) - 1:
             if gap_after < TIGHT_THRESHOLD:
@@ -2167,7 +2170,7 @@ def _ffmpeg_concat_segments(audio_path, keeps, fade_ms=8, per_segment_fade=None)
                 fade_s = seg_fade / 1000
                 if seg_dur > fade_s * 3:
                     fade_start = max(0, seg_dur - fade_s)
-                    chain.append(f"afade=t=out:st={fade_start:.4f}:d={fade_s}")
+                    chain.append(f"afade=t=out:st={fade_start:.4f}:d={fade_s}:curve=exp")
 
         filter_parts.append(f"[0:a]{','.join(chain)}[s{i}]")
 

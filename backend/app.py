@@ -4693,5 +4693,118 @@ def export_transcript_google_doc(transcript_id):
         return jsonify({"error": str(e)}), 500
 
 
+@app.route('/api/export-batch-transcripts-google-doc', methods=['POST', 'OPTIONS'])
+def export_batch_transcripts_google_doc():
+    """Export multiple transcripts to Google Docs.
+
+    Accepts: {"transcripts": [{"transcript_id": "...", "filename": "..."}, ...],
+              "mode": "single"|"multi"}
+    mode "single" = one Google Doc with all transcripts
+    mode "multi" = one Google Doc per transcript (returns list of URLs)
+    """
+    if request.method == 'OPTIONS':
+        return '', 204
+    try:
+        from google.oauth2.credentials import Credentials
+        from googleapiclient.discovery import build
+
+        if not ASSEMBLYAI_API_KEY:
+            return jsonify({"error": "ASSEMBLYAI_API_KEY not configured"}), 500
+        if not _GOOGLE_REFRESH_TOKEN:
+            return jsonify({"error": "GOOGLE_REFRESH_TOKEN not configured"}), 500
+
+        data = request.json
+        transcripts = data.get('transcripts', [])
+        mode = data.get('mode', 'single')
+        if not transcripts:
+            return jsonify({"error": "No transcripts provided"}), 400
+
+        creds = Credentials(
+            token=None,
+            refresh_token=_GOOGLE_REFRESH_TOKEN,
+            token_uri='https://oauth2.googleapis.com/token',
+            client_id=os.environ.get('GOOGLE_CLIENT_ID', ''),
+            client_secret=os.environ.get('GOOGLE_CLIENT_SECRET', ''),
+        )
+        docs_service = build('docs', 'v1', credentials=creds)
+
+        def _format_transcript(transcript_id, filename):
+            """Fetch transcript from AssemblyAI and format as text."""
+            tx = get_transcription(transcript_id)
+            if tx.get('status') != 'completed':
+                return None
+            utterances = tx.get('utterances', [])
+            lines = []
+            for utt in utterances:
+                start = format_timestamp(utt.get('start', 0))
+                speaker = utt.get('speaker', '?')
+                text = utt.get('text', '')
+                lines.append(f"[{start}] Speaker {speaker}: {text}")
+            return "\n\n".join(lines)
+
+        if mode == 'multi':
+            # One doc per transcript
+            results = []
+            for item in transcripts:
+                tid = item.get('transcript_id')
+                fname = item.get('filename', 'Transcript')
+                if not tid:
+                    continue
+                text = _format_transcript(tid, fname)
+                if not text:
+                    results.append({"filename": fname, "error": "Transcript not ready"})
+                    continue
+                title = fname.rsplit('.', 1)[0] if '.' in fname else fname
+                doc = docs_service.documents().create(body={'title': f"Transcript - {title}"}).execute()
+                doc_id = doc['documentId']
+                docs_service.documents().batchUpdate(
+                    documentId=doc_id,
+                    body={'requests': [{'insertText': {'location': {'index': 1}, 'text': text}}]},
+                ).execute()
+                doc_url = f"https://docs.google.com/document/d/{doc_id}/edit"
+                results.append({"filename": fname, "url": doc_url, "doc_id": doc_id})
+                print(f"Created transcript doc: {title} → {doc_url}")
+            return jsonify({"success": True, "docs": results})
+
+        else:
+            # Single doc with all transcripts
+            doc = docs_service.documents().create(
+                body={'title': 'Batch Transcripts'}
+            ).execute()
+            doc_id = doc['documentId']
+            doc_url = f"https://docs.google.com/document/d/{doc_id}/edit"
+
+            # Build combined text with episode separators
+            sections = []
+            for i, item in enumerate(transcripts):
+                tid = item.get('transcript_id')
+                fname = item.get('filename', f'Episode {i + 1}')
+                if not tid:
+                    continue
+                text = _format_transcript(tid, fname)
+                if not text:
+                    sections.append(f"=== {fname} ===\n\n[Transcript not available]\n")
+                    continue
+                title = fname.rsplit('.', 1)[0] if '.' in fname else fname
+                sections.append(f"=== {title} ===\n\n{text}\n")
+
+            combined = "\n\n" + "\n\n".join(sections)
+            if combined.strip():
+                docs_service.documents().batchUpdate(
+                    documentId=doc_id,
+                    body={'requests': [{'insertText': {'location': {'index': 1}, 'text': combined}}]},
+                ).execute()
+
+            print(f"Created batch transcript doc: {doc_url} ({len(transcripts)} episodes)")
+            return jsonify({"success": True, "url": doc_url, "doc_id": doc_id})
+
+    except ImportError:
+        return jsonify({"error": "Google API libraries not installed"}), 500
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)), debug=False)

@@ -80,7 +80,7 @@
 
         function PodcastEditor() {
             const [screen, setScreen] = useState('upload');
-            const [appMode, setAppMode] = useState('edit'); // 'edit' | 'shownotes'
+            const [appMode, setAppMode] = useState('edit'); // 'edit' | 'shownotes' | 'transcripts'
             const [uploadMode, setUploadMode] = useState('single'); // 'single' | 'multi'
             const [transcriptText, setTranscriptText] = useState('');
             const [tracks, setTracks] = useState([]); // [{file, label}]
@@ -104,6 +104,13 @@
             // Show notes state
             const [showNotes, setShowNotes] = useState(null);
             const [showNotesLoading, setShowNotesLoading] = useState(false);
+
+            // Transcript batch state
+            const [transcriptFiles, setTranscriptFiles] = useState([]);
+            const [transcriptBatchResults, setTranscriptBatchResults] = useState([]);
+            const [transcriptBatchRunning, setTranscriptBatchRunning] = useState(false);
+            const [transcriptBatchIndex, setTranscriptBatchIndex] = useState(0);
+            const [exportingBatchDoc, setExportingBatchDoc] = useState(false);
 
             // Enhance approval state (set when pipeline pauses for user to review mix)
             const [enhanceApproval, setEnhanceApproval] = useState(null);
@@ -608,6 +615,95 @@
                 reader.readAsText(file);
             };
 
+            const handleTranscriptBatchUpload = (e) => {
+                const uploaded = Array.from(e.target.files).filter(f => f.type.includes('audio'));
+                if (uploaded.length > 0) setTranscriptFiles(prev => [...prev, ...uploaded]);
+            };
+
+            const removeTranscriptFile = (index) => {
+                setTranscriptFiles(prev => prev.filter((_, i) => i !== index));
+            };
+
+            const runTranscriptBatch = async () => {
+                if (transcriptFiles.length === 0) return;
+                setTranscriptBatchRunning(true);
+                setTranscriptBatchResults([]);
+
+                const results = [];
+                for (let i = 0; i < transcriptFiles.length; i++) {
+                    setTranscriptBatchIndex(i);
+                    results.push({ filename: transcriptFiles[i].name, status: 'uploading' });
+                    setTranscriptBatchResults([...results]);
+
+                    try {
+                        // Upload
+                        const formData = new FormData();
+                        formData.append('file', transcriptFiles[i]);
+                        const uploadRes = await fetch(`${API_URL}/api/upload`, { method: 'POST', body: formData });
+                        if (!uploadRes.ok) {
+                            const err = await safeJson(uploadRes);
+                            throw new Error(err?.error || `Upload failed (${uploadRes.status})`);
+                        }
+                        const uploadData = await safeJson(uploadRes);
+                        if (!uploadData?.transcript_id) throw new Error('Invalid server response');
+                        const transcript_id = uploadData.transcript_id;
+
+                        results[i] = { ...results[i], status: 'transcribing', transcript_id };
+                        setTranscriptBatchResults([...results]);
+
+                        // Poll transcription
+                        while (true) {
+                            await new Promise(r => setTimeout(r, 5000));
+                            let statusRes;
+                            try { statusRes = await fetch(`${API_URL}/api/transcription-status/${transcript_id}`); }
+                            catch { throw new Error('Server unreachable'); }
+                            const statusData = await safeJson(statusRes);
+                            if (!statusData) throw new Error('Invalid response');
+                            if (statusData.status === 'completed') break;
+                            if (statusData.status === 'error') throw new Error(statusData.error || 'Transcription failed');
+                        }
+
+                        results[i] = { ...results[i], status: 'completed' };
+                        setTranscriptBatchResults([...results]);
+
+                    } catch (err) {
+                        results[i] = { ...results[i], status: 'error', error: err.message || String(err) };
+                        setTranscriptBatchResults([...results]);
+                    }
+                }
+                setTranscriptBatchRunning(false);
+            };
+
+            const exportBatchTranscriptsToGoogleDocs = async (mode) => {
+                const completed = transcriptBatchResults.filter(r => r.status === 'completed' && r.transcript_id);
+                if (completed.length === 0) return;
+                setExportingBatchDoc(true);
+                try {
+                    const res = await fetch(`${API_URL}/api/export-batch-transcripts-google-doc`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            transcripts: completed.map(r => ({ transcript_id: r.transcript_id, filename: r.filename })),
+                            mode,
+                        }),
+                    });
+                    const data = await res.json();
+                    if (!res.ok) throw new Error(data.error || 'Export failed');
+                    if (mode === 'single') {
+                        window.open(data.url, '_blank');
+                    } else {
+                        (data.docs || []).forEach(d => {
+                            if (d.url) window.open(d.url, '_blank');
+                        });
+                    }
+                } catch (e) {
+                    console.error('Batch transcript export error:', e);
+                    alert('Export failed: ' + e.message);
+                } finally {
+                    setExportingBatchDoc(false);
+                }
+            };
+
             const copyShowNotes = () => {
                 if (showNotes) navigator.clipboard.writeText(showNotes);
             };
@@ -692,6 +788,11 @@
                 setShowNotes(null);
                 setShowNotesLoading(false);
                 setTranscriptText('');
+                setTranscriptFiles([]);
+                setTranscriptBatchResults([]);
+                setTranscriptBatchRunning(false);
+                setTranscriptBatchIndex(0);
+                setExportingBatchDoc(false);
                 setShowEditsIndex(null);
                 setEnhanceApproval(null);
                 setFillerAssessment(null);
@@ -717,26 +818,23 @@
                         {/* Top-level mode toggle */}
                         {screen === 'upload' && (
                             <div className="flex gap-2 mb-4">
-                                <button
-                                    onClick={() => { setAppMode('edit'); setShowNotes(null); setShowNotesLoading(false); }}
-                                    className={`flex-1 py-2.5 px-4 rounded-xl text-sm font-medium transition-all ${
-                                        appMode === 'edit'
-                                            ? 'bg-purple-500/30 border border-purple-400 text-white'
-                                            : 'bg-white/5 border border-white/10 text-purple-300/70 hover:bg-white/10'
-                                    }`}
-                                >
-                                    Edit Audio
-                                </button>
-                                <button
-                                    onClick={() => { setAppMode('shownotes'); setShowNotes(null); setShowNotesLoading(false); }}
-                                    className={`flex-1 py-2.5 px-4 rounded-xl text-sm font-medium transition-all ${
-                                        appMode === 'shownotes'
-                                            ? 'bg-purple-500/30 border border-purple-400 text-white'
-                                            : 'bg-white/5 border border-white/10 text-purple-300/70 hover:bg-white/10'
-                                    }`}
-                                >
-                                    Show Notes
-                                </button>
+                                {[
+                                    { key: 'edit', label: 'Edit Audio' },
+                                    { key: 'shownotes', label: 'Show Notes' },
+                                    { key: 'transcripts', label: 'Transcripts' },
+                                ].map(m => (
+                                    <button
+                                        key={m.key}
+                                        onClick={() => { setAppMode(m.key); setShowNotes(null); setShowNotesLoading(false); }}
+                                        className={`flex-1 py-2.5 px-4 rounded-xl text-sm font-medium transition-all ${
+                                            appMode === m.key
+                                                ? 'bg-purple-500/30 border border-purple-400 text-white'
+                                                : 'bg-white/5 border border-white/10 text-purple-300/70 hover:bg-white/10'
+                                        }`}
+                                    >
+                                        {m.label}
+                                    </button>
+                                ))}
                             </div>
                         )}
 
@@ -885,6 +983,119 @@
                                                     </div>
                                                 </div>
                                                 <pre className="bg-black/20 rounded-lg border border-white/10 p-4 text-purple-100 text-sm whitespace-pre-wrap max-h-80 overflow-y-auto">{showNotes}</pre>
+                                            </div>
+                                        )}
+                                    </div>
+                                )}
+                            </div>
+                        )}
+
+                        {/* Screen 1b: Transcripts batch */}
+                        {screen === 'upload' && appMode === 'transcripts' && (
+                            <div className="bg-white/10 backdrop-blur-lg rounded-2xl border border-white/20 p-8">
+                                <h2 className="text-xl font-semibold text-white mb-2">Batch Transcription</h2>
+                                <p className="text-purple-200/70 text-sm mb-6">Upload episodes to transcribe. No editing — just transcripts exported to Google Docs.</p>
+
+                                {!transcriptBatchRunning && transcriptBatchResults.filter(r => r.status === 'completed').length === 0 && (
+                                    <>
+                                        {/* Drop zone */}
+                                        <div className="border-2 border-dashed border-purple-400/50 rounded-xl p-8 text-center mb-4 bg-white/5 hover:bg-white/10 transition-all cursor-pointer">
+                                            <input type="file" accept="audio/*" multiple onChange={handleTranscriptBatchUpload} className="hidden" id="transcript-batch-upload" />
+                                            <label htmlFor="transcript-batch-upload" className="cursor-pointer">
+                                                <div className="w-12 h-12 mx-auto mb-3 text-purple-300 flex items-center justify-center">
+                                                    <FileAudio />
+                                                </div>
+                                                <p className="text-white font-semibold mb-1">Drop your episodes here</p>
+                                                <p className="text-purple-200 text-sm">Select multiple files (20+ supported)</p>
+                                            </label>
+                                        </div>
+
+                                        {/* File list */}
+                                        {transcriptFiles.length > 0 && (
+                                            <div className="mb-4 space-y-1 max-h-64 overflow-y-auto">
+                                                {transcriptFiles.map((f, i) => (
+                                                    <div key={i} className="flex items-center gap-2 bg-white/5 rounded-lg px-3 py-2 text-sm">
+                                                        <span className="text-purple-300/50 w-6 text-right">{i + 1}.</span>
+                                                        <span className="text-white flex-1 truncate">{f.name}</span>
+                                                        <span className="text-purple-300/50 text-xs">{(f.size / 1024 / 1024).toFixed(1)} MB</span>
+                                                        <button onClick={() => removeTranscriptFile(i)} className="text-red-400/50 hover:text-red-400 text-xs transition-all">x</button>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        )}
+
+                                        <button
+                                            onClick={runTranscriptBatch}
+                                            disabled={transcriptFiles.length === 0}
+                                            className="w-full bg-gradient-to-r from-purple-500 to-pink-500 text-white font-semibold py-4 rounded-xl hover:from-purple-600 hover:to-pink-600 transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+                                        >
+                                            <Sparkles className="w-5 h-5" />
+                                            Transcribe {transcriptFiles.length > 0 ? `${transcriptFiles.length} Episode${transcriptFiles.length !== 1 ? 's' : ''}` : 'Episodes'}
+                                        </button>
+                                    </>
+                                )}
+
+                                {/* Batch progress / results */}
+                                {transcriptBatchResults.length > 0 && (
+                                    <div>
+                                        {transcriptBatchRunning && (
+                                            <p className="text-purple-200 text-sm font-medium mb-3">
+                                                Transcribing episode {transcriptBatchIndex + 1} of {transcriptFiles.length}...
+                                            </p>
+                                        )}
+
+                                        <div className="space-y-1 max-h-72 overflow-y-auto mb-4">
+                                            {transcriptBatchResults.map((r, i) => {
+                                                let icon, textColor;
+                                                if (r.status === 'completed') { icon = '\u2713'; textColor = 'text-green-400'; }
+                                                else if (r.status === 'error') { icon = '\u2717'; textColor = 'text-red-400'; }
+                                                else if (r.status === 'transcribing') { icon = '\u27F3'; textColor = 'text-white'; }
+                                                else { icon = '\u2191'; textColor = 'text-purple-300'; }
+                                                return (
+                                                    <div key={i} className={`flex items-center gap-2 bg-white/5 rounded-lg px-3 py-2 text-sm ${textColor}`}>
+                                                        <span className="w-5 text-center">{icon}</span>
+                                                        <span className="flex-1 truncate">{r.filename}</span>
+                                                        <span className="text-xs opacity-60">
+                                                            {r.status === 'uploading' ? 'Uploading...' :
+                                                             r.status === 'transcribing' ? 'Transcribing...' :
+                                                             r.status === 'completed' ? 'Done' :
+                                                             r.error || 'Error'}
+                                                        </span>
+                                                    </div>
+                                                );
+                                            })}
+                                        </div>
+
+                                        {/* Export buttons (show when at least one is complete) */}
+                                        {transcriptBatchResults.some(r => r.status === 'completed') && !transcriptBatchRunning && (
+                                            <div>
+                                                <p className="text-purple-200 text-sm font-medium mb-3">
+                                                    {transcriptBatchResults.filter(r => r.status === 'completed').length} of {transcriptBatchResults.length} transcripts ready
+                                                </p>
+                                                <div className="flex flex-col sm:flex-row gap-3">
+                                                    <button
+                                                        onClick={() => exportBatchTranscriptsToGoogleDocs('single')}
+                                                        disabled={exportingBatchDoc}
+                                                        className="flex-1 bg-gradient-to-r from-purple-500 to-pink-500 text-white font-semibold py-3 rounded-xl hover:from-purple-600 hover:to-pink-600 transition-all disabled:opacity-50 flex items-center justify-center gap-2"
+                                                    >
+                                                        {exportingBatchDoc ? 'Exporting...' : 'One Google Doc'}
+                                                    </button>
+                                                    <button
+                                                        onClick={() => exportBatchTranscriptsToGoogleDocs('multi')}
+                                                        disabled={exportingBatchDoc}
+                                                        className="flex-1 bg-white/10 border border-white/20 text-white font-semibold py-3 rounded-xl hover:bg-white/20 transition-all disabled:opacity-50 flex items-center justify-center gap-2"
+                                                    >
+                                                        {exportingBatchDoc ? 'Exporting...' : 'One Doc per Episode'}
+                                                    </button>
+                                                </div>
+                                                <div className="text-center mt-4">
+                                                    <button
+                                                        onClick={() => { setTranscriptFiles([]); setTranscriptBatchResults([]); setTranscriptBatchIndex(0); }}
+                                                        className="text-purple-300 hover:text-white text-sm transition-all"
+                                                    >
+                                                        Transcribe another batch
+                                                    </button>
+                                                </div>
                                             </div>
                                         )}
                                     </div>

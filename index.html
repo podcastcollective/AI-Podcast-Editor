@@ -111,7 +111,8 @@
             const [transcriptBatchRunning, setTranscriptBatchRunning] = useState(false);
             const [transcriptBatchIndex, setTranscriptBatchIndex] = useState(0);
             const [exportingBatchDoc, setExportingBatchDoc] = useState(false);
-            const [speakerLabels, setSpeakerLabels] = useState([]); // [{id, label, sample}]
+            const [episodeSpeakers, setEpisodeSpeakers] = useState({}); // {transcript_id: {filename, speakers: [{id, label, sample}]}}
+            const [expandedEpisodeSpeakers, setExpandedEpisodeSpeakers] = useState(null); // transcript_id or null
 
             // RSS feed state
             const [rssUrl, setRssUrl] = useState('');
@@ -673,9 +674,8 @@
                 if (selected.length === 0) return;
                 setTranscriptBatchRunning(true);
                 setTranscriptBatchResults([]);
-                setSpeakerLabels([]);
+                setEpisodeSpeakers({});
 
-                let speakersLoaded = false;
                 const results = [];
                 for (let i = 0; i < selected.length; i++) {
                     const ep = selected[i];
@@ -684,7 +684,6 @@
                     setTranscriptBatchResults([...results]);
 
                     try {
-                        // Import RSS episode — backend sends URL directly to AssemblyAI
                         const importRes = await fetch(`${API_URL}/api/import-rss-episode`, {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
@@ -700,7 +699,6 @@
                         results[i] = { ...results[i], status: 'transcribing', transcript_id };
                         setTranscriptBatchResults([...results]);
 
-                        // Poll transcription
                         while (true) {
                             await new Promise(r => setTimeout(r, 5000));
                             let statusRes;
@@ -714,17 +712,7 @@
 
                         results[i] = { ...results[i], status: 'completed' };
                         setTranscriptBatchResults([...results]);
-
-                        if (!speakersLoaded) {
-                            try {
-                                const spkRes = await fetch(`${API_URL}/api/transcript-speakers/${transcript_id}`);
-                                if (spkRes.ok) {
-                                    const spkData = await spkRes.json();
-                                    setSpeakerLabels(spkData.speakers || []);
-                                    speakersLoaded = true;
-                                }
-                            } catch (e) { console.warn('Failed to fetch speakers:', e); }
-                        }
+                        fetchAndStoreSpeakers(transcript_id, ep.title);
                     } catch (err) {
                         results[i] = { ...results[i], status: 'error', error: err.message || String(err) };
                         setTranscriptBatchResults([...results]);
@@ -733,13 +721,25 @@
                 setTranscriptBatchRunning(false);
             };
 
+            const fetchAndStoreSpeakers = async (transcript_id, filename) => {
+                try {
+                    const spkRes = await fetch(`${API_URL}/api/transcript-speakers/${transcript_id}`);
+                    if (spkRes.ok) {
+                        const spkData = await spkRes.json();
+                        setEpisodeSpeakers(prev => ({
+                            ...prev,
+                            [transcript_id]: { filename, speakers: spkData.speakers || [] },
+                        }));
+                    }
+                } catch (e) { console.warn('Failed to fetch speakers:', e); }
+            };
+
             const runTranscriptBatch = async () => {
                 if (transcriptFiles.length === 0) return;
                 setTranscriptBatchRunning(true);
                 setTranscriptBatchResults([]);
-                setSpeakerLabels([]);
+                setEpisodeSpeakers({});
 
-                let speakersLoaded = false;
                 const results = [];
                 for (let i = 0; i < transcriptFiles.length; i++) {
                     setTranscriptBatchIndex(i);
@@ -776,18 +776,7 @@
 
                         results[i] = { ...results[i], status: 'completed' };
                         setTranscriptBatchResults([...results]);
-
-                        // Fetch speakers from the first completed transcript
-                        if (!speakersLoaded) {
-                            try {
-                                const spkRes = await fetch(`${API_URL}/api/transcript-speakers/${transcript_id}`);
-                                if (spkRes.ok) {
-                                    const spkData = await spkRes.json();
-                                    setSpeakerLabels(spkData.speakers || []);
-                                    speakersLoaded = true;
-                                }
-                            } catch (e) { console.warn('Failed to fetch speakers:', e); }
-                        }
+                        fetchAndStoreSpeakers(transcript_id, transcriptFiles[i].name);
 
                     } catch (err) {
                         results[i] = { ...results[i], status: 'error', error: err.message || String(err) };
@@ -808,7 +797,12 @@
                         body: JSON.stringify({
                             transcripts: completed.map(r => ({ transcript_id: r.transcript_id, filename: r.filename })),
                             mode,
-                            speaker_labels: Object.fromEntries(speakerLabels.map(s => [s.id, s.label])),
+                            speaker_labels: Object.fromEntries(
+                                Object.entries(episodeSpeakers).map(([tid, data]) => [
+                                    tid,
+                                    Object.fromEntries(data.speakers.map(s => [s.id, s.label]))
+                                ])
+                            ),
                         }),
                     });
                     const data = await res.json();
@@ -917,7 +911,8 @@
                 setTranscriptBatchRunning(false);
                 setTranscriptBatchIndex(0);
                 setExportingBatchDoc(false);
-                setSpeakerLabels([]);
+                setEpisodeSpeakers({});
+                setExpandedEpisodeSpeakers(null);
                 setRssUrl('');
                 setRssFeedTitle('');
                 setRssEpisodes([]);
@@ -1308,22 +1303,82 @@
                                                     {transcriptBatchResults.filter(r => r.status === 'completed').length} of {transcriptBatchResults.length} transcripts ready
                                                 </p>
 
-                                                {/* Speaker label editor */}
-                                                {speakerLabels.length > 0 && (
+                                                {/* Per-episode speaker label editor */}
+                                                {Object.keys(episodeSpeakers).length > 0 && (
                                                     <div className="mb-4 bg-white/5 rounded-xl border border-white/10 p-4">
-                                                        <h3 className="text-sm font-semibold text-purple-200 uppercase tracking-wide mb-3">Speaker Labels</h3>
-                                                        <div className="space-y-3">
-                                                            {speakerLabels.map((s, i) => (
-                                                                <div key={s.id} className="flex items-start gap-3">
-                                                                    <input
-                                                                        type="text"
-                                                                        value={s.label}
-                                                                        onChange={e => setSpeakerLabels(prev => prev.map((sp, j) => j === i ? { ...sp, label: e.target.value } : sp))}
-                                                                        className="w-32 shrink-0 bg-white/10 border border-white/20 text-white px-3 py-2 rounded-lg text-sm"
-                                                                    />
-                                                                    <p className="text-purple-300/60 text-xs italic leading-relaxed pt-1.5">"{s.sample}"</p>
-                                                                </div>
-                                                            ))}
+                                                        <div className="flex items-center justify-between mb-3">
+                                                            <h3 className="text-sm font-semibold text-purple-200 uppercase tracking-wide">Speaker Labels</h3>
+                                                            {Object.keys(episodeSpeakers).length > 1 && expandedEpisodeSpeakers && (
+                                                                <button
+                                                                    onClick={() => {
+                                                                        const source = episodeSpeakers[expandedEpisodeSpeakers];
+                                                                        if (!source) return;
+                                                                        const labelMap = Object.fromEntries(source.speakers.map(s => [s.id, s.label]));
+                                                                        setEpisodeSpeakers(prev => {
+                                                                            const next = { ...prev };
+                                                                            for (const tid of Object.keys(next)) {
+                                                                                next[tid] = {
+                                                                                    ...next[tid],
+                                                                                    speakers: next[tid].speakers.map(s => ({
+                                                                                        ...s,
+                                                                                        label: labelMap[s.id] || s.label,
+                                                                                    })),
+                                                                                };
+                                                                            }
+                                                                            return next;
+                                                                        });
+                                                                    }}
+                                                                    className="text-xs bg-purple-500/20 border border-purple-400/40 text-purple-300 px-3 py-1.5 rounded-lg hover:bg-purple-500/30 transition-all"
+                                                                >
+                                                                    Apply to all episodes
+                                                                </button>
+                                                            )}
+                                                        </div>
+                                                        <div className="space-y-2">
+                                                            {Object.entries(episodeSpeakers).map(([tid, data]) => {
+                                                                const isExpanded = expandedEpisodeSpeakers === tid;
+                                                                const isSingle = Object.keys(episodeSpeakers).length === 1;
+                                                                return (
+                                                                    <div key={tid} className="rounded-lg border border-white/10 overflow-hidden">
+                                                                        {!isSingle && (
+                                                                            <button
+                                                                                onClick={() => setExpandedEpisodeSpeakers(isExpanded ? null : tid)}
+                                                                                className="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-white/5 transition-all"
+                                                                            >
+                                                                                <span className="text-purple-300/60 text-xs">{isExpanded ? '\u25BC' : '\u25B6'}</span>
+                                                                                <span className="text-white text-sm flex-1 truncate">{data.filename}</span>
+                                                                                <span className="text-purple-300/50 text-xs">{data.speakers.length} speaker{data.speakers.length !== 1 ? 's' : ''}</span>
+                                                                            </button>
+                                                                        )}
+                                                                        {(isSingle || isExpanded) && (
+                                                                            <div className={`space-y-2 ${isSingle ? '' : 'px-3 pb-3 pt-1'}`}>
+                                                                                {data.speakers.map((s, si) => (
+                                                                                    <div key={s.id} className="flex items-start gap-3">
+                                                                                        <input
+                                                                                            type="text"
+                                                                                            value={s.label}
+                                                                                            onChange={e => {
+                                                                                                const val = e.target.value;
+                                                                                                setEpisodeSpeakers(prev => ({
+                                                                                                    ...prev,
+                                                                                                    [tid]: {
+                                                                                                        ...prev[tid],
+                                                                                                        speakers: prev[tid].speakers.map((sp, j) =>
+                                                                                                            j === si ? { ...sp, label: val } : sp
+                                                                                                        ),
+                                                                                                    },
+                                                                                                }));
+                                                                                            }}
+                                                                                            className="w-32 shrink-0 bg-white/10 border border-white/20 text-white px-3 py-2 rounded-lg text-sm"
+                                                                                        />
+                                                                                        <p className="text-purple-300/60 text-xs italic leading-relaxed pt-1.5">"{s.sample}"</p>
+                                                                                    </div>
+                                                                                ))}
+                                                                            </div>
+                                                                        )}
+                                                                    </div>
+                                                                );
+                                                            })}
                                                         </div>
                                                     </div>
                                                 )}
@@ -1346,7 +1401,7 @@
                                                 </div>
                                                 <div className="text-center mt-4">
                                                     <button
-                                                        onClick={() => { setTranscriptFiles([]); setTranscriptBatchResults([]); setTranscriptBatchIndex(0); setSpeakerLabels([]); setRssEpisodes([]); setRssSelected(new Set()); setRssFeedTitle(''); setRssSearch(''); }}
+                                                        onClick={() => { setTranscriptFiles([]); setTranscriptBatchResults([]); setTranscriptBatchIndex(0); setEpisodeSpeakers({}); setExpandedEpisodeSpeakers(null); setRssEpisodes([]); setRssSelected(new Set()); setRssFeedTitle(''); setRssSearch(''); }}
                                                         className="text-purple-300 hover:text-white text-sm transition-all"
                                                     >
                                                         Transcribe another batch

@@ -4827,7 +4827,8 @@ def export_batch_transcripts_google_doc():
 
     Accepts: {"transcripts": [{"transcript_id": "...", "filename": "..."}, ...],
               "mode": "single"|"multi",
-              "speaker_labels": {"A": "Jon", "B": "Sarah", ...}}
+              "speaker_labels": {"transcript_id": {"A": "Jon", "B": "Sarah"}, ...}
+                 OR flat {"A": "Jon", ...} applied to all}
     mode "single" = one Google Doc with all transcripts
     mode "multi" = one Google Doc per transcript (returns list of URLs)
     """
@@ -4858,17 +4859,26 @@ def export_batch_transcripts_google_doc():
         )
         docs_service = build('docs', 'v1', credentials=creds)
 
+        # Determine if speaker_labels is per-transcript or flat
+        _is_per_transcript = speaker_labels and any(isinstance(v, dict) for v in speaker_labels.values())
+
+        def _get_labels_for(transcript_id):
+            if _is_per_transcript:
+                return speaker_labels.get(transcript_id, {})
+            return speaker_labels  # flat dict applied to all
+
         def _format_transcript(transcript_id, filename):
             """Fetch transcript from AssemblyAI and format as text."""
             tx = get_transcription(transcript_id)
             if tx.get('status') != 'completed':
                 return None
+            labels = _get_labels_for(transcript_id)
             utterances = tx.get('utterances', [])
             lines = []
             for utt in utterances:
                 start = format_timestamp(utt.get('start', 0))
                 spk_id = utt.get('speaker', '?')
-                label = speaker_labels.get(spk_id, f"Speaker {spk_id}")
+                label = labels.get(spk_id, f"Speaker {spk_id}")
                 text = utt.get('text', '')
                 lines.append(f"[{start}] {label}: {text}")
             return "\n\n".join(lines)

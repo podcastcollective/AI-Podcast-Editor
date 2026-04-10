@@ -121,6 +121,7 @@
             const [rssLoading, setRssLoading] = useState(false);
             const [rssError, setRssError] = useState('');
             const [rssSearch, setRssSearch] = useState('');
+            const [speakerCount, setSpeakerCount] = useState(2);
 
             // Enhance approval state (set when pipeline pauses for user to review mix)
             const [enhanceApproval, setEnhanceApproval] = useState(null);
@@ -688,7 +689,7 @@
                         const importRes = await fetch(`${API_URL}/api/import-rss-episode`, {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ audio_url: ep.audio_url, title: ep.title }),
+                            body: JSON.stringify({ audio_url: ep.audio_url, title: ep.title, speakers_expected: speakerCount || null }),
                         });
                         if (!importRes.ok) {
                             const err = await safeJson(importRes);
@@ -752,6 +753,7 @@
                         // Upload
                         const formData = new FormData();
                         formData.append('file', transcriptFiles[i]);
+                        if (speakerCount) formData.append('speakers_expected', speakerCount);
                         const uploadRes = await fetch(`${API_URL}/api/upload`, { method: 'POST', body: formData });
                         if (!uploadRes.ok) {
                             const err = await safeJson(uploadRes);
@@ -1126,6 +1128,26 @@
 
                                 {!transcriptBatchRunning && transcriptBatchResults.filter(r => r.status === 'completed').length === 0 && (
                                     <>
+                                        {/* Speaker count */}
+                                        <div className="flex items-center gap-3 mb-6">
+                                            <span className="text-purple-200 text-sm">Speakers per episode:</span>
+                                            <div className="flex gap-1.5">
+                                                {[1, 2, 3, 4].map(n => (
+                                                    <button
+                                                        key={n}
+                                                        onClick={() => setSpeakerCount(n)}
+                                                        className={`w-9 h-9 rounded-lg text-sm font-medium transition-all ${
+                                                            speakerCount === n
+                                                                ? 'bg-purple-500/30 border border-purple-400 text-white'
+                                                                : 'bg-white/5 border border-white/10 text-purple-300/70 hover:bg-white/10'
+                                                        }`}
+                                                    >
+                                                        {n}
+                                                    </button>
+                                                ))}
+                                            </div>
+                                        </div>
+
                                         {/* RSS Feed import */}
                                         <div className="mb-6">
                                             <h3 className="text-sm font-semibold text-purple-200 uppercase tracking-wide mb-3">Import from RSS Feed</h3>

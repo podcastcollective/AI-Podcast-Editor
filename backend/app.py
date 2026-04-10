@@ -100,19 +100,22 @@ def stream_bytes_to_assemblyai(data):
     return upload_url
 
 
-def start_transcription(audio_url):
+def start_transcription(audio_url, speakers_expected=None):
     """Submit transcription job to AssemblyAI, return transcript_id."""
-    print("Submitting transcription job...")
+    print(f"Submitting transcription job...{f' (speakers_expected={speakers_expected})' if speakers_expected else ''}")
+    body = {
+        "audio_url": audio_url,
+        "speech_models": ["universal-2"],
+        "speaker_labels": True,
+        "punctuate": True,
+        "format_text": True,
+        "disfluencies": True,  # Keep filler words (um, uh, etc.) in transcript
+    }
+    if speakers_expected and speakers_expected > 0:
+        body["speakers_expected"] = speakers_expected
     resp = requests.post(
         "https://api.assemblyai.com/v2/transcript",
-        json={
-            "audio_url": audio_url,
-            "speech_models": ["universal-2"],
-            "speaker_labels": True,
-            "punctuate": True,
-            "format_text": True,
-            "disfluencies": True,  # Keep filler words (um, uh, etc.) in transcript
-        },
+        json=body,
         headers={
             "authorization": ASSEMBLYAI_API_KEY,
             "content-type": "application/json",
@@ -3915,7 +3918,8 @@ def upload_file():
     try:
         file_data = file.read()
         upload_url = stream_bytes_to_assemblyai(file_data)
-        transcript_id = start_transcription(upload_url)
+        speakers_expected = request.form.get('speakers_expected', type=int)
+        transcript_id = start_transcription(upload_url, speakers_expected=speakers_expected)
 
         tmp_path = f"/tmp/{transcript_id}.{ext}"
         with open(tmp_path, 'wb') as f:
@@ -4780,11 +4784,12 @@ def import_rss_episode():
         data = request.json
         audio_url = data.get('audio_url', '').strip()
         title = data.get('title', 'RSS Episode')
+        speakers_expected = data.get('speakers_expected')
         if not audio_url:
             return jsonify({"error": "No audio URL provided"}), 400
 
         # AssemblyAI can fetch from a public URL directly — no need to download
-        transcript_id = start_transcription(audio_url)
+        transcript_id = start_transcription(audio_url, speakers_expected=speakers_expected)
         print(f"RSS import: '{title}' → {transcript_id}")
 
         return jsonify({

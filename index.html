@@ -113,6 +113,15 @@
             const [exportingBatchDoc, setExportingBatchDoc] = useState(false);
             const [speakerLabels, setSpeakerLabels] = useState([]); // [{id, label, sample}]
 
+            // RSS feed state
+            const [rssUrl, setRssUrl] = useState('');
+            const [rssFeedTitle, setRssFeedTitle] = useState('');
+            const [rssEpisodes, setRssEpisodes] = useState([]);
+            const [rssSelected, setRssSelected] = useState(new Set());
+            const [rssLoading, setRssLoading] = useState(false);
+            const [rssError, setRssError] = useState('');
+            const [rssSearch, setRssSearch] = useState('');
+
             // Enhance approval state (set when pipeline pauses for user to review mix)
             const [enhanceApproval, setEnhanceApproval] = useState(null);
 
@@ -625,6 +634,105 @@
                 setTranscriptFiles(prev => prev.filter((_, i) => i !== index));
             };
 
+            const parseRssFeed = async () => {
+                if (!rssUrl.trim()) return;
+                setRssLoading(true);
+                setRssError('');
+                setRssEpisodes([]);
+                setRssSelected(new Set());
+                setRssFeedTitle('');
+                setRssSearch('');
+                try {
+                    const res = await fetch(`${API_URL}/api/parse-rss`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ url: rssUrl.trim() }),
+                    });
+                    const data = await res.json();
+                    if (!res.ok) throw new Error(data.error || 'Failed to parse feed');
+                    setRssFeedTitle(data.feed_title || '');
+                    setRssEpisodes(data.episodes || []);
+                } catch (e) {
+                    setRssError(e.message);
+                } finally {
+                    setRssLoading(false);
+                }
+            };
+
+            const toggleRssEpisode = (index) => {
+                setRssSelected(prev => {
+                    const next = new Set(prev);
+                    if (next.has(index)) next.delete(index);
+                    else next.add(index);
+                    return next;
+                });
+            };
+
+            const runRssTranscriptBatch = async () => {
+                const selected = rssEpisodes.filter((_, i) => rssSelected.has(i));
+                if (selected.length === 0) return;
+                setTranscriptBatchRunning(true);
+                setTranscriptBatchResults([]);
+                setSpeakerLabels([]);
+
+                let speakersLoaded = false;
+                const results = [];
+                for (let i = 0; i < selected.length; i++) {
+                    const ep = selected[i];
+                    setTranscriptBatchIndex(i);
+                    results.push({ filename: ep.title, status: 'uploading' });
+                    setTranscriptBatchResults([...results]);
+
+                    try {
+                        // Import RSS episode — backend sends URL directly to AssemblyAI
+                        const importRes = await fetch(`${API_URL}/api/import-rss-episode`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ audio_url: ep.audio_url, title: ep.title }),
+                        });
+                        if (!importRes.ok) {
+                            const err = await safeJson(importRes);
+                            throw new Error(err?.error || `Import failed (${importRes.status})`);
+                        }
+                        const importData = await importRes.json();
+                        const transcript_id = importData.transcript_id;
+
+                        results[i] = { ...results[i], status: 'transcribing', transcript_id };
+                        setTranscriptBatchResults([...results]);
+
+                        // Poll transcription
+                        while (true) {
+                            await new Promise(r => setTimeout(r, 5000));
+                            let statusRes;
+                            try { statusRes = await fetch(`${API_URL}/api/transcription-status/${transcript_id}`); }
+                            catch { throw new Error('Server unreachable'); }
+                            const statusData = await safeJson(statusRes);
+                            if (!statusData) throw new Error('Invalid response');
+                            if (statusData.status === 'completed') break;
+                            if (statusData.status === 'error') throw new Error(statusData.error || 'Transcription failed');
+                        }
+
+                        results[i] = { ...results[i], status: 'completed' };
+                        setTranscriptBatchResults([...results]);
+
+                        if (!speakersLoaded) {
+                            try {
+                                const spkRes = await fetch(`${API_URL}/api/transcript-speakers/${transcript_id}`);
+                                if (spkRes.ok) {
+                                    const spkData = await spkRes.json();
+                                    setSpeakerLabels(spkData.speakers || []);
+                                    speakersLoaded = true;
+                                }
+                            } catch (e) { console.warn('Failed to fetch speakers:', e); }
+                        }
+                    } catch (err) {
+                        results[i] = { ...results[i], status: 'error', error: err.message || String(err) };
+                        setTranscriptBatchResults([...results]);
+                    }
+                }
+                setTranscriptBatchRunning(false);
+            };
+
             const runTranscriptBatch = async () => {
                 if (transcriptFiles.length === 0) return;
                 setTranscriptBatchRunning(true);
@@ -810,6 +918,12 @@
                 setTranscriptBatchIndex(0);
                 setExportingBatchDoc(false);
                 setSpeakerLabels([]);
+                setRssUrl('');
+                setRssFeedTitle('');
+                setRssEpisodes([]);
+                setRssSelected(new Set());
+                setRssError('');
+                setRssSearch('');
                 setShowEditsIndex(null);
                 setEnhanceApproval(null);
                 setFillerAssessment(null);
@@ -1011,44 +1125,148 @@
                         {screen === 'upload' && appMode === 'transcripts' && (
                             <div className="bg-white/10 backdrop-blur-lg rounded-2xl border border-white/20 p-8">
                                 <h2 className="text-xl font-semibold text-white mb-2">Batch Transcription</h2>
-                                <p className="text-purple-200/70 text-sm mb-6">Upload episodes to transcribe. No editing — just transcripts exported to Google Docs.</p>
+                                <p className="text-purple-200/70 text-sm mb-6">Import from RSS feed or upload files. Transcripts exported to Google Docs.</p>
 
                                 {!transcriptBatchRunning && transcriptBatchResults.filter(r => r.status === 'completed').length === 0 && (
                                     <>
-                                        {/* Drop zone */}
-                                        <div className="border-2 border-dashed border-purple-400/50 rounded-xl p-8 text-center mb-4 bg-white/5 hover:bg-white/10 transition-all cursor-pointer">
-                                            <input type="file" accept="audio/*" multiple onChange={handleTranscriptBatchUpload} className="hidden" id="transcript-batch-upload" />
-                                            <label htmlFor="transcript-batch-upload" className="cursor-pointer">
-                                                <div className="w-12 h-12 mx-auto mb-3 text-purple-300 flex items-center justify-center">
-                                                    <FileAudio />
+                                        {/* RSS Feed import */}
+                                        <div className="mb-6">
+                                            <h3 className="text-sm font-semibold text-purple-200 uppercase tracking-wide mb-3">Import from RSS Feed</h3>
+                                            <div className="flex gap-2 mb-2">
+                                                <input
+                                                    type="text"
+                                                    placeholder="https://feed.example.com/podcast/feed.xml"
+                                                    value={rssUrl}
+                                                    onChange={e => setRssUrl(e.target.value)}
+                                                    onKeyDown={e => { if (e.key === 'Enter') parseRssFeed(); }}
+                                                    className="flex-1 bg-white/10 border border-white/20 text-white px-3 py-2.5 rounded-lg text-sm placeholder-purple-300/40"
+                                                />
+                                                <button
+                                                    onClick={parseRssFeed}
+                                                    disabled={!rssUrl.trim() || rssLoading}
+                                                    className="bg-purple-500/30 border border-purple-400 text-white px-4 py-2.5 rounded-lg text-sm font-medium hover:bg-purple-500/40 transition-all disabled:opacity-50"
+                                                >
+                                                    {rssLoading ? 'Loading...' : 'Load Feed'}
+                                                </button>
+                                            </div>
+                                            {rssError && <p className="text-red-400 text-xs mb-2">{rssError}</p>}
+
+                                            {/* Episode list from RSS */}
+                                            {rssEpisodes.length > 0 && (
+                                                <div className="mt-3">
+                                                    {rssFeedTitle && <p className="text-white font-medium text-sm mb-2">{rssFeedTitle}</p>}
+                                                    <input
+                                                        type="text"
+                                                        placeholder="Search episodes..."
+                                                        value={rssSearch}
+                                                        onChange={e => setRssSearch(e.target.value)}
+                                                        className="w-full bg-white/5 border border-white/10 text-white px-3 py-2 rounded-lg text-sm placeholder-purple-300/40 mb-2"
+                                                    />
+                                                    <div className="flex items-center justify-between mb-2">
+                                                        <span className="text-purple-300/60 text-xs">{rssEpisodes.length} episodes &middot; {rssSelected.size} selected</span>
+                                                        <div className="flex gap-2">
+                                                            <button
+                                                                onClick={() => {
+                                                                    const filtered = rssEpisodes.filter(ep => !rssSearch || ep.title.toLowerCase().includes(rssSearch.toLowerCase()));
+                                                                    setRssSelected(new Set(filtered.map(ep => ep.index)));
+                                                                }}
+                                                                className="text-xs text-purple-300 hover:text-white transition-all"
+                                                            >Select all</button>
+                                                            <button
+                                                                onClick={() => setRssSelected(new Set())}
+                                                                className="text-xs text-purple-300 hover:text-white transition-all"
+                                                            >Clear</button>
+                                                        </div>
+                                                    </div>
+                                                    <div className="space-y-1 max-h-72 overflow-y-auto">
+                                                        {rssEpisodes
+                                                            .filter(ep => !rssSearch || ep.title.toLowerCase().includes(rssSearch.toLowerCase()))
+                                                            .map(ep => {
+                                                                const selected = rssSelected.has(ep.index);
+                                                                const pubDate = ep.pub_date ? new Date(ep.pub_date).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' }) : '';
+                                                                return (
+                                                                    <div
+                                                                        key={ep.index}
+                                                                        onClick={() => toggleRssEpisode(ep.index)}
+                                                                        className={`flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm cursor-pointer transition-all ${
+                                                                            selected ? 'bg-purple-500/20 border border-purple-400/50' : 'bg-white/5 border border-transparent hover:bg-white/10'
+                                                                        }`}
+                                                                    >
+                                                                        <div className={`w-4 h-4 rounded border-2 shrink-0 flex items-center justify-center ${
+                                                                            selected ? 'bg-purple-500 border-purple-400' : 'border-white/30'
+                                                                        }`}>
+                                                                            {selected && (
+                                                                                <svg className="w-3 h-3 text-white" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+                                                                                    <polyline points="20 6 9 17 4 12"></polyline>
+                                                                                </svg>
+                                                                            )}
+                                                                        </div>
+                                                                        <span className="text-white flex-1 truncate">{ep.title}</span>
+                                                                        {pubDate && <span className="text-purple-300/50 text-xs shrink-0">{pubDate}</span>}
+                                                                        {ep.duration && <span className="text-purple-300/40 text-xs shrink-0">{ep.duration}</span>}
+                                                                    </div>
+                                                                );
+                                                            })}
+                                                    </div>
+                                                    <button
+                                                        onClick={runRssTranscriptBatch}
+                                                        disabled={rssSelected.size === 0}
+                                                        className="w-full mt-3 bg-gradient-to-r from-purple-500 to-pink-500 text-white font-semibold py-3 rounded-xl hover:from-purple-600 hover:to-pink-600 transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+                                                    >
+                                                        <Sparkles className="w-5 h-5" />
+                                                        Transcribe {rssSelected.size} Episode{rssSelected.size !== 1 ? 's' : ''}
+                                                    </button>
                                                 </div>
-                                                <p className="text-white font-semibold mb-1">Drop your episodes here</p>
-                                                <p className="text-purple-200 text-sm">Select multiple files (20+ supported)</p>
-                                            </label>
+                                            )}
                                         </div>
 
-                                        {/* File list */}
-                                        {transcriptFiles.length > 0 && (
-                                            <div className="mb-4 space-y-1 max-h-64 overflow-y-auto">
-                                                {transcriptFiles.map((f, i) => (
-                                                    <div key={i} className="flex items-center gap-2 bg-white/5 rounded-lg px-3 py-2 text-sm">
-                                                        <span className="text-purple-300/50 w-6 text-right">{i + 1}.</span>
-                                                        <span className="text-white flex-1 truncate">{f.name}</span>
-                                                        <span className="text-purple-300/50 text-xs">{(f.size / 1024 / 1024).toFixed(1)} MB</span>
-                                                        <button onClick={() => removeTranscriptFile(i)} className="text-red-400/50 hover:text-red-400 text-xs transition-all">x</button>
-                                                    </div>
-                                                ))}
+                                        {/* Divider */}
+                                        {rssEpisodes.length === 0 && (
+                                            <div className="flex items-center gap-3 mb-6">
+                                                <div className="flex-1 h-px bg-white/10" />
+                                                <span className="text-purple-300/50 text-xs uppercase">or upload files</span>
+                                                <div className="flex-1 h-px bg-white/10" />
                                             </div>
                                         )}
 
-                                        <button
-                                            onClick={runTranscriptBatch}
-                                            disabled={transcriptFiles.length === 0}
-                                            className="w-full bg-gradient-to-r from-purple-500 to-pink-500 text-white font-semibold py-4 rounded-xl hover:from-purple-600 hover:to-pink-600 transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
-                                        >
-                                            <Sparkles className="w-5 h-5" />
-                                            Transcribe {transcriptFiles.length > 0 ? `${transcriptFiles.length} Episode${transcriptFiles.length !== 1 ? 's' : ''}` : 'Episodes'}
-                                        </button>
+                                        {/* Drop zone (hidden when RSS episodes are loaded) */}
+                                        {rssEpisodes.length === 0 && (
+                                            <>
+                                                <div className="border-2 border-dashed border-purple-400/50 rounded-xl p-8 text-center mb-4 bg-white/5 hover:bg-white/10 transition-all cursor-pointer">
+                                                    <input type="file" accept="audio/*" multiple onChange={handleTranscriptBatchUpload} className="hidden" id="transcript-batch-upload" />
+                                                    <label htmlFor="transcript-batch-upload" className="cursor-pointer">
+                                                        <div className="w-12 h-12 mx-auto mb-3 text-purple-300 flex items-center justify-center">
+                                                            <FileAudio />
+                                                        </div>
+                                                        <p className="text-white font-semibold mb-1">Drop your episodes here</p>
+                                                        <p className="text-purple-200 text-sm">Select multiple files (20+ supported)</p>
+                                                    </label>
+                                                </div>
+
+                                                {/* File list */}
+                                                {transcriptFiles.length > 0 && (
+                                                    <div className="mb-4 space-y-1 max-h-64 overflow-y-auto">
+                                                        {transcriptFiles.map((f, i) => (
+                                                            <div key={i} className="flex items-center gap-2 bg-white/5 rounded-lg px-3 py-2 text-sm">
+                                                                <span className="text-purple-300/50 w-6 text-right">{i + 1}.</span>
+                                                                <span className="text-white flex-1 truncate">{f.name}</span>
+                                                                <span className="text-purple-300/50 text-xs">{(f.size / 1024 / 1024).toFixed(1)} MB</span>
+                                                                <button onClick={() => removeTranscriptFile(i)} className="text-red-400/50 hover:text-red-400 text-xs transition-all">x</button>
+                                                            </div>
+                                                        ))}
+                                                    </div>
+                                                )}
+
+                                                <button
+                                                    onClick={runTranscriptBatch}
+                                                    disabled={transcriptFiles.length === 0}
+                                                    className="w-full bg-gradient-to-r from-purple-500 to-pink-500 text-white font-semibold py-4 rounded-xl hover:from-purple-600 hover:to-pink-600 transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+                                                >
+                                                    <Sparkles className="w-5 h-5" />
+                                                    Transcribe {transcriptFiles.length > 0 ? `${transcriptFiles.length} Episode${transcriptFiles.length !== 1 ? 's' : ''}` : 'Episodes'}
+                                                </button>
+                                            </>
+                                        )}
                                     </>
                                 )}
 
@@ -1128,7 +1346,7 @@
                                                 </div>
                                                 <div className="text-center mt-4">
                                                     <button
-                                                        onClick={() => { setTranscriptFiles([]); setTranscriptBatchResults([]); setTranscriptBatchIndex(0); setSpeakerLabels([]); }}
+                                                        onClick={() => { setTranscriptFiles([]); setTranscriptBatchResults([]); setTranscriptBatchIndex(0); setSpeakerLabels([]); setRssEpisodes([]); setRssSelected(new Set()); setRssFeedTitle(''); setRssSearch(''); }}
                                                         className="text-purple-300 hover:text-white text-sm transition-all"
                                                     >
                                                         Transcribe another batch

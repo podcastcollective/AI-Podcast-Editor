@@ -4693,6 +4693,111 @@ def export_transcript_google_doc(transcript_id):
         return jsonify({"error": str(e)}), 500
 
 
+@app.route('/api/parse-rss', methods=['POST', 'OPTIONS'])
+def parse_rss():
+    """Parse an RSS feed and return episode list with audio enclosure URLs."""
+    if request.method == 'OPTIONS':
+        return '', 204
+    try:
+        import xml.etree.ElementTree as ET
+
+        data = request.json
+        feed_url = data.get('url', '').strip()
+        if not feed_url:
+            return jsonify({"error": "No RSS feed URL provided"}), 400
+
+        resp = requests.get(feed_url, timeout=15, headers={'User-Agent': 'AI-Podcast-Editor/1.0'})
+        if resp.status_code != 200:
+            return jsonify({"error": f"Failed to fetch feed ({resp.status_code})"}), 400
+
+        root = ET.fromstring(resp.content)
+        # Handle RSS 2.0 namespace
+        ns = {}
+        if root.tag.startswith('{'):
+            ns_uri = root.tag.split('}')[0] + '}'
+            ns = {'ns': ns_uri.strip('{}')}
+
+        channel = root.find('channel') or root
+        feed_title = (channel.findtext('title') or '').strip()
+
+        episodes = []
+        items = channel.findall('item') or root.findall('.//item')
+        for i, item in enumerate(items):
+            title = (item.findtext('title') or f'Episode {i + 1}').strip()
+
+            # Get published date
+            pub_date = item.findtext('pubDate') or ''
+
+            # Get audio enclosure URL
+            enclosure = item.find('enclosure')
+            audio_url = None
+            if enclosure is not None:
+                enc_type = enclosure.get('type', '')
+                enc_url = enclosure.get('url', '')
+                if enc_url and ('audio' in enc_type or enc_url.split('?')[0].rsplit('.', 1)[-1].lower() in ('mp3', 'wav', 'm4a', 'aac', 'ogg')):
+                    audio_url = enc_url
+
+            if not audio_url:
+                continue
+
+            # Parse duration if available (itunes:duration)
+            duration = None
+            for child in item:
+                if 'duration' in child.tag.lower():
+                    duration = (child.text or '').strip()
+                    break
+
+            episodes.append({
+                "index": len(episodes),
+                "title": title,
+                "pub_date": pub_date,
+                "audio_url": audio_url,
+                "duration": duration,
+            })
+
+        return jsonify({
+            "success": True,
+            "feed_title": feed_title,
+            "episodes": episodes,
+        })
+    except ET.ParseError:
+        return jsonify({"error": "Invalid RSS feed XML"}), 400
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/import-rss-episode', methods=['POST', 'OPTIONS'])
+def import_rss_episode():
+    """Start transcription for an RSS episode by passing audio URL directly to AssemblyAI."""
+    if request.method == 'OPTIONS':
+        return '', 204
+    try:
+        if not ASSEMBLYAI_API_KEY:
+            return jsonify({"error": "ASSEMBLYAI_API_KEY not configured"}), 500
+
+        data = request.json
+        audio_url = data.get('audio_url', '').strip()
+        title = data.get('title', 'RSS Episode')
+        if not audio_url:
+            return jsonify({"error": "No audio URL provided"}), 400
+
+        # AssemblyAI can fetch from a public URL directly — no need to download
+        transcript_id = start_transcription(audio_url)
+        print(f"RSS import: '{title}' → {transcript_id}")
+
+        return jsonify({
+            "success": True,
+            "transcript_id": transcript_id,
+            "title": title,
+        })
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route('/api/transcript-speakers/<transcript_id>', methods=['GET'])
 def transcript_speakers(transcript_id):
     """Return unique speakers with a sample utterance for each."""

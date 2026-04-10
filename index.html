@@ -111,6 +111,7 @@
             const [transcriptBatchRunning, setTranscriptBatchRunning] = useState(false);
             const [transcriptBatchIndex, setTranscriptBatchIndex] = useState(0);
             const [exportingBatchDoc, setExportingBatchDoc] = useState(false);
+            const [speakerLabels, setSpeakerLabels] = useState([]); // [{id, label, sample}]
 
             // Enhance approval state (set when pipeline pauses for user to review mix)
             const [enhanceApproval, setEnhanceApproval] = useState(null);
@@ -628,7 +629,9 @@
                 if (transcriptFiles.length === 0) return;
                 setTranscriptBatchRunning(true);
                 setTranscriptBatchResults([]);
+                setSpeakerLabels([]);
 
+                let speakersLoaded = false;
                 const results = [];
                 for (let i = 0; i < transcriptFiles.length; i++) {
                     setTranscriptBatchIndex(i);
@@ -666,6 +669,18 @@
                         results[i] = { ...results[i], status: 'completed' };
                         setTranscriptBatchResults([...results]);
 
+                        // Fetch speakers from the first completed transcript
+                        if (!speakersLoaded) {
+                            try {
+                                const spkRes = await fetch(`${API_URL}/api/transcript-speakers/${transcript_id}`);
+                                if (spkRes.ok) {
+                                    const spkData = await spkRes.json();
+                                    setSpeakerLabels(spkData.speakers || []);
+                                    speakersLoaded = true;
+                                }
+                            } catch (e) { console.warn('Failed to fetch speakers:', e); }
+                        }
+
                     } catch (err) {
                         results[i] = { ...results[i], status: 'error', error: err.message || String(err) };
                         setTranscriptBatchResults([...results]);
@@ -685,6 +700,7 @@
                         body: JSON.stringify({
                             transcripts: completed.map(r => ({ transcript_id: r.transcript_id, filename: r.filename })),
                             mode,
+                            speaker_labels: Object.fromEntries(speakerLabels.map(s => [s.id, s.label])),
                         }),
                     });
                     const data = await res.json();
@@ -793,6 +809,7 @@
                 setTranscriptBatchRunning(false);
                 setTranscriptBatchIndex(0);
                 setExportingBatchDoc(false);
+                setSpeakerLabels([]);
                 setShowEditsIndex(null);
                 setEnhanceApproval(null);
                 setFillerAssessment(null);
@@ -1072,6 +1089,27 @@
                                                 <p className="text-purple-200 text-sm font-medium mb-3">
                                                     {transcriptBatchResults.filter(r => r.status === 'completed').length} of {transcriptBatchResults.length} transcripts ready
                                                 </p>
+
+                                                {/* Speaker label editor */}
+                                                {speakerLabels.length > 0 && (
+                                                    <div className="mb-4 bg-white/5 rounded-xl border border-white/10 p-4">
+                                                        <h3 className="text-sm font-semibold text-purple-200 uppercase tracking-wide mb-3">Speaker Labels</h3>
+                                                        <div className="space-y-3">
+                                                            {speakerLabels.map((s, i) => (
+                                                                <div key={s.id} className="flex items-start gap-3">
+                                                                    <input
+                                                                        type="text"
+                                                                        value={s.label}
+                                                                        onChange={e => setSpeakerLabels(prev => prev.map((sp, j) => j === i ? { ...sp, label: e.target.value } : sp))}
+                                                                        className="w-32 shrink-0 bg-white/10 border border-white/20 text-white px-3 py-2 rounded-lg text-sm"
+                                                                    />
+                                                                    <p className="text-purple-300/60 text-xs italic leading-relaxed pt-1.5">"{s.sample}"</p>
+                                                                </div>
+                                                            ))}
+                                                        </div>
+                                                    </div>
+                                                )}
+
                                                 <div className="flex flex-col sm:flex-row gap-3">
                                                     <button
                                                         onClick={() => exportBatchTranscriptsToGoogleDocs('single')}
@@ -1090,7 +1128,7 @@
                                                 </div>
                                                 <div className="text-center mt-4">
                                                     <button
-                                                        onClick={() => { setTranscriptFiles([]); setTranscriptBatchResults([]); setTranscriptBatchIndex(0); }}
+                                                        onClick={() => { setTranscriptFiles([]); setTranscriptBatchResults([]); setTranscriptBatchIndex(0); setSpeakerLabels([]); }}
                                                         className="text-purple-300 hover:text-white text-sm transition-all"
                                                     >
                                                         Transcribe another batch

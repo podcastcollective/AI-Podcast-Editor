@@ -4693,12 +4693,36 @@ def export_transcript_google_doc(transcript_id):
         return jsonify({"error": str(e)}), 500
 
 
+@app.route('/api/transcript-speakers/<transcript_id>', methods=['GET'])
+def transcript_speakers(transcript_id):
+    """Return unique speakers with a sample utterance for each."""
+    try:
+        tx = get_transcription(transcript_id)
+        if tx.get('status') != 'completed':
+            return jsonify({"error": "Transcript not ready"}), 400
+        utterances = tx.get('utterances', [])
+        speakers = {}
+        for utt in utterances:
+            spk = utt.get('speaker', '?')
+            if spk not in speakers:
+                text = utt.get('text', '')
+                # Truncate sample to ~120 chars
+                sample = text[:120] + ('...' if len(text) > 120 else '')
+                speakers[spk] = sample
+        result = [{"id": spk, "label": f"Speaker {spk}", "sample": sample}
+                  for spk, sample in speakers.items()]
+        return jsonify({"speakers": result})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route('/api/export-batch-transcripts-google-doc', methods=['POST', 'OPTIONS'])
 def export_batch_transcripts_google_doc():
     """Export multiple transcripts to Google Docs.
 
     Accepts: {"transcripts": [{"transcript_id": "...", "filename": "..."}, ...],
-              "mode": "single"|"multi"}
+              "mode": "single"|"multi",
+              "speaker_labels": {"A": "Jon", "B": "Sarah", ...}}
     mode "single" = one Google Doc with all transcripts
     mode "multi" = one Google Doc per transcript (returns list of URLs)
     """
@@ -4716,6 +4740,7 @@ def export_batch_transcripts_google_doc():
         data = request.json
         transcripts = data.get('transcripts', [])
         mode = data.get('mode', 'single')
+        speaker_labels = data.get('speaker_labels', {})
         if not transcripts:
             return jsonify({"error": "No transcripts provided"}), 400
 
@@ -4737,9 +4762,10 @@ def export_batch_transcripts_google_doc():
             lines = []
             for utt in utterances:
                 start = format_timestamp(utt.get('start', 0))
-                speaker = utt.get('speaker', '?')
+                spk_id = utt.get('speaker', '?')
+                label = speaker_labels.get(spk_id, f"Speaker {spk_id}")
                 text = utt.get('text', '')
-                lines.append(f"[{start}] Speaker {speaker}: {text}")
+                lines.append(f"[{start}] {label}: {text}")
             return "\n\n".join(lines)
 
         if mode == 'multi':

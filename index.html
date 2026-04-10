@@ -672,14 +672,16 @@
                 const selected = rssEpisodes.filter((_, i) => rssSelected.has(i));
                 if (selected.length === 0) return;
                 setTranscriptBatchRunning(true);
-                setTranscriptBatchResults([]);
                 setEpisodeSpeakers({});
 
-                const results = [];
+                // Pre-populate all results so the full list is visible immediately
+                const results = selected.map(ep => ({ filename: ep.title, status: 'pending' }));
+                setTranscriptBatchResults([...results]);
+
                 for (let i = 0; i < selected.length; i++) {
                     const ep = selected[i];
                     setTranscriptBatchIndex(i);
-                    results.push({ filename: ep.title, status: 'uploading' });
+                    results[i] = { ...results[i], status: 'uploading' };
                     setTranscriptBatchResults([...results]);
 
                     try {
@@ -736,13 +738,14 @@
             const runTranscriptBatch = async () => {
                 if (transcriptFiles.length === 0) return;
                 setTranscriptBatchRunning(true);
-                setTranscriptBatchResults([]);
                 setEpisodeSpeakers({});
 
-                const results = [];
+                const results = transcriptFiles.map(f => ({ filename: f.name, status: 'pending' }));
+                setTranscriptBatchResults([...results]);
+
                 for (let i = 0; i < transcriptFiles.length; i++) {
                     setTranscriptBatchIndex(i);
-                    results.push({ filename: transcriptFiles[i].name, status: 'uploading' });
+                    results[i] = { ...results[i], status: 'uploading' };
                     setTranscriptBatchResults([...results]);
 
                     try {
@@ -1269,7 +1272,7 @@
                                     <div>
                                         {transcriptBatchRunning && (
                                             <p className="text-purple-200 text-sm font-medium mb-3">
-                                                Transcribing episode {transcriptBatchIndex + 1} of {transcriptFiles.length}...
+                                                Transcribing episode {transcriptBatchIndex + 1} of {transcriptBatchResults.length}...
                                             </p>
                                         )}
 
@@ -1279,13 +1282,15 @@
                                                 if (r.status === 'completed') { icon = '\u2713'; textColor = 'text-green-400'; }
                                                 else if (r.status === 'error') { icon = '\u2717'; textColor = 'text-red-400'; }
                                                 else if (r.status === 'transcribing') { icon = '\u27F3'; textColor = 'text-white'; }
-                                                else { icon = '\u2191'; textColor = 'text-purple-300'; }
+                                                else if (r.status === 'uploading') { icon = '\u2191'; textColor = 'text-purple-300'; }
+                                                else { icon = '\u25CB'; textColor = 'text-white/30'; }
                                                 return (
                                                     <div key={i} className={`flex items-center gap-2 bg-white/5 rounded-lg px-3 py-2 text-sm ${textColor}`}>
                                                         <span className="w-5 text-center">{icon}</span>
                                                         <span className="flex-1 truncate">{r.filename}</span>
                                                         <span className="text-xs opacity-60">
-                                                            {r.status === 'uploading' ? 'Uploading...' :
+                                                            {r.status === 'pending' ? 'Waiting...' :
+                                                             r.status === 'uploading' ? 'Uploading...' :
                                                              r.status === 'transcribing' ? 'Transcribing...' :
                                                              r.status === 'completed' ? 'Done' :
                                                              r.error || 'Error'}
